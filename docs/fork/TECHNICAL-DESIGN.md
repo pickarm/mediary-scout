@@ -28,7 +28,7 @@
 前端复用现有CSS token及组件，demo独立使用mock数据。扫描身份确认不引入下载资源的手动选择流程。
 
 ## 部署与迁移
-一个standalone应用镜像，外接MEDIA_TRACK_POSTGRES_URL、REDIS_URL、PanSou。GitHub Actions通过DockerHub变量和secret发布linux/amd64，发布前校验镜像启动。Fork发行信息不再要求桌面安装包。
+一个standalone应用镜像，外接MEDIA_TRACK_POSTGRES_URL、REDIS_URL、PanSou。源码Fork为pickarm/mediary-scout，用户确认Docker Hub命名空间qicket，镜像为qicket/mediary-scout。GitHub Actions通过DockerHub变量和secret发布linux/amd64，发布前校验镜像启动。Fork发行信息不再要求桌面安装包。
 演练模式统一拒绝真实网盘写入并关闭自动worker；先验证数据库导入和只读状态，再在物理隔离的光鸭目录做真实验证。旧实例停写后才能启用新实例。回退数据库前需停止全部新worker。
 
 ## 验证
