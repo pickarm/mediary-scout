@@ -4,8 +4,8 @@
 基线：282ef781edf876d2c7ecbadbc8d2bd147759006e。Next.js Web + 进程内 worker，沿用 PostgreSQL 持久化和原有 Agent。新增 library 业务模块，接口依赖注入，测试不访问真实网盘。
 
 ## 模块契约
-- `library/types.ts`：扫描授权、文件事实、身份候选、目录绑定、导入、整理清单的公共类型。scan root 与目标目录均绑定 accountId/connectedStorageId。
-- `library/store.ts`：PG扫描任务/检查点/候选/操作状态持久化与导入事务；使用增量DDL，初始化纳入既有schema锁。扫描导入不伪造workflow run。
+- `library/types.ts`：导入、物理副本与目录绑定契约；扫描、识别、整理各自模块维护其公开类型，避免单一共享类型文件反复冲突。scan root 与目标目录均绑定 accountId/connectedStorageId。
+- `library/store.ts`：PG导入事务与物理绑定；`scan-store.ts`维护扫描任务/检查点，`organization-store.ts`维护整理清单。各自使用固定增量DDL锁并先确保所需前置schema。扫描导入不伪造workflow run。
 - `library/naming.ts`：无副作用模板解析与渲染。字段 title/originalTitle/year/tmdbId/season/episode/episodeCode/resolution/edition/originalName/ext；仅允许确定的字段，禁止执行表达式、绝对路径、..或路径分隔符注入。ext保留源扩展名。
 - `library/scanner.ts`：在授权根下逐目录分页遍历，生成文件事实与父子关系，保存检查点。独立于识别与整理；不调用资源搜索或转存。
 - `library/identification.ts`：证据解析、TMDB候选确认与可注入AI建议。无法唯一确定则pending，不改变文件。
@@ -23,9 +23,21 @@
 光鸭账号级协调入口覆盖转存、整理及扫描请求；写任务单独持有互斥权，读取请求受共享节流和获取优先级约束。不会放开原获取沙箱的protected root。
 未知写结果先回读，确认文件ID/位置/名称再标记完成；不依据客户端的乐观返回更新库。鉴权失败冻结任务，限流退避，资源源错误与无资源分开显示。
 
+协调分两层验收：F07a只调度单个HTTP fetch，默认最小起始间隔500ms，同provider账号共享，写优先且每三次写后服务一个等候读取，429响应只冷却后续请求。F07b对整段获取/整理/落盘核对使用PG账号锁；进程退出由数据库释放，锁连接丢失后禁止发出新的写请求。搜索准备不持有写锁。多网盘任务涉及多个光鸭账号时按稳定顺序获取锁，避免互相等待。所有现有生产runner、恢复和临时目录清理须纳入，不能只保护新整理入口。
+
 ## Web接口与权限
 新增库管理入口，服务端按当前账号验证storage归属。配置保存、扫描操作、身份确认、命名预览、整理操作使用同源认证与CSRF/Origin防护；客户端不能自行决定账号或扩大扫描授权。
 前端复用现有CSS token及组件，demo独立使用mock数据。扫描身份确认不引入下载资源的手动选择流程。
+
+接口分工先冻结以下边界，后续单功能开发不得交叉改动：
+- `/api/library/configurations`：列出和保存当前账号指定光鸭连接的扫描配置；模板在服务端用F01解析。配置修改遵循活动任务保护。
+- `/api/library/directories`：只读、单页目录选择；用已有连接的凭证访问，不触发获取目录自动创建。用户明确选择的任意已有根仅授权扫描和经预览后的整理，不改变获取沙箱。
+- `/api/library/scans`：创建、列出扫描；`/api/library/scans/[taskId]`读取有界摘要，POST执行pause/resume/cancel/retry。结果和失败记录使用游标分页，不返回全库事实。
+- 身份识别、身份确认和导入由独立接口/后台服务负责，F08a扫描控制不执行识别或导入。整理预览/执行也使用独立入口，只接收任务、模板及已持久化确认的文件ID，不接受浏览器提供的目录关系图或可信身份声明。
+- 所有变更入口服务端解析账号并验证同源，客户端仅选择storageId；未知或其他账号的连接均拒绝，不回退默认网盘。演示模式禁止真实修改。
+- 新增`@media-track/workflow/library`子入口集中导出已审核模块，保留原包入口兼容。Web新增library runtime共享小连接池与单例扫描服务，不复制原worker或创建第二套凭证存储。
+
+整理的生产授权必须回查该任务的持久化配置、扫描事实和F02导入绑定。纯计划函数仅供预览/单测，不形成写权限。执行及恢复前重新验证授权；网盘写请求仍需账号级整任务互斥。
 
 ## 部署与迁移
 一个standalone应用镜像，外接MEDIA_TRACK_POSTGRES_URL、REDIS_URL、PanSou。源码Fork为pickarm/mediary-scout，用户确认Docker Hub命名空间qicket，镜像为qicket/mediary-scout。GitHub Actions通过DockerHub变量和secret发布linux/amd64，发布前校验镜像启动。Fork发行信息不再要求桌面安装包。
