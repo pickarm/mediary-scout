@@ -2259,7 +2259,10 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
     // conflict (ownership + workspace are immutable; re-saves only update payload).
     await client.query(
       "INSERT INTO tracked_seasons (id, media_title_id, account_id, connected_storage_id, payload) VALUES ($1, $2, $3, $4, $5::jsonb) " +
-        "ON CONFLICT (id, connected_storage_id) DO UPDATE SET media_title_id = EXCLUDED.media_title_id, payload = EXCLUDED.payload",
+        "ON CONFLICT (id, connected_storage_id) DO UPDATE SET media_title_id = EXCLUDED.media_title_id, " +
+        "payload = CASE WHEN tracked_seasons.payload ? 'autoAcquire' " +
+        "THEN jsonb_set(EXCLUDED.payload, '{autoAcquire}', tracked_seasons.payload->'autoAcquire', true) " +
+        "ELSE EXCLUDED.payload - 'autoAcquire' END",
       [season.id, season.mediaTitleId, accountId, connectedStorageId, json(season)],
     );
   }

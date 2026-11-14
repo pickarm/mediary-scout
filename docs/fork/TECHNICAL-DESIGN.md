@@ -17,7 +17,7 @@
 ## 持久化与导入
 新增扫描配置、扫描任务、目录事实、文件身份、物理绑定、整理操作和准备结果表。所有表含account及storage分区，并有可重复执行的初始化。
 导入事务按文件ID去重，同时维护现有media_titles、tracked_seasons、episode_states、episode_copies；季的逻辑目录与各副本实际目录分开。追更开关为向后兼容的可选字段：缺省沿用原行为，扫描新作品显式false，重扫不覆盖已有设置。
-目录查找首先按持久绑定的ID，名称仅用于首次发现。支持movie/tv的TMDB数值相同而互不污染。
+目录查找首先按持久绑定的ID，名称仅用于首次发现。共享目录可关联多个作品，不得因暂时仅识别出一个作品就认定为专属；用于后续获取的目录需要明确的专属证据，默认不可作为获取清理目标。双集视频可由同一个文件ID关联多个episode，解除追踪清理库绑定而不删除网盘资源。支持movie/tv的TMDB数值相同而互不污染，anime遵循原有tmdb_tv命名空间。
 
 ## 网盘协调与错误处理
 光鸭账号级协调入口覆盖转存、整理及扫描请求；写任务单独持有互斥权，读取请求受共享节流和获取优先级约束。不会放开原获取沙箱的protected root。
@@ -28,7 +28,7 @@
 前端复用现有CSS token及组件，demo独立使用mock数据。扫描身份确认不引入下载资源的手动选择流程。
 
 ## 部署与迁移
-一个standalone应用镜像，外接MEDIA_TRACK_POSTGRES_URL、REDIS_URL、PanSou。GitHub Actions通过DockerHub变量和secret发布linux/amd64，发布前校验镜像启动。Fork发行信息不再要求桌面安装包。
+一个standalone应用镜像，外接MEDIA_TRACK_POSTGRES_URL、REDIS_URL、PanSou。源码Fork为pickarm/mediary-scout，用户确认Docker Hub命名空间qicket，镜像为qicket/mediary-scout。GitHub Actions通过DockerHub变量和secret发布linux/amd64，发布前校验镜像启动。Fork发行信息不再要求桌面安装包。
 演练模式统一拒绝真实网盘写入并关闭自动worker；先验证数据库导入和只读状态，再在物理隔离的光鸭目录做真实验证。旧实例停写后才能启用新实例。回退数据库前需停止全部新worker。
 
 ## 验证
