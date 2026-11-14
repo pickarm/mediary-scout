@@ -438,7 +438,7 @@ export function formatBytes(bytes: number): string {
  * exposed "几百 MB 不是 4K"). Undefined when size facts are absent — omit, never
  * guess (the same contract the old quality line used).
  */
-export function landedSize(report: NotificationReport): { label: string; value: string } | undefined {
+export function landedSize(report: Pick<NotificationReport, "fileCount" | "totalBytes" | "status" | "mediaType">): { label: string; value: string } | undefined {
   const { fileCount, totalBytes } = report;
   if (fileCount === undefined || totalBytes === undefined || fileCount <= 0 || totalBytes <= 0) {
     return undefined;

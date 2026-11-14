@@ -23,7 +23,9 @@ export interface ScanConfiguration {
   scope: ScanScope;
   sourceRoots: readonly ScanRoot[];
   movieTargetDirectoryId: string | null;
+  movieTargetDirectoryName?: string | null;
   tvTargetDirectoryId: string | null;
+  tvTargetDirectoryName?: string | null;
   mediaKind: ScanMediaKind;
   dailyScheduleEnabled: boolean;
   dailyScheduleTime: string | null;

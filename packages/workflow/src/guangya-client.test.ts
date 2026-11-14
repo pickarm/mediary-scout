@@ -116,6 +116,33 @@ describe("GuangYaClient.validateToken", () => {
   });
 });
 
+describe("GuangYaClient beforeWrite fence", () => {
+  it("checks only actual provider mutations inside the scheduled fetch slot", async () => {
+    const fetchImpl = mockFetch(async (url) => url.includes("get_file_list")
+      ? jsonResponse(200, { msg: "success", data: { list: [] } })
+      : jsonResponse(200, { msg: "success", data: { fileId: "created" } }));
+    const beforeWrite = vi.fn(async () => {});
+    const client = new GuangYaClient({ accessToken: ACCESS, refreshToken: REFRESH, fetchImpl, beforeWrite });
+    await client.listFilesPage("root", 0);
+    expect(beforeWrite).not.toHaveBeenCalled();
+    await client.createDir("root", "Movie");
+    expect(beforeWrite).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not send a mutation when the fence has been lost", async () => {
+    const fetchImpl = mockFetch(async () => jsonResponse(200, { msg: "success", data: { fileId: "created" } }));
+    const client = new GuangYaClient({
+      accessToken: ACCESS,
+      refreshToken: REFRESH,
+      fetchImpl,
+      beforeWrite: async () => { throw new Error("GUANGYA_WRITE_LOCK_LOST"); },
+    });
+    await expect(client.createDir("root", "Movie")).rejects.toThrow("GUANGYA_WRITE_LOCK_LOST");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
 describe("GuangYaClient.listFiles", () => {
   it("sends Bearer+Did+Dt:4 to get_file_list and parses data.list (code is null)", async () => {
     const fetchImpl = mockFetch(async () =>

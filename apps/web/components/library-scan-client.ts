@@ -1,0 +1,131 @@
+export interface SafeLibraryStorage {
+  id: string;
+  label: string;
+  status: "active" | "frozen";
+}
+
+export interface LibraryDirectoryChoice {
+  directoryId: string;
+  name: string;
+  selectionToken: string;
+}
+
+export interface LibraryScanRoot {
+  directoryId: string;
+  name: string;
+}
+
+export interface LibraryScanConfiguration {
+  configId: string;
+  scope: { accountId: string; connectedStorageId: string };
+  sourceRoots: readonly LibraryScanRoot[];
+  movieTargetDirectoryId: string | null;
+  movieTargetDirectoryName?: string | null;
+  tvTargetDirectoryId: string | null;
+  tvTargetDirectoryName?: string | null;
+  mediaKind: "movie" | "tv" | "mixed";
+  dailyScheduleEnabled: boolean;
+  dailyScheduleTime: string | null;
+  dailyScheduleTimezone: "Asia/Shanghai";
+  autoOrganize: boolean;
+  autoAcquire: false;
+  templates: Readonly<Record<string, string>>;
+}
+
+export type LibraryScanStatus = "queued" | "running" | "paused" | "cancelling" | "cancelled" | "completed" | "partial" | "failed";
+
+export interface LibraryScanTask {
+  taskId: string;
+  configId: string;
+  status: LibraryScanStatus;
+  directoriesDone: number;
+  filesDiscovered: number;
+  directoriesDiscovered: number;
+  failures: readonly { directoryId: string; page: number; message: string }[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LibraryScanConfigPayload {
+  configId?: string;
+  storageId: string;
+  sourceRoots: readonly ({ directoryId: string; selectionToken?: string })[];
+  movieTargetDirectoryId: string | null;
+  movieTargetSelectionToken?: string;
+  tvTargetDirectoryId: string | null;
+  tvTargetSelectionToken?: string;
+  mediaKind: "movie" | "tv" | "mixed";
+  dailyScheduleEnabled: boolean;
+  dailyScheduleTime: string | null;
+  templates: Readonly<Record<string, string>>;
+}
+
+export async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetch(url, { ...init, headers: { ...(init.body ? { "content-type": "application/json" } : {}), ...init.headers } });
+  let body: unknown;
+  try { body = await response.json() as unknown; }
+  catch {
+    if (init.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    throw new Error("服务器返回了无法读取的响应，请重试。");
+  }
+  if (init.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+  if (!response.ok) {
+    const message = body && typeof body === "object" && "error" in body && typeof body.error === "string" ? body.error : "请求失败，请稍后重试。";
+    throw new Error(message);
+  }
+  return body as T;
+}
+
+function storageQuery(storageId: string, extra: Record<string, string> = {}): string {
+  const query = new URLSearchParams({ storageId, ...extra });
+  return query.toString();
+}
+
+export async function loadAllScanConfigurations(storageId: string, signal?: AbortSignal): Promise<LibraryScanConfiguration[]> {
+  const configurations: LibraryScanConfiguration[] = [];
+  let cursor: string | null = null;
+  do {
+    const query = storageQuery(storageId, { limit: "50", ...(cursor ? { cursor } : {}) });
+    const result = await requestJson<{ items: LibraryScanConfiguration[]; nextCursor: string | null }>(`/api/library/configurations?${query}`, signal ? { signal } : {});
+    configurations.push(...result.items);
+    cursor = result.nextCursor;
+  } while (cursor);
+  return configurations;
+}
+
+export async function loadScanTaskPage(storageId: string, cursor: string | null, signal?: AbortSignal): Promise<{ items: LibraryScanTask[]; nextCursor: string | null; hasMore: boolean }> {
+  const query = storageQuery(storageId, { limit: "20", ...(cursor ? { cursor } : {}) });
+  return requestJson(`/api/library/scans?${query}`, signal ? { signal } : {});
+}
+
+export async function loadDirectoryPage(storageId: string, parentId: string, page: number, signal?: AbortSignal): Promise<{ items: LibraryDirectoryChoice[]; nextPage: number | null }> {
+  const query = storageQuery(storageId, { parentId, page: String(page) });
+  return requestJson(`/api/library/directories?${query}`, signal ? { signal } : {});
+}
+
+export async function saveScanConfiguration(payload: LibraryScanConfigPayload, signal?: AbortSignal): Promise<LibraryScanConfiguration> {
+  const result = await requestJson<{ item: LibraryScanConfiguration }>("/api/library/configurations", {
+    method: "POST", ...(signal ? { signal } : {}), body: JSON.stringify(payload),
+  });
+  return result.item;
+}
+
+export async function startLibraryScan(storageId: string, configId: string, signal?: AbortSignal): Promise<LibraryScanTask> {
+  const result = await requestJson<{ item: LibraryScanTask }>("/api/library/scans", {
+    method: "POST", ...(signal ? { signal } : {}), body: JSON.stringify({ storageId, configId }),
+  });
+  return result.item;
+}
+
+export async function controlLibraryScan(storageId: string, taskId: string, action: "pause" | "resume" | "cancel" | "retry", signal?: AbortSignal): Promise<LibraryScanTask> {
+  const result = await requestJson<{ item: LibraryScanTask }>(`/api/library/scans/${encodeURIComponent(taskId)}`, {
+    method: "POST", ...(signal ? { signal } : {}), body: JSON.stringify({ storageId, action }),
+  });
+  return result.item;
+}
+
+export async function refreshLibraryScan(storageId: string, taskId: string, signal?: AbortSignal): Promise<LibraryScanTask> {
+  const result = await requestJson<{ item: LibraryScanTask }>(`/api/library/scans/${encodeURIComponent(taskId)}?${storageQuery(storageId)}`, signal ? { signal } : {});
+  return result.item;
+}
+

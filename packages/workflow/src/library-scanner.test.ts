@@ -12,7 +12,7 @@ import {
 } from "./library/scanner.js";
 import { PostgresScanStore } from "./library/scan-store.js";
 
-const adminConnectionString = process.env.MEDIA_TRACK_TEST_POSTGRES_ADMIN_URL ?? process.env.TEST_POSTGRES_ADMIN;
+const adminConnectionString = process.env.MEDIA_TRACK_TEST_POSTGRES_ADMIN_URL;
 const integration = describe.skipIf(!adminConnectionString);
 let adminPool: pg.Pool;
 let pool: pg.Pool;
@@ -28,7 +28,7 @@ async function createScope(): Promise<ScanScope> {
     [accountId,`user_${suffix}`],
   );
   await pool.query(
-    "INSERT INTO connected_storages (id,account_id,provider,provider_uid,payload,created_at) VALUES ($1,$2,'guangyapan',$3,'{}'::jsonb,now()::text)",
+    "INSERT INTO connected_storages (id,account_id,provider,provider_uid,payload,created_at) VALUES ($1,$2,'guangya',$3,'{}'::jsonb,now()::text)",
     [connectedStorageId,accountId,`uid_${suffix}`],
   );
   return { accountId, connectedStorageId };
@@ -123,6 +123,33 @@ integration("F04 authorized directory scanner", () => {
       ["dir-a", "root", "done"], ["dir-b", "dir-a", "done"], ["root", null, "done"],
     ]);
     await expect(store.getTask({ accountId: "other-account", connectedStorageId: scope.connectedStorageId }, task.taskId)).rejects.toThrow(/不属于指定账号/);
+  }, 30_000);
+
+  it("keyset-pages configurations and task summaries in the real guangya scope", async () => {
+    const scope = await createScope();
+    const store = new PostgresScanStore(pool);
+    const first = { ...makeConfig(scope), configId: "f04-page-a" };
+    const second = { ...makeConfig(scope), configId: "f04-page-b" };
+    await store.saveConfiguration(first);
+    await store.saveConfiguration(second);
+    expect((await store.listConfigurations(scope, 1)).map((item) => item.configId)).toEqual(["f04-page-a"]);
+    expect((await store.listConfigurations(scope, 1, "f04-page-a")).map((item) => item.configId)).toEqual(["f04-page-b"]);
+    expect(await store.listConfigurations(scope, 1, "f04-page-b")).toEqual([]);
+
+    const makeEmptyScanner = (taskId: string) => new LibraryScanner({
+      store,
+      idFactory: () => taskId,
+      reader: { async listPage() { return { items: [], nextPage: null }; } },
+    });
+    for (const [config, taskId] of [[first, "f04-page-task-a"], [second, "f04-page-task-b"]] as const) {
+      const scanner = makeEmptyScanner(taskId);
+      const task = await scanner.start(scope, config.configId);
+      expect((await scanner.waitForIdle(scope, task.taskId)).status).toBe("completed");
+    }
+    const firstPage = await store.listTasks(scope, { limit: 1 });
+    expect(firstPage.map((task) => task.taskId)).toEqual(["f04-page-task-a"]);
+    expect((await store.listTasks(scope, { limit: 1, afterTaskId: "f04-page-task-a" })).map((task) => task.taskId)).toEqual(["f04-page-task-b"]);
+    expect(firstPage[0]?.failures).toEqual([]);
   }, 30_000);
 
   it("pauses at a page boundary and resumes from the durable page checkpoint", async () => {
