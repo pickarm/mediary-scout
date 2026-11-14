@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { apiErrorResponse, decodeCursor, encodeCursor, libraryAccount, parseLimit, readJson, requireString, LibraryApiError } from "../../../../lib/library-api";
 import { getLibraryServices } from "../../../../lib/library-runtime";
+import { getLibraryIdentificationService, watchLibraryScanForIdentification } from "../../../../lib/library-identification-runtime";
 
 export async function GET(request: NextRequest): Promise<Response> {
   try {
@@ -27,6 +28,9 @@ export async function POST(request: NextRequest): Promise<Response> {
     const scope = { accountId, connectedStorageId: storageId };
     const { scanner } = await getLibraryServices(scope);
     const task = await scanner.start(scope, configId);
+    const identification = await getLibraryIdentificationService(scope);
+    await identification.enqueueForScan(scope, task.taskId);
+    void watchLibraryScanForIdentification(scope, task.taskId).catch(() => undefined);
     const { scope: _scope, ...dto } = task;
     return Response.json({ item: dto }, { status: 202 });
   } catch (error) { return apiErrorResponse(error); }

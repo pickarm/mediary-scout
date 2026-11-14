@@ -4,4 +4,6 @@ export * from "./store.js";
 export * from "./scanner.js";
 export * from "./scan-store.js";
 export * from "./identification.js";
+export * from "./identification-store.js";
+export * from "./identification-service.js";
 export * from "./guangya-request-scheduler.js";

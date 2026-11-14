@@ -21,6 +21,19 @@ export const LIBRARY_SCHEMA_ADVISORY_LOCK_KEY = 4_011_989_142;
  *  It is provenance only: import never creates a workflow_runs row. */
 export const LIBRARY_IMPORT_PROVENANCE = "library-import";
 
+/** PostgreSQL-only hooks for atomically coordinating existing-file identity rows with F02. */
+export interface ExistingMediaImportTransactionHooks {
+  accountId: string;
+  connectedStorageId: string;
+  fileIds: readonly string[];
+  beforeImport(client: PoolClient): Promise<boolean>;
+  afterImport(client: PoolClient, result: ImportExistingMediaResult | null): Promise<void>;
+}
+
+export class ExistingMediaImportHookError extends Error {
+  constructor(cause: unknown) { super("Existing-media transaction hook failed", { cause }); this.name = "ExistingMediaImportHookError"; }
+}
+
 const LIBRARY_SCHEMA = `
   CREATE TABLE IF NOT EXISTS library_directory_bindings (
     account_id text NOT NULL,
@@ -520,6 +533,54 @@ export class PostgresLibraryStore implements LibraryStore {
     const normalized = validateImport(input);
     await this.ensureSchema();
     const boundAt = input.now ?? new Date().toISOString();
+    return this.withTransaction(async (client) => {
+      await this.assertStorageOwnership(client, input.accountId, input.connectedStorageId);
+      return this.importExistingMediaInTransaction(client, input, normalized, boundAt);
+    });
+  }
+
+  /** Runs recognition-result hooks and the normal F02 import body in one short transaction. */
+  async importExistingMediaWithTransactionHooks(
+    input: ImportExistingMediaInput | null,
+    hooks: ExistingMediaImportTransactionHooks,
+  ): Promise<ImportExistingMediaResult | null> {
+    const normalized = input === null ? null : validateImport(input);
+    const fileIds = [...new Set(hooks.fileIds)].sort((left, right) => left.localeCompare(right));
+    if (!hooks.accountId.trim() || !hooks.connectedStorageId.trim() || fileIds.length === 0 || fileIds.length > 500 || fileIds.some((fileId) => !fileId.trim())) {
+      throw new LibraryImportInputError("Transaction hook scope and file IDs are required");
+    }
+    if (input && (input.accountId !== hooks.accountId || input.connectedStorageId !== hooks.connectedStorageId)) {
+      throw new LibraryStorageScopeError("Transaction hook scope does not match import scope");
+    }
+    const normalizedFileIds = input ? [...new Set(normalized!.files.map((file) => file.fileId))].sort((left, right) => left.localeCompare(right)) : [];
+    if (input && (normalizedFileIds.length !== fileIds.length || normalizedFileIds.some((fileId, index) => fileId !== fileIds[index]))) {
+      throw new LibraryImportInputError("Transaction hook file IDs must exactly match import files");
+    }
+    await this.ensureSchema();
+    const boundAt = input?.now ?? new Date().toISOString();
+    return this.withTransaction(async (client) => {
+      await this.assertStorageOwnership(client, hooks.accountId, hooks.connectedStorageId);
+      for (const fileId of fileIds) {
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+          `library_file:${hooks.accountId}:${hooks.connectedStorageId}:${fileId}`,
+        ]);
+      }
+      const shouldImport = await hooks.beforeImport(client);
+      const result = input && shouldImport
+        ? await this.importExistingMediaInTransaction(client, input, normalized!, boundAt)
+        : null;
+      try { await hooks.afterImport(client, result); }
+      catch (error) { throw new ExistingMediaImportHookError(error); }
+      return result;
+    });
+  }
+
+  private async importExistingMediaInTransaction(
+    client: PoolClient,
+    input: ImportExistingMediaInput,
+    normalized: ReturnType<typeof validateImport>,
+    boundAt: string,
+  ): Promise<ImportExistingMediaResult> {
     const { title, season } = input;
     const metadataByCode = new Map(input.episodes.map((episode) => [episode.episodeCode, episode]));
     const filesByCode = new Map<string, NormalizedPhysicalFile[]>();
@@ -530,9 +591,6 @@ export class PostgresLibraryStore implements LibraryStore {
         filesByCode.set(episodeCode, list);
       }
     }
-
-    return this.withTransaction(async (client) => {
-      await this.assertStorageOwnership(client, input.accountId, input.connectedStorageId);
 
       await this.upsertMediaTitle(client, title);
 
@@ -751,7 +809,6 @@ export class PostgresLibraryStore implements LibraryStore {
         alreadyImportedFiles,
         directoryBindings,
       };
-    });
   }
 
   async findDirectoryBinding(input: FindDirectoryBindingInput): Promise<LibraryDirectoryBinding | null> {
