@@ -696,6 +696,7 @@ export async function runScheduledType3Monitoring(input: {
   }
   const patrolStatesBySeasonKey = new Map<string, (typeof trackedStates)[number]>();
   for (const s of trackedStates) {
+    if (s.season.autoAcquire === false) continue;
     const key = workKey({ accountId: s.accountId, drive: userMessageDrive(s.connectedStorageId), titleKey: s.title.id });
     if (requestKeys.has(key) || busyKeys.has(key)) continue;
     if (await onFrozenDrive(s.accountId, s.connectedStorageId)) continue;
@@ -763,6 +764,12 @@ async function patrolTrackedState(args: {
   now: () => string;
 }): Promise<ScheduledType3Outcome | null> {
   const { input, state, now } = args;
+  // Existing-library imports default to no unattended acquisition. Keep the
+  // legacy behavior when the optional field is absent, and leave explicit user
+  // acquisition requests on the ordinary queue path unaffected.
+  if (state.season.autoAcquire === false) {
+    return null;
+  }
   {
     const deps = await resolveWorkerDeps(
       input.resolveAccountContext,
