@@ -33,19 +33,22 @@ function post(body: unknown): NextRequest {
 
 describe("configuration source directory authorization", () => {
   const saved: unknown[] = [];
+  let previous: { sourceRoots: Array<{ directoryId: string; name: string }>; movieTargetDirectoryId: string | null; movieTargetDirectoryName?: string | null; tvTargetDirectoryId: string | null; tvTargetDirectoryName?: string | null } | null = null;
   const listing = vi.fn(async (parentId: string, page: number, pageSize?: number) => {
     expect(pageSize).toBe(200);
     if (parentId === "parent-deep" && page === 17) return { items: [{ fileId: "dir-deep", parentId, fileName: "Season 2", fileSize: 0, resType: 2 }], hasMore: false };
+    if (parentId === "target-parent" && page === 3) return { items: [{ fileId: "target-dir", parentId, fileName: "电影归档", fileSize: 0, resType: 2 }], hasMore: false };
     return { items: [], hasMore: false };
   });
 
   beforeEach(() => {
     saved.length = 0;
+    previous = null;
     listing.mockClear();
     mocks.getServices.mockResolvedValue({
       client: { listFilesPage: listing },
       scanStore: {
-        getConfiguration: vi.fn(async () => null),
+        getConfiguration: vi.fn(async () => previous),
         saveConfiguration: vi.fn(async (value: unknown) => { saved.push(value); }),
       },
     });
@@ -83,5 +86,65 @@ describe("configuration source directory authorization", () => {
     listing.mockImplementationOnce(async (parentId, page) => ({ items: [{ fileId: "dir-deep", parentId, fileName: "Season 2", fileSize: 5, resType: 1 }], hasMore: false }));
     const notDirectory = await POST(post({ storageId: "storage-a", sourceRoots: [{ directoryId: "dir-deep", selectionToken: valid }], mediaKind: "mixed", templates: templateSet }));
     expect(notDirectory.status).toBe(400);
+  });
+
+  it("derives target display names from the verified parent page and retains a saved name for the same ID", async () => {
+    const ticket = issueDirectorySelectionTicket({
+      ...scope, directoryId: "target-dir", parentId: "target-parent", name: "电影归档", page: 3,
+    });
+    const response = await POST(post({
+      storageId: "storage-a", sourceRoots: [{ directoryId: "dir-deep", selectionToken: issueDirectorySelectionTicket({
+        ...scope, directoryId: "dir-deep", parentId: "parent-deep", name: "Season 2", page: 17,
+      }) }],
+      movieTargetDirectoryId: "target-dir", movieTargetSelectionToken: ticket,
+      tvTargetDirectoryId: null, mediaKind: "mixed", templates: templateSet,
+    }));
+    expect(response.status).toBe(201);
+    expect(saved.at(-1)).toMatchObject({ movieTargetDirectoryId: "target-dir", movieTargetDirectoryName: "电影归档" });
+
+    previous = {
+      sourceRoots: [{ directoryId: "dir-deep", name: "Season 2" }],
+      movieTargetDirectoryId: "target-dir", movieTargetDirectoryName: "电影归档",
+      tvTargetDirectoryId: null,
+    };
+    const retained = await POST(post({
+      storageId: "storage-a", sourceRoots: [{ directoryId: "dir-deep" }],
+      movieTargetDirectoryId: "target-dir", tvTargetDirectoryId: null, mediaKind: "mixed", templates: templateSet,
+    }));
+    expect(retained.status).toBe(201);
+    expect(saved.at(-1)).toMatchObject({ movieTargetDirectoryId: "target-dir", movieTargetDirectoryName: "电影归档" });
+
+    previous = {
+      sourceRoots: [{ directoryId: "dir-deep", name: "Season 2" }],
+      movieTargetDirectoryId: "target-dir", tvTargetDirectoryId: null,
+    };
+    const legacyRetained = await POST(post({
+      storageId: "storage-a", sourceRoots: [{ directoryId: "dir-deep" }],
+      movieTargetDirectoryId: "target-dir", tvTargetDirectoryId: null, mediaKind: "mixed", templates: templateSet,
+    }));
+    expect(legacyRetained.status).toBe(201);
+    expect(saved.at(-1)).toMatchObject({ movieTargetDirectoryId: "target-dir", movieTargetDirectoryName: null });
+
+    const reselected = await POST(post({
+      storageId: "storage-a", sourceRoots: [{ directoryId: "dir-deep" }],
+      movieTargetDirectoryId: "target-dir", movieTargetSelectionToken: ticket,
+      tvTargetDirectoryId: null, mediaKind: "mixed", templates: templateSet,
+    }));
+    expect(reselected.status).toBe(201);
+    expect(saved.at(-1)).toMatchObject({ movieTargetDirectoryId: "target-dir", movieTargetDirectoryName: "电影归档" });
+  });
+
+  it("rejects client-supplied target display names", async () => {
+    const ticket = issueDirectorySelectionTicket({
+      ...scope, directoryId: "target-dir", parentId: "target-parent", name: "电影归档", page: 3,
+    });
+    const response = await POST(post({
+      storageId: "storage-a", sourceRoots: [{ directoryId: "dir-deep", selectionToken: issueDirectorySelectionTicket({
+        ...scope, directoryId: "dir-deep", parentId: "parent-deep", name: "Season 2", page: 17,
+      }) }],
+      movieTargetDirectoryId: "target-dir", movieTargetSelectionToken: ticket,
+      movieTargetDirectoryName: "伪造名称", mediaKind: "mixed", templates: templateSet,
+    }));
+    expect(response.status).toBe(400);
   });
 });

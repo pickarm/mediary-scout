@@ -1,0 +1,90 @@
+.root { display: flex; flex-direction: column; gap: 16px; max-width: 1180px; }
+.panel { padding: 22px; }
+.panelHeader, .pickerHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.panelHeader h2, .pickerHeader h2 { font-size: 19px; }
+.panelHeader p, .pickerHeader p { margin-top: 4px; font-size: 12px; }
+.storageField { display: flex; flex-direction: column; gap: 5px; min-width: 220px; color: var(--text-muted); font-size: 12px; }
+.storageField select, .timeField input { min-height: 40px; padding: 0 12px; color: var(--text); background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; font: inherit; }
+.storageField select:focus, .timeField input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.storageField select:disabled, .timeField input:disabled { opacity: .55; }
+.notice, .error { display: flex; align-items: center; gap: 8px; margin-top: 16px; padding: 11px 13px; border-radius: 6px; font-size: 13px; }
+.notice { color: var(--warning); background: color-mix(in srgb, var(--warning) 10%, transparent); }
+.error { color: var(--negative); background: color-mix(in srgb, var(--negative) 10%, transparent); }
+.error span { flex: 1; }
+.loading { display: flex; align-items: center; gap: 9px; padding: 20px 4px; color: var(--text-muted); }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.configSelectRow { display: flex; align-items: flex-end; gap: 12px; margin: 22px 0 18px; }
+.configSelectRow .storageField { flex: 1; }
+.formGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.fieldset { min-width: 0; padding: 14px; border: 1px solid var(--divider); border-radius: 7px; }
+.fieldset legend { padding: 0 5px; font-weight: 700; font-size: 13px; }
+.fieldset legend span { margin-left: 6px; color: var(--text-faint); font-size: 11px; font-weight: 400; }
+.sourceList { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; min-height: 38px; margin: 2px 0 10px; }
+.directoryChip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 5px 7px 5px 9px; color: var(--text-soft); background: var(--bg-card); border: 1px solid var(--divider); border-radius: 18px; font-size: 12px; }
+.directoryChip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.directoryChip button, .clearTarget { display: inline-grid; place-items: center; padding: 1px; color: var(--text-muted); background: transparent; border: 0; cursor: pointer; }
+.directoryChip button:hover, .clearTarget:hover { color: var(--negative); }
+.directoryChip button:disabled, .clearTarget:disabled { opacity: .4; cursor: default; }
+.hint { color: var(--text-faint); font-size: 11px; }
+.radioRow { display: flex; flex-wrap: wrap; gap: 15px; padding: 7px 0 2px; }
+.radioRow label, .scheduleRow label { display: inline-flex; align-items: center; gap: 7px; color: var(--text-soft); font-size: 12px; }
+.radioRow input, .scheduleRow input[type="checkbox"] { accent-color: var(--accent); }
+.targetRow { display: grid; grid-template-columns: 68px minmax(0, 1fr) auto auto; align-items: center; gap: 9px; margin: 8px 0; color: var(--text-soft); font-size: 12px; }
+.targetValue { overflow: hidden; color: var(--text-muted); text-overflow: ellipsis; white-space: nowrap; }
+.scheduleRow { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 4px 0 10px; }
+.timeField { display: flex !important; align-items: center; gap: 8px !important; }
+.timeField input { width: 112px; min-height: 34px; }
+.actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+.taskList { display: flex; flex-direction: column; gap: 10px; }
+.task { padding: 15px; border: 1px solid var(--divider); border-radius: 7px; background: var(--bg-card-alt); }
+.selectedTask { border-color: color-mix(in srgb, var(--accent) 55%, var(--divider)); }
+.taskSelect { display: flex; align-items: center; gap: 9px; width: 100%; padding: 0; color: inherit; text-align: left; background: transparent; border: 0; cursor: pointer; }
+.taskTitle { font-weight: 700; }
+.taskTime { margin-left: auto; color: var(--text-faint); font-size: 11px; }
+.statusDot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--text-faint); }
+.status_running, .status_completed { background: var(--accent); }
+.status_queued, .status_cancelling { background: var(--info); }
+.status_partial, .status_failed { background: var(--warning); }
+.status_cancelled { background: var(--text-faint); }
+.status_paused { background: var(--warning); }
+.taskStats { display: flex; flex-wrap: wrap; gap: 18px; margin: 11px 0 0 17px; color: var(--text-muted); font-size: 12px; }
+.taskStats b { color: var(--text); }
+.taskActions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin: 12px 0 0 17px; }
+.taskActions .secondary-button, .configSelectRow .secondary-button, .directoryRow .secondary-button, .pickerFooter .secondary-button, .error .secondary-button, .panelHeader > .secondary-button, .root > .panel > .secondary-button { min-height: 31px; padding: 5px 12px; font-size: 11px; }
+.busyLabel { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 11px; }
+.failures { margin: 10px 0 0 17px; color: var(--warning); font-size: 12px; }
+.failures summary { cursor: pointer; }
+.failures ul { display: flex; flex-direction: column; gap: 4px; padding-left: 18px; color: var(--text-muted); }
+.empty, .emptyTasks, .emptyDirectory { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 36px 20px; text-align: center; color: var(--text-muted); }
+.empty strong { color: var(--text); font-size: 16px; }
+.empty .primary-button { margin-top: 6px; }
+.emptyTasks { align-items: flex-start; padding: 26px 6px; font-size: 13px; }
+.backdrop { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(0, 0, 0, .72); }
+.picker { display: flex; flex-direction: column; gap: 12px; width: min(760px, 100%); max-height: min(760px, calc(100vh - 40px)); padding: 20px; overflow: auto; box-shadow: var(--shadow-heavy); }
+.pickerHeader { align-items: center; }
+.breadcrumb { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; padding: 9px 11px; background: var(--bg-card); border-radius: 6px; color: var(--text-muted); }
+.breadcrumb span { display: inline-flex; align-items: center; gap: 5px; }
+.breadcrumb button { padding: 0; color: var(--text-soft); background: transparent; border: 0; cursor: pointer; }
+.breadcrumb button:hover { color: var(--accent); }
+.directoryList { display: flex; flex-direction: column; min-height: 180px; max-height: 430px; overflow: auto; border: 1px solid var(--divider); border-radius: 6px; }
+.directoryRow { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--divider); }
+.directoryRow:last-child { border-bottom: 0; }
+.directoryName { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; padding: 3px 0; color: var(--text-soft); text-align: left; background: transparent; border: 0; cursor: pointer; }
+.directoryName span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.directoryName svg:first-child { flex: 0 0 auto; color: var(--accent); }
+.directoryName svg:last-child { margin-left: auto; flex: 0 0 auto; color: var(--text-faint); }
+.directoryName:hover span { color: var(--accent); }
+.emptyDirectory { min-height: 180px; justify-content: center; font-size: 12px; }
+.pickerFooter { display: flex; justify-content: flex-end; }
+@media (max-width: 720px) {
+  .panel { padding: 16px; }
+  .panelHeader { flex-direction: column; }
+  .storageField { width: 100%; }
+  .formGrid { grid-template-columns: 1fr; }
+  .configSelectRow, .scheduleRow { align-items: stretch; flex-direction: column; }
+  .actions { justify-content: stretch; }
+  .actions > button { flex: 1; justify-content: center; }
+  .taskStats { gap: 8px 14px; }
+  .directoryRow { align-items: flex-start; }
+}

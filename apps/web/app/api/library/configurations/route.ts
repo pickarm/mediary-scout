@@ -52,19 +52,20 @@ export async function POST(request: NextRequest): Promise<Response> {
     }
     const mediaKind = body.mediaKind;
     if (typeof mediaKind !== "string" || !kinds.has(mediaKind as ScanMediaKind)) throw new LibraryApiError(400, "媒体类型无效。");
-    const target = async (value: unknown, selectionToken: unknown, oldValue: string | null, label: string): Promise<string | null> => {
-      if (value === null || value === undefined || value === "") return null;
+    const target = async (value: unknown, selectionToken: unknown, oldValue: string | null, oldName: string | null | undefined, label: string): Promise<{ directoryId: string | null; name: string | null }> => {
+      if (value === null || value === undefined || value === "") return { directoryId: null, name: null };
       const directoryId = requireString(value, label);
-      if (directoryId === oldValue) return directoryId;
+      if (directoryId === oldValue && (oldName || typeof selectionToken !== "string")) return { directoryId, name: oldName ?? null };
       if (typeof selectionToken !== "string") throw new LibraryApiError(400, "请从目录选择器重新选择目标目录。");
       const ticket = verifyDirectorySelectionTicket(selectionToken, scope);
       if (!ticket || ticket.directoryId !== directoryId) throw new LibraryApiError(400, "目录选择已过期或无效，请重新选择。");
       const parentPage = await client.listFilesPage(ticket.parentId, ticket.page, 200);
-      if (!parentPage.items.some((item) => item.fileId === directoryId && item.resType === 2 && item.fileName === ticket.name)) throw new LibraryApiError(400, "所选目标目录已不存在或不属于所选上级目录。");
-      return directoryId;
+      const match = parentPage.items.find((item) => item.fileId === directoryId && item.resType === 2 && item.fileName === ticket.name);
+      if (!match) throw new LibraryApiError(400, "所选目标目录已不存在或不属于所选上级目录。");
+      return { directoryId, name: match.fileName };
     };
-    const movieTargetDirectoryId = await target(body.movieTargetDirectoryId, body.movieTargetSelectionToken, previous?.movieTargetDirectoryId ?? null, "电影目标目录");
-    const tvTargetDirectoryId = await target(body.tvTargetDirectoryId, body.tvTargetSelectionToken, previous?.tvTargetDirectoryId ?? null, "剧集目标目录");
+    const movieTarget = await target(body.movieTargetDirectoryId, body.movieTargetSelectionToken, previous?.movieTargetDirectoryId ?? null, previous?.movieTargetDirectoryName, "电影目标目录");
+    const tvTarget = await target(body.tvTargetDirectoryId, body.tvTargetSelectionToken, previous?.tvTargetDirectoryId ?? null, previous?.tvTargetDirectoryName, "剧集目标目录");
     if (body.dailyScheduleEnabled !== undefined && typeof body.dailyScheduleEnabled !== "boolean") throw new LibraryApiError(400, "每日扫描开关无效。");
     const dailyScheduleEnabled = body.dailyScheduleEnabled === true;
     let dailyScheduleTime: string | null = null;
@@ -83,7 +84,8 @@ export async function POST(request: NextRequest): Promise<Response> {
       templates[key as (typeof templateKeys)[number]] = template;
     }
     const configuration: ScanConfiguration = {
-      configId, scope, sourceRoots: roots, movieTargetDirectoryId, tvTargetDirectoryId,
+      configId, scope, sourceRoots: roots, movieTargetDirectoryId: movieTarget.directoryId, movieTargetDirectoryName: movieTarget.name,
+      tvTargetDirectoryId: tvTarget.directoryId, tvTargetDirectoryName: tvTarget.name,
       mediaKind: mediaKind as ScanMediaKind, dailyScheduleEnabled, dailyScheduleTime,
       dailyScheduleTimezone: SCAN_SCHEDULE_TIME_ZONE, autoOrganize: false, autoAcquire: false, templates,
     };
