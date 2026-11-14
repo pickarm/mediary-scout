@@ -30,6 +30,14 @@ const DEFAULT_HTTP_TIMEOUT_MS = 20_000;
 /** HTTP 200 envelope codes that mean the access_token is expired (per official
  *  guangyapan-drive v1.0.2 `src/api-client.mjs`: `const AUTH_CODES = new Set([110, 117, 118])`). */
 const GUANGYA_AUTH_EXPIRED_CODES = new Set([110, 117, 118]);
+const GUANGYA_WRITE_PATHS = new Set([
+  "/nd.bizuserres.s/v1/file/create_dir",
+  "/nd.bizuserres.s/v1/file/rename",
+  "/nd.bizuserres.s/v1/file/delete_file",
+  "/nd.bizuserres.s/v1/file/move_file",
+  "/cloudcollection/v1/create_task",
+  "/userres/v1/restore_share",
+]);
 
 /** A directory listing entry from get_file_list. */
 export interface GuangYaItem {
@@ -91,6 +99,8 @@ export interface GuangYaClientOptions {
   fetchImpl?: GuangYaFetch;
   /** Optional shared account queue. Omitted direct clients preserve their old behavior. */
   requestScheduler?: GuangYaRequestScheduler;
+  /** Optional fence run inside the request slot immediately before mutations. */
+  beforeWrite?: () => void | Promise<void>;
   /** Priority used by API calls other than explicit scan listings. Defaults to writes. */
   requestPriority?: GuangYaRequestPriority;
 }
@@ -158,6 +168,7 @@ export class GuangYaClient {
   private readonly fetchImpl: GuangYaFetch;
   private readonly requestScheduler: GuangYaRequestScheduler | undefined;
   private readonly requestPriority: GuangYaRequestPriority;
+  private readonly beforeWrite: (() => void | Promise<void>) | undefined;
 
   constructor(options: GuangYaClientOptions) {
     // Trim tokens defensively (mirrors TianyiClient): the credential extraction now
@@ -171,6 +182,7 @@ export class GuangYaClient {
     this.fetchImpl = options.fetchImpl ?? ((url, init) => fetchWithTimeout(url, init, DEFAULT_HTTP_TIMEOUT_MS));
     this.requestScheduler = options.requestScheduler;
     this.requestPriority = options.requestPriority ?? "write";
+    this.beforeWrite = options.beforeWrite;
   }
 
   /** GET account/v1/user/me (Bearer); refresh+retry once on 401. Returns `sub`. */
@@ -406,7 +418,7 @@ export class GuangYaClient {
       method: "POST",
       headers: this.apiHeaders(),
       body: JSON.stringify(body),
-    }), priority);
+    }), priority, GUANGYA_WRITE_PATHS.has(path));
     const json = (await response.json().catch(() => ({}))) as unknown;
     if (envelope) envelope.top = json;
     const numericCode = parseEnvelopeCode(recordValue(json, "code"));
@@ -484,8 +496,11 @@ export class GuangYaClient {
     };
   }
 
-  private fetchScheduled(url: string, init: () => RequestInit, priority: GuangYaRequestPriority): Promise<Response> {
-    const perform = () => this.fetchImpl(url, init());
+  private fetchScheduled(url: string, init: () => RequestInit, priority: GuangYaRequestPriority, isWrite = false): Promise<Response> {
+    const perform = async () => {
+      if (isWrite) await this.beforeWrite?.();
+      return this.fetchImpl(url, init());
+    };
     return this.requestScheduler ? this.requestScheduler.schedule(perform, priority) : perform();
   }
 }

@@ -8,6 +8,7 @@ import {
 } from "./media-library-folder.js";
 import { drivePacer, realtimeDriveClock, type DriveClock } from "./drive-pacer.js";
 import { JANITOR_LIST_DEPTH } from "./staging-depth.js";
+import { withStorageWriteTask } from "./library/guangya-write-coordinator.js";
 import type { MayStartRun } from "./worker.js";
 
 /** Every kind. `blockIfTitleHasActiveRun` ignores staging_recovery so a user
@@ -348,7 +349,9 @@ export async function sweepOrphanStagingDirs(input: {
   for (const drive of input.drives) {
     if (held) break;
     try {
-      const counts = await sweepDrive(drive, input.repository, input.now, clock, input.mayStartRun);
+      const counts = await withStorageWriteTask([drive.executor], () =>
+        sweepDrive(drive, input.repository, input.now, clock, input.mayStartRun),
+      );
       held = counts.held;
       const removal =
         counts.notRemoved > 0

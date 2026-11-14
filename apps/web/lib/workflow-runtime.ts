@@ -61,6 +61,7 @@ import {
   provisionCategoryDirs,
   parsePan115Uid,
   createExecutorForBrand,
+  withStorageWriteTask,
   getStorageBrand,
   isRegisteredStorageProvider,
   allowedResourceTypesForProviders,
@@ -2519,6 +2520,7 @@ interface AccountStorageCredentials {
   id: string;
   /** The drive's brand — drives executor/probe/resource dispatch (tree model). */
   provider: string;
+  providerUid: string;
   status: "active" | "frozen";
   /** Cookie credential for cookie-auth brands (115/夸克). Empty for token-auth
    *  brands (光鸭/天翼), which carry their token blob in `credential` instead. */
@@ -2574,6 +2576,7 @@ async function provisionDriveCategoryDirs(
   provider: string,
   cookie: string,
   credential: TokenCredential | null,
+  providerUid?: string,
 ): Promise<{ rootCid: string; moviesCid: string; tvCid: string; animeCid: string }> {
   // Per-brand provisioning root is DATA in the registry ("0"/"0"/""/"-11"), not
   // logic — one lookup drives every arm below (was hardcoded per branch).
@@ -2587,20 +2590,20 @@ async function provisionDriveCategoryDirs(
   // and the provision silently failed, leaving the drive with no CIDs.
   let executor: StorageExecutor;
   if (brand.authKind === "token") {
-    executor = createExecutorForBrand({ provider, credential: credential ?? {}, scopeCids: [] });
+    executor = createExecutorForBrand({ provider, credential: credential ?? {}, scopeCids: [], ...(providerUid ? { providerUid } : {}) });
   } else if (provider === "pan115") {
     executor = createBootstrapPan115CookieStorageExecutor({ cookie });
   } else {
     executor = createExecutorForBrand({ provider, cookie, scopeCids: [] });
   }
-  return provisionCategoryDirs({
+  return withStorageWriteTask([executor], () => provisionCategoryDirs({
     baseParentId,
     ...customDirNamesFromEnv(process.env),
     storage: {
       listChildDirs: (parentId: string) => executor.listChildDirectories(parentId),
       createDirectory: (dir) => executor.createDirectory(dir),
     },
-  });
+  }));
 }
 
 /**
@@ -2734,7 +2737,7 @@ async function getAccountStorageCredentials(
     const liveMode = process.env.MEDIA_TRACK_STORAGE_ADAPTER === "115";
     if (liveMode && drive.status === "active" && !(rootCid && moviesCid && tvCid && animeCid)) {
       try {
-        const p = await provisionDriveCategoryDirs(drive.provider, cookie, credential);
+        const p = await provisionDriveCategoryDirs(drive.provider, cookie, credential, drive.providerUid);
         ({ rootCid, moviesCid, tvCid, animeCid } = p);
         await getWorkflowRepository().upsertConnectedStorage({
           id: drive.id,
@@ -2757,6 +2760,7 @@ async function getAccountStorageCredentials(
     return {
       id: drive.id,
       provider: drive.provider,
+      providerUid: drive.providerUid,
       status: drive.status,
       cookie,
       credential,
@@ -3026,6 +3030,7 @@ async function getWorkerStorageExecutor(
         return createExecutorForBrand({
           provider: creds.provider,
           credential: creds.credential ?? {},
+          providerUid: creds.providerUid,
           scopeCids,
           env: process.env,
           onCredentialRefresh: makeTokenPersister(accountId, creds.id, creds.provider),
@@ -3549,6 +3554,7 @@ export async function resolveCachedDriveSpace(
           ? createExecutorForBrand({
               provider: drive.provider,
               credential: credential ?? {},
+              providerUid: drive.providerUid,
               scopeCids,
               env: process.env,
               onCredentialRefresh: makeTokenPersister(accountId, drive.id, drive.provider),
@@ -3676,7 +3682,7 @@ async function bindTokenConnectedStorage(input: {
     animeCid: null,
   };
   try {
-    cids = await provisionDriveCategoryDirs(provider, "", credentialBlob);
+    cids = await provisionDriveCategoryDirs(provider, "", credentialBlob, providerUid);
   } catch (error) {
     console.error(`[media-track] ${provider} directory provision failed (will store without CIDs): ${String(error)}`);
   }

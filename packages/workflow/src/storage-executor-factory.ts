@@ -10,6 +10,8 @@
 import { GuangYaClient, parseGuangYaUid } from "./guangya-client.js";
 import type { GuangYaClientOptions } from "./guangya-client.js";
 import { createGuangYaRequestScheduler, getGuangYaMinIntervalMs } from "./library/guangya-request-scheduler.js";
+import { getGuangYaWriteCoordinator, setStorageWriteAccountKey } from "./library/guangya-write-coordinator.js";
+import type { GuangYaWriteCoordinator } from "./library/guangya-write-coordinator.js";
 import { GuangYaStorageExecutor } from "./guangya-storage-executor.js";
 import { createProtectedPan115CookieStorageExecutorFromEnv } from "./pan115-storage-factory.js";
 import { Pan123Client } from "./pan123-client.js";
@@ -39,6 +41,8 @@ export function createExecutorForBrand(input: {
   onCredentialRefresh?: (creds: unknown) => void | Promise<void>;
   /** Stable 光鸭 account UID from connected_storages.provider_uid, when available. */
   providerUid?: string;
+  /** Test seam; production shares the process-wide PostgreSQL coordinator. */
+  writeCoordinator?: Pick<GuangYaWriteCoordinator, "run" | "assertHeld">;
 }): StorageExecutor {
   if (input.provider === "pan115") {
     const cookie = input.cookie ?? "";
@@ -80,18 +84,21 @@ export function createExecutorForBrand(input: {
       clientOptions.deviceId = c.deviceId;
     }
     const accountKey = input.providerUid?.trim() || parseGuangYaUid(c.accessToken ?? "") || c.deviceId?.trim() || "unknown-account";
+    const physicalAccountKey = `guangya:${accountKey}`;
+    const writeCoordinator = input.writeCoordinator ?? getGuangYaWriteCoordinator(input.env ?? process.env);
     clientOptions.requestScheduler = createGuangYaRequestScheduler({
-      accountKey: `guangya:${accountKey}`,
+      accountKey: physicalAccountKey,
       minIntervalMs: getGuangYaMinIntervalMs(input.env ?? process.env),
     });
+    clientOptions.beforeWrite = () => writeCoordinator.assertHeld(physicalAccountKey);
     const onRefresh = input.onCredentialRefresh;
     if (onRefresh) {
       clientOptions.onTokensRefreshed = (t) => onRefresh(t);
     }
-    return new GuangYaStorageExecutor({
+    return guardGuangYaExecutor(new GuangYaStorageExecutor({
       client: new GuangYaClient(clientOptions),
       writeScopeDirectoryIds: input.scopeCids,
-    });
+    }), physicalAccountKey, writeCoordinator);
   }
   if (input.provider === "pan123") {
     const c = (input.credential ?? {}) as Partial<Pan123Credential>;
@@ -124,4 +131,26 @@ export function createExecutorForBrand(input: {
     });
   }
   throw new Error(`unknown storage brand: ${input.provider}`);
+}
+
+function guardGuangYaExecutor(
+  executor: StorageExecutor,
+  accountKey: string,
+  coordinator: Pick<GuangYaWriteCoordinator, "run" | "assertHeld">,
+): StorageExecutor {
+  setStorageWriteAccountKey(executor, accountKey, coordinator);
+  const wrap = <K extends keyof StorageExecutor>(method: K): void => {
+    const original = executor[method];
+    if (typeof original !== "function") return;
+    const bound = original.bind(executor) as (...args: never[]) => unknown;
+    Object.defineProperty(executor, method, {
+      configurable: true,
+      value: (...args: never[]) => coordinator.run([accountKey], () => Promise.resolve(bound(...args))),
+    });
+  };
+  for (const method of [
+    "createDirectory", "renameFile", "transfer", "flattenDirectory", "deleteFiles", "removeDirectory", "moveFiles",
+    "transferSubtitleUrl", "transferSubtitleUrls",
+  ] as const) wrap(method);
+  return executor;
 }
