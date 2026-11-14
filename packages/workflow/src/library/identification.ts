@@ -38,7 +38,7 @@ export interface IdentifyScanFileDependencies { tmdb: IdentificationTmdbPort; su
 const VIDEO_EXTENSIONS = new Set(["mkv", "mp4", "m4v", "avi", "mov", "wmv", "flv", "ts", "m2ts", "mpg", "mpeg", "webm", "3gp"]);
 const SUBTITLE_EXTENSIONS = new Set(["srt", "ass", "ssa", "vtt", "sub", "idx", "sup"]);
 const NOISE = /\b(?:2160p|1080p|720p|480p|4k|8k|uhd|hdr10?(?:\+)?|dolby[ .-]?vision|dv|web[ ._-]?(?:dl|rip)|blu[ .-]?ray|brrip|bdrip|webrip|hdtv|remux|x26[45]|h\.?26[45]|hevc|av1|aac\d?(?:\.\d)?|dts(?:-hd)?|truehd|atmos|proper|repack|extended|uncut|中字|双语|国语|粤语|简体|繁体)\b/gi;
-interface ParsedName { title: string; year?: number; season?: number; eps: number[]; special: boolean; marker?: { type: "movie" | "tv"; id: number } }
+interface ParsedName { title: string; year?: number; season?: number; eps: number[]; special: boolean; marker?: { type?: "movie" | "tv"; id: number } }
 const EPISODE_PATTERNS = [
   /\bS(\d{1,2})\s*E(\d{1,3})\s*E(\d{1,3})/i,
   /\bS(\d{1,2})\s*E(\d{1,3})(?:\s*[-+&～~至]\s*(?:S\d{1,2}\s*)?E?(\d{1,3}))?/i,
@@ -52,8 +52,10 @@ function stripNoise(value: string): string {
     .replace(/\s+/g, " ").replace(/^[\s\-–—:：]+|[\s\-–—:：]+$/g, "").trim();
 }
 function parseName(raw: string): ParsedName {
-  const m = /(?:tmdb[_ -]?(movie|tv)[_ -]?(\d+)|tmdb(?:movie|tv)?[：:_ -]?(\d+))/i.exec(raw);
-  const marker = m ? { type: m[1]?.toLowerCase() === "tv" ? "tv" as const : "movie" as const, id: Number(m[2] ?? m[3]) } : undefined;
+  const m = /tmdb[_ -]?(movie|tv)[_ :\-]?(\d+)/i.exec(raw);
+  const generic = /\{tmdb-(\d+)\}|\btmdb[：:_ -](\d+)/i.exec(raw);
+  const marker = m ? { type: m[1]?.toLowerCase() === "tv" ? "tv" as const : "movie" as const, id: Number(m[2]) }
+    : generic ? { id: Number(generic[1] ?? generic[2]) } : undefined;
   let season: number | undefined; let eps: number[] = []; let used: RegExp | undefined;
   for (const pattern of EPISODE_PATTERNS) { const hit = pattern.exec(raw); if (hit) { season = Number(hit[1]); eps = [Number(hit[2])]; if (hit[3]) eps.push(Number(hit[3])); used = pattern; break; } }
   if (season === undefined) {
@@ -65,8 +67,9 @@ function parseName(raw: string): ParsedName {
   if (!used && specialMatch) { season = 0; eps = [Number(specialMatch[1])]; if (specialMatch[2]) eps.push(Number(specialMatch[2])); special = true; }
   const specialLabel = /(?:\b(?:specials?|ova|oad|sp)\b|特典|特別篇|特别篇|番外篇)/i.test(raw);
   if (season === 0 || (!used && specialLabel)) { special = true; if (season === undefined) { season = 0; eps = [Number(/(?:OVA|OAD|SP|特典|特別篇|特别篇|番外篇)\s*0*(\d{1,3})/i.exec(raw)?.[1] ?? 1)]; } }
-  const y = /(?:19|20)\d{2}/.exec(raw); const year = y ? Number(y[0]) : undefined;
-  let title = raw.replace(/(?:tmdb[_ -]?(?:movie|tv)[_ -]?\d+|tmdb(?:movie|tv)?[：:_ -]?\d+)/ig, " ");
+  const markerless = raw.replace(/(?:tmdb[_ -]?(?:movie|tv)[_ :\-]?\d+|\{tmdb-\d+\}|\btmdb[：:_ -]\d+)/ig, " ");
+  const y = /(?:19|20)\d{2}/.exec(markerless); const year = y ? Number(y[0]) : undefined;
+  let title = markerless;
   if (used) title = title.replace(used, " ");
   title = title.replace(/\bSeason\s*\d{1,2}\b|\bS\d{1,2}\b|第\s*\d{1,2}\s*季/gi, " ");
   title = title.replace(/(?:\b(?:specials?|ova|oad|sp)\b|特典|特別篇|特别篇|番外篇).*$/i, " ");
@@ -111,9 +114,9 @@ export async function identifyScanFile(input: IdentifyScanFileInput, deps: Ident
   if (ep.eps.length && ep.season !== undefined) evidence.push({ kind: ep.special ? "special" : "episode_code", value: "S" + String(ep.season).padStart(2, "0") + "E" + ep.eps.map((n) => String(n).padStart(2, "0")).join("+E"), source: fileParsed.eps.length ? "filename" : "directory" });
   const markers = [fileParsed.marker, dirParsed.marker].filter((value): value is NonNullable<typeof value> => value !== undefined);
   const marker = markers[0];
-  for (const current of markers) evidence.push({ kind: "tmdb_marker", value: current.type + ":" + current.id, source: current === fileParsed.marker ? "filename" : "directory" });
-  if (markers.some((current) => current.id !== marker?.id || current.type !== marker.type)) return base(f.fileId, "pending", "文件名与父目录中的 TMDB 标记冲突", evidence);
-  if (marker && input.mediaKind !== "mixed" && ((input.mediaKind === "movie") !== (marker.type === "movie"))) return base(f.fileId, "pending", "TMDB 标记类型与扫描媒体类型冲突", evidence);
+  for (const current of markers) evidence.push({ kind: "tmdb_marker", value: (current.type ?? "generic") + ":" + current.id, source: current === fileParsed.marker ? "filename" : "directory" });
+  if (markers.some((current) => current.id !== marker?.id || (current.type !== undefined && marker.type !== undefined && current.type !== marker.type))) return base(f.fileId, "pending", "文件名与父目录中的 TMDB 标记冲突", evidence);
+  if (marker?.type && input.mediaKind !== "mixed" && ((input.mediaKind === "movie") !== (marker.type === "movie"))) return base(f.fileId, "pending", "TMDB 标记类型与扫描媒体类型冲突", evidence);
   if (fileParsed.year !== undefined && dirParsed.year !== undefined && fileParsed.year !== dirParsed.year) return base(f.fileId, "pending", "文件年份与父目录年份冲突", evidence);
   if (!titleQuery || (/^\d+$/.test(titleQuery) && !hasDirectoryTitle)) return base(f.fileId, "pending", "文件名缺少可用于唯一识别的作品标题", evidence);
   if ((input.mediaKind === "movie" && ep.eps.length) || (input.mediaKind === "tv" && !ep.eps.length)) return base(f.fileId, "pending", input.mediaKind === "movie" ? "扫描类型为电影，但文件名含集号" : "剧集文件缺少明确季集号", evidence);
@@ -121,14 +124,14 @@ export async function identifyScanFile(input: IdentifyScanFileInput, deps: Ident
 
   let candidates: IdentityCandidate[];
   try {
-    if (input.existingTmdbId !== undefined && !input.existingMediaTitle) {
+    if (input.existingTmdbId !== undefined && !input.existingMediaTitle && (input.mediaKind !== "mixed" || marker?.type !== undefined)) {
       const d = await deps.tmdb.getTitle(input.existingTmdbId, marker?.type ?? (input.mediaKind === "tv" ? "tv" : "movie"));
       candidates = [{ tmdbId: d.id, mediaType: d.mediaType, title: d.title, originalTitle: d.originalTitle, year: d.year, reason: "TMDB 详情校验" }];
       if (d.id !== input.existingTmdbId) return base(f.fileId, "pending", "TMDB 详情 ID 与已有标记不一致", evidence, candidates);
-  } else candidates = (await deps.tmdb.search(titleQuery, input.mediaKind)).filter((c) => input.mediaKind === "mixed" || (input.mediaKind === "movie" ? c.mediaType === "movie" : c.mediaType !== "movie"));
+    } else candidates = (await deps.tmdb.search(titleQuery, input.mediaKind)).filter((c) => input.mediaKind === "mixed" || (input.mediaKind === "movie" ? c.mediaType === "movie" : c.mediaType !== "movie"));
   } catch { return base(f.fileId, "pending", "TMDB 元数据暂不可用，保留文件待确认", evidence); }
   if (input.existingTmdbId !== undefined && markers.some((current) => current.id !== input.existingTmdbId)) return base(f.fileId, "pending", "文件名 TMDB 标记与已有作品 ID 不一致", evidence, candidates);
-  if (markers.some((current) => !candidates.some((c) => c.tmdbId === current.id && c.mediaType === current.type))) return base(f.fileId, "pending", "文件中的 TMDB 标记与真实 TMDB 搜索结果不一致", evidence, candidates);
+  if (markers.some((current) => !candidates.some((c) => c.tmdbId === current.id && (current.type === undefined || (current.type === "movie" ? c.mediaType === "movie" : c.mediaType !== "movie"))))) return base(f.fileId, "pending", "文件中的 TMDB 标记与真实 TMDB 搜索结果不一致", evidence, candidates);
   const titleEvidence = [...new Set([titleQuery, ...(hasDirectoryTitle ? [dirParsed.title] : [])])];
   let matches = candidates.filter((c) => titleEvidence.every((name) => exactTitle(c, name)) && (year === undefined || c.year === year));
   if (input.existingTmdbId !== undefined) matches = matches.filter((c) => c.tmdbId === input.existingTmdbId);

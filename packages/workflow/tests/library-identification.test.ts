@@ -101,6 +101,50 @@ describe("library identification", () => {
     expect(result.reason).toMatch(/标记冲突/);
   });
 
+  it("uses a generic TMDB folder marker with real TV metadata and preserves the tv namespace for anime", async () => {
+    const tv = provider({ candidates: [series] });
+    const tvResult = await identifyScanFile({
+      file: facts("Black Mirror S01E01.mkv", "Black Mirror (2011) {tmdb-42009}"),
+      parentDirectoryName: "Black Mirror (2011) {tmdb-42009}", mediaKind: "tv",
+    }, { tmdb: tv });
+    expect(tvResult.status).toBe("confirmed");
+    expect(tvResult.title?.id).toBe("tmdb_tv_42009");
+
+    const anime: IdentificationTmdbPort = {
+      search: async () => [series],
+      getTitle: async () => ({ ...detail(series), mediaType: "anime", genreIds: [16] }),
+      getSeason: async () => [],
+    };
+    const animeResult = await identifyScanFile({
+      file: facts("Black Mirror S01E01.mkv", "Black Mirror (2011) {tmdb-42009}"),
+      parentDirectoryName: "Black Mirror (2011) {tmdb-42009}", mediaKind: "tv",
+    }, { tmdb: anime });
+    expect(animeResult.status).toBe("confirmed");
+    expect(animeResult.title).toMatchObject({ id: "tmdb_tv_42009", type: "anime" });
+  });
+
+  it("allows a matching generic and explicit marker but rejects different IDs or explicit namespaces", async () => {
+    const matching = await identifyScanFile({
+      file: facts("tmdb_tv_42009 Black Mirror S01E01.mkv", "Black Mirror (2011) {tmdb-42009}"),
+      parentDirectoryName: "Black Mirror (2011) {tmdb-42009}", mediaKind: "tv",
+    }, { tmdb: provider({ candidates: [series] }) });
+    expect(matching.status).toBe("confirmed");
+
+    const differentIds = await identifyScanFile({
+      file: facts("tmdb_tv_42009 Black Mirror S01E01.mkv", "Black Mirror (2011) {tmdb-1}"),
+      parentDirectoryName: "Black Mirror (2011) {tmdb-1}", mediaKind: "tv",
+    }, { tmdb: provider({ candidates: [series] }) });
+    expect(differentIds.status).toBe("pending");
+    expect(differentIds.reason).toMatch(/标记冲突/);
+
+    const namespaces = await identifyScanFile({
+      file: facts("tmdb_movie_42009 Black Mirror S01E01.mkv", "tmdb_tv_42009 Black Mirror (2011)"),
+      parentDirectoryName: "tmdb_tv_42009 Black Mirror (2011)", mediaKind: "mixed",
+    }, { tmdb: provider({ candidates: [series] }) });
+    expect(namespaces.status).toBe("pending");
+    expect(namespaces.reason).toMatch(/标记冲突/);
+  });
+
   it("keeps a pure-number file pending without context but uses a reliable movie folder", async () => {
     const noContext = await identifyScanFile({ file: facts("123.mkv"), mediaKind: "movie" }, { tmdb: provider() });
     expect(noContext.status).toBe("pending");
