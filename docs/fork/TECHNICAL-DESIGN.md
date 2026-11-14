@@ -1,0 +1,35 @@
+# 巡影 Fork 技术设计
+
+## 基线与架构
+基线：282ef781edf876d2c7ecbadbc8d2bd147759006e。Next.js Web + 进程内 worker，沿用 PostgreSQL 持久化和原有 Agent。新增 library 业务模块，接口依赖注入，测试不访问真实网盘。
+
+## 模块契约
+- `library/types.ts`：扫描授权、文件事实、身份候选、目录绑定、导入、整理清单的公共类型。scan root 与目标目录均绑定 accountId/connectedStorageId。
+- `library/store.ts`：PG扫描任务/检查点/候选/操作状态持久化与导入事务；使用增量DDL，初始化纳入既有schema锁。扫描导入不伪造workflow run。
+- `library/naming.ts`：无副作用模板解析与渲染。字段 title/originalTitle/year/tmdbId/season/episode/episodeCode/resolution/edition/originalName/ext；仅允许确定的字段，禁止执行表达式、绝对路径、..或路径分隔符注入。ext保留源扩展名。
+- `library/scanner.ts`：在授权根下逐目录分页遍历，生成文件事实与父子关系，保存检查点。独立于识别与整理；不调用资源搜索或转存。
+- `library/identification.ts`：证据解析、TMDB候选确认与可注入AI建议。无法唯一确定则pending，不改变文件。
+- `library/organizer.ts`：根据已确认身份和模板产生/执行清单，字幕配对、碰撞后缀、按ID回读、幂等恢复。永不删除已有资源。
+- `library/preparation.ts`：独立领取已入队任务的非网盘准备工作。使用同一原始ResourceProvider，结果绑定run/account/config，消费时仍经过原RealResourceProviderV2与sandbox注册和死链校验。
+- 查询扩展：服务端分页摘要、SQL聚合和批量获取；保留原仓储的业务语义，列表不借完整workflow snapshot装配数据。
+- Redis可选加速：PG是唯一任务事实；短TTL缓存和通知在提交后写入，失败直接降级。页面单订阅SSE，重新连接先读快照，保留统一轮询后备。
+
+## 持久化与导入
+新增扫描配置、扫描任务、目录事实、文件身份、物理绑定、整理操作和准备结果表。所有表含account及storage分区，并有可重复执行的初始化。
+导入事务按文件ID去重，同时维护现有media_titles、tracked_seasons、episode_states、episode_copies；季的逻辑目录与各副本实际目录分开。追更开关为向后兼容的可选字段：缺省沿用原行为，扫描新作品显式false，重扫不覆盖已有设置。
+目录查找首先按持久绑定的ID，名称仅用于首次发现。支持movie/tv的TMDB数值相同而互不污染。
+
+## 网盘协调与错误处理
+光鸭账号级协调入口覆盖转存、整理及扫描请求；写任务单独持有互斥权，读取请求受共享节流和获取优先级约束。不会放开原获取沙箱的protected root。
+未知写结果先回读，确认文件ID/位置/名称再标记完成；不依据客户端的乐观返回更新库。鉴权失败冻结任务，限流退避，资源源错误与无资源分开显示。
+
+## Web接口与权限
+新增库管理入口，服务端按当前账号验证storage归属。配置保存、扫描操作、身份确认、命名预览、整理操作使用同源认证与CSRF/Origin防护；客户端不能自行决定账号或扩大扫描授权。
+前端复用现有CSS token及组件，demo独立使用mock数据。扫描身份确认不引入下载资源的手动选择流程。
+
+## 部署与迁移
+一个standalone应用镜像，外接MEDIA_TRACK_POSTGRES_URL、REDIS_URL、PanSou。GitHub Actions通过DockerHub变量和secret发布linux/amd64，发布前校验镜像启动。Fork发行信息不再要求桌面安装包。
+演练模式统一拒绝真实网盘写入并关闭自动worker；先验证数据库导入和只读状态，再在物理隔离的光鸭目录做真实验证。旧实例停写后才能启用新实例。回退数据库前需停止全部新worker。
+
+## 验证
+沿用Vitest和上游CI；纯功能测试用注入端口，PG/Redis集成使用一次性服务，真实网盘仅用专用测试目录。采集准备/等待/云盘耗时、SQL次数及分页响应大小，不承诺未经验证的倍数。
