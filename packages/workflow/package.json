@@ -24,6 +24,10 @@
     "./library": {
       "types": "./dist/library/index.d.ts",
       "default": "./dist/library/index.js"
+    },
+    "./activity-query": {
+      "types": "./dist/library/activity-query.d.ts",
+      "default": "./dist/library/activity-query.js"
     }
   },
   "dependencies": {

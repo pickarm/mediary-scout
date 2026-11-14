@@ -11,6 +11,7 @@
 - `library/identification.ts`：证据解析、TMDB候选确认与可注入AI建议。无法唯一确定则pending，不改变文件。
 - `library/organizer.ts`：根据已确认身份和模板产生/执行清单，字幕配对、碰撞后缀、按ID回读、幂等恢复。永不删除已有资源。
 - `library/preparation.ts`：独立领取已入队任务的非网盘准备工作。使用同一原始ResourceProvider，结果绑定run/account/config，消费时仍经过原RealResourceProviderV2与sandbox注册和死链校验。
+- 准备分两项交付：F09a仅实现PG准备作业和服务，F09b再接入worker/原获取路径。准备描述含accountId、connectedStorageId（可空）、workflowRunId、媒体类型+TMDB身份、目标标题/别名/年份和无秘密的搜索配置指纹；原生queued/running且可领取的run才允许登记/领取/提交，终态与配置变更使旧结果失效。短租约、心跳、CAS提交与有界重试支持重启恢复，不领取获取任务或写网盘。独立准备默认5，单PanSou服务默认2，AI默认2；配置校验有上限。外部调用不占数据库事务，PG检查点和结果是恢复来源；结果含原始ResourceSnapshot及绑定精确目标/候选id+title的可选Jev结果，消费必须经原过滤器与当前CandidateRegistry重新注册。不能把已过滤标记当权限或跳过死链/拒绝检查。后台只提前准备原流程会做的裸标题搜索，其他搜索仍走原路径。
 - 查询扩展：服务端分页摘要、SQL聚合和批量获取；保留原仓储的业务语义，列表不借完整workflow snapshot装配数据。
 - 队列摘要F10b在SQL中先筛queued/running并排除staging_recovery，再分页与聚合当前页所需季集；队列位置按整个账号/网盘作用域计算，不随页号重置。DTO保留现有ActivityActiveRun所需字段，并另带有界分页和总计。最近完成项只提取标题/状态/海报/季标签/体积字段，SQL内筛选、排序、限量；不读取资源候选、转存记录、审计轨迹或完整report数组。历史使用稳定时间+ID游标，缺海报仅查数据库中的同类型身份，不触发TMDB。未来共享进度可按一批runIds读取有界摘要，仍使用全作用域队列位置。
 - F10b新增`@media-track/workflow/activity-query`纯服务器子入口和`GET /api/library/activity`：服务端鉴权派生account，storageId可空表示账号合并视图，明确选择网盘时核对归属（兼容全部原provider和冻结连接的历史查看）。默认活动页48项、上限100，近期完成默认30项、上限100；返回活动分页、作用域内queued/running总计和有界近期完成项。现有`/api/activity`先保留兼容，后续共享进度/页面接入再切换。初始化索引与schema检查在请求查询之前单例完成，分页请求不做DDL。
