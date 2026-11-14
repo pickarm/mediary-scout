@@ -1,11 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { MediaTitle } from "../src/domain.js";
-import { identifyScanFile, type IdentificationTmdbPort, type IdentityCandidate, type IdentificationTitleDetails } from "../src/library/identification.js";
-import type { ScanFileFact } from "../src/library/types.js";
+import { identifyScanFile, type IdentificationTmdbPort, type IdentityCandidate, type IdentificationTitleDetails, type ScanFileFactInput } from "../src/library/identification.js";
 
 const film: IdentityCandidate = { tmdbId: 27205, mediaType: "movie", title: "盗梦空间", originalTitle: "Inception", year: 2010, reason: "TMDB" };
 const series: IdentityCandidate = { tmdbId: 42009, mediaType: "tv", title: "黑镜", originalTitle: "Black Mirror", year: 2011, reason: "TMDB" };
-function facts(name: string, parent = "电影"): ScanFileFact {
+function facts(name: string, parent = "电影"): ScanFileFactInput {
   return { fileId: "provider-file-1", parentDirectoryId: "dir-1", name, isDirectory: false, sizeBytes: 1024, path: "/" + parent + "/" + name, modifiedAt: null };
 }
 function detail(candidate: IdentityCandidate, extra: Partial<IdentificationTitleDetails> = {}): IdentificationTitleDetails {
@@ -99,6 +98,15 @@ describe("library identification", () => {
     }, { tmdb: provider() });
     expect(result.status).toBe("pending");
     expect(result.reason).toMatch(/标记冲突/);
+  });
+
+  it("does not treat the numeric value in a generic TMDB marker as the release year", async () => {
+    const result = await identifyScanFile({
+      file: facts("Inception (2010).mkv", "Inception (2010) {tmdb-2020}"),
+      parentDirectoryName: "Inception (2010) {tmdb-2020}", mediaKind: "movie",
+    }, { tmdb: provider() });
+    expect(result.status).toBe("pending");
+    expect(result.evidence).toContainEqual({ kind: "year", value: "2010", source: "filename" });
   });
 
   it("uses a generic TMDB folder marker with real TV metadata and preserves the tv namespace for anime", async () => {
