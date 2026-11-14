@@ -163,6 +163,22 @@ describe("GuangYaClient.listFiles", () => {
       fileTypes: [],
     });
   });
+
+  it("exposes one bounded page without changing listFiles auto-pagination", async () => {
+    let calls = 0;
+    const fetchImpl = mockFetch(async () => {
+      calls += 1;
+      return jsonResponse(200, { code: null, msg: "success", data: { list: [
+        { fileId: `f${calls}`, parentId: "p0", fileName: `f${calls}.mkv`, fileSize: 1, resType: 1 },
+      ] } });
+    });
+    const client = new GuangYaClient({ accessToken: ACCESS, refreshToken: REFRESH, deviceId: "dev123", fetchImpl });
+    const page = await client.listFilesPage("p0", 7, 1);
+    expect(page).toEqual({ items: [{ fileId: "f1", parentId: "p0", fileName: "f1.mkv", fileSize: 1, resType: 1 }], hasMore: true });
+    expect(JSON.parse(fetchImpl.mock.calls[0]![1].body as string)).toMatchObject({ parentId: "p0", page: 7, pageSize: 1 });
+    await expect(client.listFilesPage("p0", -1)).rejects.toThrow(RangeError);
+    await expect(client.listFilesPage("p0", 0, 501)).rejects.toThrow(RangeError);
+  });
 });
 
 describe("GuangYaClient 401 -> refresh -> retry", () => {

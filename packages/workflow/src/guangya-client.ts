@@ -215,6 +215,26 @@ export class GuangYaClient {
     return items;
   }
 
+  /** Fetch exactly one get_file_list page; existing listFiles callers retain auto-pagination. */
+  async listFilesPage(
+    parentId: string,
+    page: number,
+    pageSize = DEFAULT_LIST_PAGE_SIZE,
+  ): Promise<{ items: GuangYaItem[]; hasMore: boolean }> {
+    if (!Number.isSafeInteger(page) || page < 0) throw new RangeError("page must be a non-negative integer");
+    if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 500) throw new RangeError("pageSize must be between 1 and 500");
+    const data = await this.postAPI("/userres/v1/file/get_file_list", {
+      parentId,
+      page,
+      pageSize,
+      orderBy: 3,
+      sortType: 1,
+      fileTypes: [],
+    });
+    const list = arrayValue(recordValue(data, "list")).filter(isRecord);
+    return { items: list.map(toItem), hasMore: list.length === pageSize };
+  }
+
   /** Create a directory under `parentId`; returns the new fileId. */
   async createDir(parentId: string, dirName: string): Promise<string> {
     const data = await this.postAPI("/nd.bizuserres.s/v1/file/create_dir", { parentId, dirName });
