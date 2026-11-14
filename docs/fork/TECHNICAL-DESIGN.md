@@ -39,6 +39,13 @@
 
 整理的生产授权必须回查该任务的持久化配置、扫描事实和F02导入绑定。纯计划函数仅供预览/单测，不形成写权限。执行及恢复前重新验证授权；网盘写请求仍需账号级整任务互斥。
 
+识别导入服务（F08b）以扫描任务为作用域，PG保存独立识别作业、逐文件结果和候选；等待扫描完成/部分完成后以游标分批识别。高置信度结果通过F02自动导入，歧义仅存候选；取消扫描停止未开始的识别，不把已提交导入倒退。所有网络查询在事务之外，重启以PG检查点继续，导入与结果记录之间可重试并由文件ID幂等合并。
+- `/api/library/scans/[taskId]/identifications`：GET有界状态/结果分页，POST触发或重试识别，均经现有library API鉴权；扫描创建自动登记后续识别作业。
+- `/api/library/scans/[taskId]/identifications/[fileId]`：POST确认作品与必要的季集号。服务端重新读实际扫描事实、用TMDB核实用户明确选择的身份，不能接收客户端作品对象或伪造文件事实。确认只影响该文件的身份及导入，不引入下载选源。
+- `/api/library/tracking`：仅设置当前账号/网盘已有season的autoAcquire，通过F02专用方法，不用普通workflow快照覆盖。
+- 每任务使用有界TMDB标题/季/查询缓存，防逐集反复查询同一作品；任务准备并发和AI调用分别限流。嵌套作品目录/Season目录必须保留真实祖先证据，不能把`Season 01`当作品名或无证据猜季号。新导入的补缺仍强制默认关闭。
+- F05入参补充`ancestorDirectoryNames?: readonly string[]`，顺序从最近父目录向外，元素仅来自已保存的真实扫描关系。解析将作品目录与季目录证据分别使用，并核对所有身份标记冲突。文件名中的集号不得扩大TMDB季的总集数；TMDB不能确认范围时保持待确认。
+
 ## 部署与迁移
 一个standalone应用镜像，外接MEDIA_TRACK_POSTGRES_URL、REDIS_URL、PanSou。源码Fork为pickarm/mediary-scout，用户确认Docker Hub命名空间qicket，镜像为qicket/mediary-scout。GitHub Actions通过DockerHub变量和secret发布linux/amd64，发布前校验镜像启动。Fork发行信息不再要求桌面安装包。
 发行任务同时检查`.dockerignore`排除`.worktrees/`及本地工具/归档，构建上下文只从已提交的审核版本导出；不能仅依靠`.gitignore`保护镜像构建。发布令牌经本地验证具有目标仓库push权限，CI设置不得将令牌写入workflow或仓库文件。
