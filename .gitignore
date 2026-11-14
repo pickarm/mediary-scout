@@ -28,6 +28,7 @@ coverage/
 
 # personal dev tooling (keep launch.json as contributor example)
 AGENTS.md
+!AGENTS.md
 .claude/settings.json
 .claude/using-superpowers-*
 
