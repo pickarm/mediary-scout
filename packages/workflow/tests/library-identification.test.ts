@@ -11,11 +11,11 @@ function detail(candidate: IdentityCandidate, extra: Partial<IdentificationTitle
   return { id: candidate.tmdbId, mediaType: candidate.mediaType, title: candidate.title, originalTitle: candidate.originalTitle, year: candidate.year,
     overview: "简介", posterPath: null, backdropPath: null, originCountries: ["CN"], genreIds: [], seasons: candidate.mediaType === "tv" ? [{ seasonNumber: 1, episodeCount: 3 }, { seasonNumber: 0, episodeCount: 1 }] : [], ...extra };
 }
-function provider(options: { candidates?: IdentityCandidate[]; details?: IdentificationTitleDetails; seasons?: Array<{ episodeNumber: number; airDate: string | null; title: string }>; getTitle?: (id: number) => IdentificationTitleDetails } = {}): IdentificationTmdbPort {
+function provider(options: { candidates?: IdentityCandidate[]; details?: IdentificationTitleDetails; seasons?: Array<{ episodeNumber: number; airDate: string | null; title: string }>; getTitle?: (id: number) => IdentificationTitleDetails; getSeason?: () => Promise<Array<{ episodeNumber: number; airDate: string | null; title: string }>> } = {}): IdentificationTmdbPort {
   return {
     search: vi.fn(async () => options.candidates ?? [film]),
     getTitle: vi.fn(async (id: number) => options.getTitle?.(id) ?? options.details ?? detail(id === series.tmdbId ? series : film)),
-    getSeason: vi.fn(async () => options.seasons ?? []),
+    getSeason: vi.fn(async () => options.getSeason ? options.getSeason() : options.seasons ?? []),
   };
 }
 
@@ -73,6 +73,118 @@ describe("library identification", () => {
     const result = await identifyScanFile({ file: facts("Black Mirror S01E01E02.mkv"), mediaKind: "tv" }, { tmdb });
     expect(result.status).toBe("confirmed");
     expect(result.existingMediaFiles.map((file) => file.episodeCode)).toEqual(["S01E01", "S01E02"]);
+  });
+
+  it("uses the nearest season ancestor and outer work title for nested season files", async () => {
+    const tmdb = provider({ candidates: [series] });
+    const result = await identifyScanFile({
+      file: facts("S01E01.mkv", "Season 01"), parentDirectoryName: "Season 01",
+      ancestorDirectoryNames: ["Season 01", "Black Mirror (2011)"], mediaKind: "tv",
+    }, { tmdb });
+    expect(result.status).toBe("confirmed");
+    expect(tmdb.search).toHaveBeenCalledWith("Black Mirror", "tv");
+    expect(result.season?.seasonNumber).toBe(1);
+    expect(result.existingMediaFiles.map((file) => file.episodeCode)).toEqual(["S01E01"]);
+
+    const mixed = await identifyScanFile({
+      file: facts("01.mkv", "Season 01"), parentDirectoryName: "Season 01",
+      ancestorDirectoryNames: ["Season 01", "Black Mirror (2011)"], mediaKind: "mixed",
+    }, { tmdb: provider({ candidates: [series] }) });
+    expect(mixed.status).toBe("confirmed");
+    expect(mixed.existingMediaFiles.map((file) => file.episodeCode)).toEqual(["S01E01"]);
+
+    const noSeason = await identifyScanFile({ file: facts("01.mkv"), mediaKind: "mixed" }, { tmdb: provider({ candidates: [series] }) });
+    expect(noSeason.status).toBe("pending");
+  });
+
+  it("does not treat a numbered file inside a season directory as a movie", async () => {
+    const directories = ["Season 01", "盗梦空间 (2010)"] as const;
+    const movie = await identifyScanFile({
+      file: facts("01.mkv", "Season 01"), parentDirectoryName: "Season 01",
+      ancestorDirectoryNames: directories, mediaKind: "movie",
+    }, { tmdb: provider() });
+    expect(movie.status).toBe("pending");
+    expect(movie.title).toBeUndefined();
+    expect(movie.season).toBeUndefined();
+    expect(movie.existingMediaFiles).toEqual([]);
+
+    const tvCandidate: IdentityCandidate = { ...series, title: film.title, originalTitle: film.originalTitle, year: film.year };
+    const mixed = await identifyScanFile({
+      file: facts("01.mkv", "Season 01"), parentDirectoryName: "Season 01",
+      ancestorDirectoryNames: directories, mediaKind: "mixed",
+    }, { tmdb: provider({ candidates: [tvCandidate], details: { ...detail(tvCandidate), mediaType: "tv", seasons: [{ seasonNumber: 1, episodeCount: 12 }] } }) });
+    expect(mixed.status).toBe("confirmed");
+    expect(mixed.title?.type).toBe("tv");
+    expect(mixed.existingMediaFiles.map((file) => file.episodeCode)).toEqual(["S01E01"]);
+  });
+
+  it("does not mistake an unrelated outer directory for a work title", async () => {
+    const tmdb = provider({ candidates: [series] });
+    const result = await identifyScanFile({
+      file: facts("S01E01.mkv", "Season 01"), parentDirectoryName: "Season 01",
+      ancestorDirectoryNames: ["Season 01", "电视剧"], mediaKind: "tv",
+    }, { tmdb });
+    expect(result.status).toBe("pending");
+    expect(tmdb.search).not.toHaveBeenCalled();
+  });
+
+  it("rejects marker and year conflicts found in any ancestor directory", async () => {
+    const marker = await identifyScanFile({
+      file: facts("Black Mirror S01E01.mkv", "Season 01"), parentDirectoryName: "Season 01",
+      ancestorDirectoryNames: ["Season 01", "Black Mirror (2011)", "Black Mirror (2011) {tmdb-1}"], mediaKind: "tv",
+    }, { tmdb: provider({ candidates: [series] }) });
+    expect(marker.status).toBe("pending");
+    expect(marker.reason).toMatch(/标记/);
+
+    const year = await identifyScanFile({
+      file: facts("Black Mirror S01E01.mkv", "Season 01"), parentDirectoryName: "Season 01",
+      ancestorDirectoryNames: ["Season 01", "Black Mirror (2011)", "Collection (2012)"], mediaKind: "tv",
+    }, { tmdb: provider({ candidates: [series] }) });
+    expect(year.status).toBe("pending");
+    expect(year.reason).toMatch(/年份冲突/);
+  });
+
+  it("never expands a TMDB season range from the filename episode number", async () => {
+    for (const name of ["Black Mirror S01E13.mkv", "Black Mirror S01E999.mkv", "Black Mirror S01E12-13.mkv"]) {
+      const result = await identifyScanFile({ file: facts(name), mediaKind: "tv" }, { tmdb: provider({ candidates: [series], details: { ...detail(series), seasons: [{ seasonNumber: 1, episodeCount: 12 }] } }) });
+      expect(result.status, name).toBe("pending");
+      expect(result.title, name).toBeUndefined();
+      expect(result.season, name).toBeUndefined();
+      expect(result.existingMediaFiles, name).toEqual([]);
+    }
+    const valid = await identifyScanFile({ file: facts("Black Mirror S01E12.mkv"), mediaKind: "tv" }, { tmdb: provider({ candidates: [series], details: { ...detail(series), seasons: [{ seasonNumber: 1, episodeCount: 12 }] } }) });
+    expect(valid.status).toBe("confirmed");
+    const dual = await identifyScanFile({ file: facts("Black Mirror S01E01-02.mkv"), mediaKind: "tv" }, { tmdb: provider({ candidates: [series], details: { ...detail(series), seasons: [{ seasonNumber: 1, episodeCount: 12 }] } }) });
+    expect(dual.status).toBe("confirmed");
+  });
+
+  it("uses verified episode details when counts are absent, and keeps unknown ranges pending", async () => {
+    const noCount: IdentityCandidate = { ...series, tmdbId: 42010 };
+    const metadata = [{ episodeNumber: 1, airDate: null, title: "One" }, { episodeNumber: 2, airDate: null, title: "Two" }];
+    const verified = await identifyScanFile({ file: facts("Black Mirror S01E02.mkv"), mediaKind: "tv" }, {
+      tmdb: provider({ candidates: [noCount], details: { ...detail(noCount), seasons: [{ seasonNumber: 1, episodeCount: 0 }] }, seasons: metadata }),
+    });
+    expect(verified.status).toBe("confirmed");
+    expect(verified.season?.totalEpisodes).toBe(2);
+
+    const unknown = await identifyScanFile({ file: facts("Black Mirror S01E01.mkv"), mediaKind: "tv" }, {
+      tmdb: provider({ candidates: [noCount], details: { ...detail(noCount), seasons: [{ seasonNumber: 1, episodeCount: 0 }] }, getSeason: async () => { throw new Error("unavailable"); } }),
+    });
+    expect(unknown.status).toBe("pending");
+    expect(unknown.reason).toMatch(/可验证的季集范围/);
+    expect(unknown.title).toBeUndefined();
+  });
+
+  it("confirms S00 only within a verified special range", async () => {
+    const allowed = await identifyScanFile({ file: facts("Black Mirror S00E01.mkv"), mediaKind: "tv" }, { tmdb: provider({ candidates: [series] }) });
+    expect(allowed.status).toBe("confirmed");
+    expect(allowed.season?.seasonNumber).toBe(0);
+    const outOfRange = await identifyScanFile({ file: facts("Black Mirror S00E02.mkv"), mediaKind: "tv" }, { tmdb: provider({ candidates: [series] }) });
+    expect(outOfRange.status).toBe("pending");
+    const unknown = await identifyScanFile({ file: facts("Black Mirror S00E01.mkv"), mediaKind: "tv" }, {
+      tmdb: provider({ candidates: [series], details: { ...detail(series), seasons: [{ seasonNumber: 1, episodeCount: 3 }, { seasonNumber: 0, episodeCount: 0 }] }, getSeason: async () => { throw new Error("unavailable"); } }),
+    });
+    expect(unknown.status).toBe("pending");
   });
 
   it("keeps same-title remakes pending when the year is absent", async () => {
