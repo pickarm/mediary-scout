@@ -7,8 +7,9 @@
  * Lives here (not in storage-brands.ts) because building the 115 executor pulls
  * in env/protected-wrapper concerns the brand-identity registry must stay free of.
  */
-import { GuangYaClient } from "./guangya-client.js";
+import { GuangYaClient, parseGuangYaUid } from "./guangya-client.js";
 import type { GuangYaClientOptions } from "./guangya-client.js";
+import { createGuangYaRequestScheduler, getGuangYaMinIntervalMs } from "./library/guangya-request-scheduler.js";
 import { GuangYaStorageExecutor } from "./guangya-storage-executor.js";
 import { createProtectedPan115CookieStorageExecutorFromEnv } from "./pan115-storage-factory.js";
 import { Pan123Client } from "./pan123-client.js";
@@ -36,6 +37,8 @@ export function createExecutorForBrand(input: {
   /** Persist hook for refreshed token-auth credentials (光鸭 refresh rotates tokens;
    *  天翼 session 自愈轮换 sessionKey/accessToken). */
   onCredentialRefresh?: (creds: unknown) => void | Promise<void>;
+  /** Stable 光鸭 account UID from connected_storages.provider_uid, when available. */
+  providerUid?: string;
 }): StorageExecutor {
   if (input.provider === "pan115") {
     const cookie = input.cookie ?? "";
@@ -76,6 +79,11 @@ export function createExecutorForBrand(input: {
     if (c.deviceId !== undefined) {
       clientOptions.deviceId = c.deviceId;
     }
+    const accountKey = input.providerUid?.trim() || parseGuangYaUid(c.accessToken ?? "") || c.deviceId?.trim() || "unknown-account";
+    clientOptions.requestScheduler = createGuangYaRequestScheduler({
+      accountKey: `guangya:${accountKey}`,
+      minIntervalMs: getGuangYaMinIntervalMs(input.env ?? process.env),
+    });
     const onRefresh = input.onCredentialRefresh;
     if (onRefresh) {
       clientOptions.onTokensRefreshed = (t) => onRefresh(t);

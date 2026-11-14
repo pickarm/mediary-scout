@@ -1,5 +1,6 @@
 import { parseFiniteMetric } from "./domain.js";
 import { fetchWithTimeout } from "./fetch-with-timeout.js";
+import type { GuangYaRequestPriority, GuangYaRequestScheduler } from "./library/guangya-request-scheduler.js";
 
 /**
  * 光鸭云盘 (GuangYaPan) HTTP client — the brand-3 analogue of Pan115CookieClient
@@ -88,6 +89,10 @@ export interface GuangYaClientOptions {
   onTokensRefreshed?: (tokens: GuangYaTokens) => void | Promise<void>;
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: GuangYaFetch;
+  /** Optional shared account queue. Omitted direct clients preserve their old behavior. */
+  requestScheduler?: GuangYaRequestScheduler;
+  /** Priority used by API calls other than explicit scan listings. Defaults to writes. */
+  requestPriority?: GuangYaRequestPriority;
 }
 
 /**
@@ -151,6 +156,8 @@ export class GuangYaClient {
   private readonly deviceId: string;
   private readonly onTokensRefreshed: ((tokens: GuangYaTokens) => void | Promise<void>) | undefined;
   private readonly fetchImpl: GuangYaFetch;
+  private readonly requestScheduler: GuangYaRequestScheduler | undefined;
+  private readonly requestPriority: GuangYaRequestPriority;
 
   constructor(options: GuangYaClientOptions) {
     // Trim tokens defensively (mirrors TianyiClient): the credential extraction now
@@ -162,6 +169,8 @@ export class GuangYaClient {
     this.deviceId = options.deviceId?.trim() || generateGuangYaDeviceId();
     this.onTokensRefreshed = options.onTokensRefreshed;
     this.fetchImpl = options.fetchImpl ?? ((url, init) => fetchWithTimeout(url, init, DEFAULT_HTTP_TIMEOUT_MS));
+    this.requestScheduler = options.requestScheduler;
+    this.requestPriority = options.requestPriority ?? "write";
   }
 
   /** GET account/v1/user/me (Bearer); refresh+retry once on 401. Returns `sub`. */
@@ -174,10 +183,11 @@ export class GuangYaClient {
   }
 
   private async getMeSub(retried: boolean): Promise<string> {
-    const response = await this.fetchImpl(`${AUTH_HOST}/v1/user/me`, {
-      method: "GET",
-      headers: this.authHeaders(),
-    });
+    const response = await this.fetchScheduled(
+      `${AUTH_HOST}/v1/user/me`,
+      () => ({ method: "GET", headers: this.authHeaders() }),
+      "read",
+    );
     if (response.status === 401) {
       if (retried) {
         throw new GuangYaAuthError("GUANGYA_VALIDATE_FAILED: 401 after refresh");
@@ -202,7 +212,7 @@ export class GuangYaClient {
         orderBy: 3,
         sortType: 1,
         fileTypes: [],
-      });
+      }, false, undefined, "scan-read");
       const list = arrayValue(recordValue(data, "list")).filter(isRecord);
       for (const raw of list) {
         items.push(toItem(raw));
@@ -230,7 +240,7 @@ export class GuangYaClient {
       orderBy: 3,
       sortType: 1,
       fileTypes: [],
-    });
+    }, false, undefined, "scan-read");
     const list = arrayValue(recordValue(data, "list")).filter(isRecord);
     return { items: list.map(toItem), hasMore: list.length === pageSize };
   }
@@ -259,7 +269,7 @@ export class GuangYaClient {
 
   /** Resolve a share/magnet URL to its resType + (for bt) subfile listing. */
   async resolveRes(url: string): Promise<GuangYaResolvedRes> {
-    const data = await this.postAPI("/cloudcollection/v1/resolve_res", { url });
+    const data = await this.postAPI("/cloudcollection/v1/resolve_res", { url }, false, undefined, "read");
     return toResolvedRes(data);
   }
 
@@ -297,7 +307,7 @@ export class GuangYaClient {
    *  which postAPI already turns into a loud GUANGYA_API_FAILED carrying the msg. */
   async getShareAccessToken(shareId: string, code: string): Promise<string> {
     const envelope: { top?: unknown } = {};
-    const data = await this.postAPI("/userres/v1/get_share_access_token", { shareId, code }, false, envelope);
+    const data = await this.postAPI("/userres/v1/get_share_access_token", { shareId, code }, false, envelope, "read");
     // Real responses carry data.accessToken (probe 2026-09-24); guangyaclient-go also
     // models a top-level access_token, so accept either rather than call a live share dead.
     const token = stringValue(recordValue(data, "accessToken")) || stringValue(recordValue(envelope.top, "access_token"));
@@ -326,7 +336,7 @@ export class GuangYaClient {
     for (let page = 0; page < maxPages; page += 1) {
       const body: Record<string, unknown> = { pageSize, accessToken, orderBy: 0, sortType: 0, parentId };
       if (cursor !== undefined) body.cursor = cursor;
-      const data = await this.postAPI("/userres/v1/get_share_page_files_list", body);
+      const data = await this.postAPI("/userres/v1/get_share_page_files_list", body, false, undefined, "read");
       const list = arrayValue(recordValue(data, "list")).filter(isRecord);
       for (const raw of list) items.push(toItem(raw));
       const next = numberValue(recordValue(data, "cursor"));
@@ -358,19 +368,19 @@ export class GuangYaClient {
 
   /** Status of a file task (restore/copy/move/delete): 1 = running, 2 = done. */
   async getTaskStatus(taskId: string): Promise<{ status: number }> {
-    const data = await this.postAPI("/userres/v1/get_task_status", { taskId });
+    const data = await this.postAPI("/userres/v1/get_task_status", { taskId }, false, undefined, "read");
     return { status: numberValue(recordValue(data, "status")) };
   }
 
   /** Poll the status/progress of offline tasks. */
   async listTask(taskIds: string[]): Promise<GuangYaTaskStatus[]> {
-    const data = await this.postAPI("/cloudcollection/v1/list_task", { taskIds });
+    const data = await this.postAPI("/cloudcollection/v1/list_task", { taskIds }, false, undefined, "read");
     return arrayValue(recordValue(data, "list")).filter(isRecord).map(toTaskStatus);
   }
 
   /** Query total and used storage capacity (`POST /assets/v1/get_assets`). */
   async getSpace(): Promise<{ totalBytes: number; usedBytes: number } | null> {
-    const data = await this.postAPI("/assets/v1/get_assets", {});
+    const data = await this.postAPI("/assets/v1/get_assets", {}, false, undefined, "read");
     const totalBytes = parseFiniteMetric(recordValue(data, "totalSpaceSize"));
     const usedBytes = parseFiniteMetric(recordValue(data, "usedSpaceSize"));
     if (!Number.isFinite(totalBytes) || !Number.isFinite(usedBytes) || totalBytes <= 0) {
@@ -385,12 +395,18 @@ export class GuangYaClient {
    * `msg===""||msg==="success"`; otherwise throw (GuangYaAuthError on auth
    * failure, plain Error otherwise) carrying the server msg.
    */
-  private async postAPI(path: string, body: unknown, retried = false, envelope?: { top?: unknown }): Promise<unknown> {
-    const response = await this.fetchImpl(`${API_HOST}${path}`, {
+  private async postAPI(
+    path: string,
+    body: unknown,
+    retried = false,
+    envelope?: { top?: unknown },
+    priority: GuangYaRequestPriority = this.requestPriority,
+  ): Promise<unknown> {
+    const response = await this.fetchScheduled(`${API_HOST}${path}`, () => ({
       method: "POST",
       headers: this.apiHeaders(),
       body: JSON.stringify(body),
-    });
+    }), priority);
     const json = (await response.json().catch(() => ({}))) as unknown;
     if (envelope) envelope.top = json;
     const numericCode = parseEnvelopeCode(recordValue(json, "code"));
@@ -404,7 +420,7 @@ export class GuangYaClient {
         );
       }
       await this.refreshTokens();
-      return this.postAPI(path, body, true, envelope);
+      return this.postAPI(path, body, true, envelope, priority);
     }
     const msg = stringValue(recordValue(json, "msg"));
     if (response.ok && (numericCode === null || numericCode === 0) && (msg === "" || msg.toLowerCase() === "success")) {
@@ -420,17 +436,15 @@ export class GuangYaClient {
    * GuangYaAuthError on failure (refresh token dead).
    */
   private async refreshTokens(): Promise<void> {
-    const response = await this.fetchImpl(`${AUTH_HOST}/v1/auth/token`, {
+    const response = await this.fetchScheduled(`${AUTH_HOST}/v1/auth/token`, () => ({
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         client_id: GUANGYA_CLIENT_ID,
         grant_type: "refresh_token",
         refresh_token: this.refreshToken,
       }),
-    });
+    }), this.requestPriority);
     const json = (await response.json()) as unknown;
     const accessToken = stringValue(recordValue(json, "access_token"));
     if (!response.ok || !accessToken) {
@@ -468,6 +482,11 @@ export class GuangYaClient {
       Did: this.deviceId,
       Dt: "4",
     };
+  }
+
+  private fetchScheduled(url: string, init: () => RequestInit, priority: GuangYaRequestPriority): Promise<Response> {
+    const perform = () => this.fetchImpl(url, init());
+    return this.requestScheduler ? this.requestScheduler.schedule(perform, priority) : perform();
   }
 }
 

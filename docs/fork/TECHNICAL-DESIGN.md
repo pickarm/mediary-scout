@@ -41,6 +41,7 @@
 
 ## 部署与迁移
 一个standalone应用镜像，外接MEDIA_TRACK_POSTGRES_URL、REDIS_URL、PanSou。源码Fork为pickarm/mediary-scout，用户确认Docker Hub命名空间qicket，镜像为qicket/mediary-scout。GitHub Actions通过DockerHub变量和secret发布linux/amd64，发布前校验镜像启动。Fork发行信息不再要求桌面安装包。
+发行任务同时检查`.dockerignore`排除`.worktrees/`及本地工具/归档，构建上下文只从已提交的审核版本导出；不能仅依靠`.gitignore`保护镜像构建。发布令牌经本地验证具有目标仓库push权限，CI设置不得将令牌写入workflow或仓库文件。
 演练模式统一拒绝真实网盘写入并关闭自动worker；先验证数据库导入和只读状态，再在物理隔离的光鸭目录做真实验证。旧实例停写后才能启用新实例。回退数据库前需停止全部新worker。
 
 ## 验证
