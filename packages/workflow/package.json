@@ -20,6 +20,10 @@
     "./user-requests": {
       "types": "./dist/user-requests.d.ts",
       "default": "./dist/user-requests.js"
+    },
+    "./library": {
+      "types": "./dist/library/index.d.ts",
+      "default": "./dist/library/index.js"
     }
   },
   "dependencies": {

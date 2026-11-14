@@ -217,6 +217,60 @@ export class PostgresScanStore implements ScanStore {
     });
   }
 
+  async listConfigurations(scope: ScanScope, limit = 20, afterConfigId?: string): Promise<ScanConfiguration[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new ScanStoreInputError("configuration page size must be between 1 and 100");
+    await this.ensureSchema();
+    return this.withTransaction(async (client) => {
+      await this.assertOwnership(client, scope);
+      const result = await client.query<{ configuration: unknown }>(
+        "SELECT configuration FROM library_scan_configs WHERE account_id=$1 AND connected_storage_id=$2 AND ($3::text IS NULL OR config_id > $3) ORDER BY config_id LIMIT $4",
+        [scope.accountId, scope.connectedStorageId, afterConfigId ?? null, limit],
+      );
+      return result.rows.flatMap(({ configuration }) => {
+        if (!configuration || typeof configuration !== "object") return [];
+        const config = configuration as ScanConfiguration;
+        try {
+          if (config.scope?.accountId !== scope.accountId || config.scope.connectedStorageId !== scope.connectedStorageId) return [];
+          validateConfiguration(config);
+          return [config];
+        } catch { return []; }
+      });
+    });
+  }
+
+  async listTasks(scope: ScanScope, input: { limit?: number; afterTaskId?: string } = {}): Promise<ScanTask[]> {
+    const limit = input.limit ?? 20;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new ScanStoreInputError("scan task page size must be between 1 and 100");
+    await this.ensureSchema();
+    return this.withTransaction(async (client) => {
+      await this.assertOwnership(client, scope);
+      const params: Array<string | number> = [scope.accountId, scope.connectedStorageId];
+      let cursor = "";
+      if (input.afterTaskId !== undefined) { params.push(input.afterTaskId); cursor = ` AND task_id > $${params.length}`; }
+      params.push(limit);
+      const result = await client.query<TaskRow>(
+        "SELECT task_id,account_id,connected_storage_id,config_id,status,directories_done,files_discovered,directories_discovered,created_at,updated_at " +
+          `FROM library_scan_tasks WHERE account_id=$1 AND connected_storage_id=$2${cursor} ORDER BY task_id LIMIT $${params.length}`,
+        params,
+      );
+      if (!result.rows.length) return [];
+      const failures = await client.query<FailureRow & { task_id: string }>(
+        "SELECT task_id,directory_id,page,message FROM (SELECT task_id,directory_id,page,message," +
+          "row_number() OVER (PARTITION BY task_id ORDER BY sequence DESC) AS rn FROM library_scan_failures " +
+          "WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=ANY($3::text[]) AND resolved_at IS NULL) recent " +
+          "WHERE rn <= 5 ORDER BY task_id,rn",
+        [scope.accountId, scope.connectedStorageId, result.rows.map((row) => row.task_id)],
+      );
+      const failuresByTask = new Map<string, FailureRow[]>();
+      for (const failure of failures.rows) {
+        const group = failuresByTask.get(failure.task_id) ?? [];
+        group.push(failure);
+        failuresByTask.set(failure.task_id, group);
+      }
+      return result.rows.map((row) => taskFromRow(row, failuresByTask.get(row.task_id) ?? []));
+    });
+  }
+
   async createTask(input: { taskId: string; scope: ScanScope; configuration: ScanConfiguration; roots: readonly { directoryId: string; name: string }[]; now: string }): Promise<ScanTask> {
     if (!input.taskId.trim() || input.roots.length === 0) throw new ScanStoreInputError("task id and at least one root are required");
     await this.ensureSchema();
@@ -516,7 +570,7 @@ export class PostgresScanStore implements ScanStore {
   }
 
   private async assertOwnership(client: PoolClient, scope: ScanScope): Promise<void> {
-    const result = await client.query("SELECT 1 FROM connected_storages WHERE id=$1 AND account_id=$2 AND provider='guangyapan'", [scope.connectedStorageId,scope.accountId]);
+    const result = await client.query("SELECT 1 FROM connected_storages WHERE id=$1 AND account_id=$2 AND provider='guangya'", [scope.connectedStorageId,scope.accountId]);
     if (!result.rowCount) throw new ScanStorageScopeError("网盘不存在或不属于指定账号");
   }
   private async assertTaskScope(client: PoolClient, scope: ScanScope, taskId: string): Promise<void> {
@@ -564,6 +618,21 @@ function sameRoots(left: readonly { directoryId: string; name: string }[], right
 }
 function directoryFromRow(row: DirectoryRow): ScanDirectoryCheckpoint {
   return { directoryId: row.directory_id,parentDirectoryId: row.parent_directory_id,path: row.path,nextPage: Number(row.next_page),status: row.status };
+}
+
+function taskFromRow(row: TaskRow, failures: readonly FailureRow[]): ScanTask {
+  return {
+    taskId: row.task_id,
+    scope: { accountId: row.account_id, connectedStorageId: row.connected_storage_id },
+    configId: row.config_id,
+    status: row.status,
+    directoriesDone: Number(row.directories_done),
+    filesDiscovered: Number(row.files_discovered),
+    directoriesDiscovered: Number(row.directories_discovered),
+    failures: failures.map((failure) => ({ directoryId: failure.directory_id, page: failure.page, message: failure.message })),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 function fileFromRow(row: FileRow): ScanFileFact {
   return { fileId: row.file_id,parentDirectoryId: row.parent_directory_id,name: row.name,isDirectory: row.is_directory,sizeBytes: row.size_bytes === null ? null : Number(row.size_bytes),path: row.path,modifiedAt: row.modified_at };
