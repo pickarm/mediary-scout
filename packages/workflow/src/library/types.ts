@@ -105,6 +105,19 @@ export interface SetSeasonAutoAcquireInput {
   autoAcquire: boolean;
 }
 
+export interface UpdateVerifiedOrganizationLocationInput {
+  accountId: string;
+  connectedStorageId: string;
+  taskId: string;
+  operationKey: string;
+  fileId: string;
+  parentDirectoryId: string;
+  /** Actual parent of this new directory, when a fresh traversal established it. */
+  parentOfTargetDirectoryId?: string | null;
+  name: string;
+  now?: string;
+}
+
 export interface LibraryStore {
   importExistingMedia(input: ImportExistingMediaInput): Promise<ImportExistingMediaResult>;
   findDirectoryBinding(input: FindDirectoryBindingInput): Promise<LibraryDirectoryBinding | null>;
@@ -114,4 +127,6 @@ export interface LibraryStore {
     input: ListPhysicalFileBindingsInput,
   ): Promise<LibraryPhysicalFileBinding[]>;
   setSeasonAutoAcquire(input: SetSeasonAutoAcquireInput): Promise<void>;
+  /** Sync a physical binding only from a persisted, F06-verified operation. */
+  updateVerifiedOrganizationLocation(input: UpdateVerifiedOrganizationLocationInput): Promise<boolean>;
 }

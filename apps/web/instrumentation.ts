@@ -32,4 +32,6 @@ export async function register(): Promise<void> {
   // Scan recovery has its own bounded timer so a long acquisition drain cannot starve it.
   const { startLibraryScanWorker } = await import("./lib/library-scan-worker");
   startLibraryScanWorker();
+  const { startLibraryOrganizationWorker } = await import("./lib/library-organization-worker");
+  startLibraryOrganizationWorker();
 }

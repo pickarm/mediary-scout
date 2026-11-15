@@ -12,6 +12,7 @@ import type {
   LibraryStore,
   ListPhysicalFileBindingsInput,
   SetSeasonAutoAcquireInput,
+  UpdateVerifiedOrganizationLocationInput,
 } from "./types.js";
 
 /** A stable lock key separate from the workflow schema's advisory lock. */
@@ -909,6 +910,62 @@ export class PostgresLibraryStore implements LibraryStore {
         "UPDATE tracked_seasons SET payload = $1::jsonb WHERE id = $2 AND connected_storage_id = $3 AND account_id = $4",
         [JSON.stringify(updated), input.trackedSeasonId, input.connectedStorageId, input.accountId],
       );
+    });
+  }
+
+  async updateVerifiedOrganizationLocation(input: UpdateVerifiedOrganizationLocationInput): Promise<boolean> {
+    await this.ensureSchema();
+    return this.withTransaction(async (client) => {
+      await this.assertStorageOwnership(client,input.accountId,input.connectedStorageId);
+      const verified = await client.query<{ media_title_id: string; tracked_season_id: string; media_type: string; tmdb_id: number | string }>(
+        `SELECT (identity->>'mediaTitleId') AS media_title_id,(identity->>'trackedSeasonId') AS tracked_season_id,
+                identity->>'mediaType' AS media_type,(identity->>'tmdbId') AS tmdb_id
+           FROM library_organization_operations
+          WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND operation_key=$4
+            AND file_id=$5 AND target_parent_id=$6 AND target_name=$7 AND status='verified'
+          FOR SHARE`,
+        [input.accountId,input.connectedStorageId,input.taskId,input.operationKey,input.fileId,input.parentDirectoryId,input.name],
+      );
+      const operation = verified.rows[0];
+      if (!operation || !operation.media_title_id || !operation.tracked_season_id) return false;
+      const binding = await client.query<{ media_title_id: string; tracked_season_id: string; parent_directory_id: string }>(
+        `SELECT media_title_id,tracked_season_id,parent_directory_id FROM library_file_bindings
+          WHERE account_id=$1 AND connected_storage_id=$2 AND file_id=$3 FOR UPDATE`,
+        [input.accountId,input.connectedStorageId,input.fileId],
+      );
+      const current = binding.rows[0];
+      if (!current || current.media_title_id !== operation.media_title_id || current.tracked_season_id !== operation.tracked_season_id) return false;
+      const season = await client.query<{ media_type: string; tmdb_id: number | string; season_number: number | string }>(
+        `SELECT b.media_type,b.tmdb_id,b.season_number FROM library_directory_bindings b
+          WHERE b.account_id=$1 AND b.connected_storage_id=$2 AND b.directory_id=$3
+            AND b.media_title_id=$4 AND b.tracked_season_id=$5 FOR SHARE`,
+        [input.accountId,input.connectedStorageId,current.parent_directory_id,current.media_title_id,current.tracked_season_id],
+      );
+      const source = season.rows[0];
+      if (!source || source.media_type !== operation.media_type || Number(source.tmdb_id) !== Number(operation.tmdb_id)) return false;
+      const knownTargetDirectory = await client.query<{parent_directory_id:string|null}>(
+        "SELECT parent_directory_id FROM library_directory_bindings WHERE account_id=$1 AND connected_storage_id=$2 AND directory_id=$3 AND media_title_id=$4 AND tracked_season_id=$5",
+        [input.accountId,input.connectedStorageId,input.parentDirectoryId,current.media_title_id,current.tracked_season_id],
+      );
+      if (!knownTargetDirectory.rowCount && input.parentOfTargetDirectoryId === undefined) return false;
+      if (knownTargetDirectory.rows[0] && input.parentOfTargetDirectoryId !== undefined && knownTargetDirectory.rows[0].parent_directory_id !== input.parentOfTargetDirectoryId) return false;
+      await client.query(
+        `INSERT INTO library_directory_bindings(account_id,connected_storage_id,directory_id,parent_directory_id,media_title_id,tracked_season_id,media_type,tmdb_id,season_number,exclusive,bound_at)
+         VALUES($1,$2,$3,$10,$4,$5,$6,$7,$8,false,$9) ON CONFLICT DO NOTHING`,
+        [input.accountId,input.connectedStorageId,input.parentDirectoryId,current.media_title_id,current.tracked_season_id,source.media_type,Number(source.tmdb_id),Number(source.season_number),input.now ?? new Date().toISOString(),input.parentOfTargetDirectoryId ?? null],
+      );
+      const target = await client.query(
+        `SELECT 1 FROM library_directory_bindings WHERE account_id=$1 AND connected_storage_id=$2 AND directory_id=$3
+          AND media_title_id=$4 AND tracked_season_id=$5`,
+        [input.accountId,input.connectedStorageId,input.parentDirectoryId,current.media_title_id,current.tracked_season_id],
+      );
+      if (!target.rowCount) return false;
+      await client.query(
+        `UPDATE library_file_bindings SET parent_directory_id=$6,bound_at=$7
+          WHERE account_id=$1 AND connected_storage_id=$2 AND file_id=$3 AND media_title_id=$4 AND tracked_season_id=$5`,
+        [input.accountId,input.connectedStorageId,input.fileId,current.media_title_id,current.tracked_season_id,input.parentDirectoryId,input.now ?? new Date().toISOString()],
+      );
+      return true;
     });
   }
 }

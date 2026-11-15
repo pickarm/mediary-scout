@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS library_organization_plans (
   skipped_files jsonb NOT NULL DEFAULT '[]'::jsonb,
   lease_id text,
   lease_expires_at timestamptz,
+  execute_requested boolean NOT NULL DEFAULT false,
   created_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL,
   PRIMARY KEY(account_id, connected_storage_id, task_id, operation_key)
@@ -49,6 +50,7 @@ CREATE INDEX IF NOT EXISTS library_organization_operations_status
 `;
 const SCHEMA_COMPAT = `
   ALTER TABLE library_organization_plans ADD COLUMN IF NOT EXISTS skipped_files jsonb NOT NULL DEFAULT '[]'::jsonb;
+  ALTER TABLE library_organization_plans ADD COLUMN IF NOT EXISTS execute_requested boolean NOT NULL DEFAULT false;
   ALTER TABLE library_organization_plans ADD COLUMN IF NOT EXISTS target_roots_by_media_type jsonb NOT NULL DEFAULT '{}'::jsonb;
   ALTER TABLE library_organization_operations ADD COLUMN IF NOT EXISTS identity jsonb;
   ALTER TABLE library_organization_operations ADD COLUMN IF NOT EXISTS paired_file_id text;
@@ -72,9 +74,18 @@ export interface OrganizationStore {
   renew(scope: OrganizationScope, taskId: string, operationKey: string, leaseId: string, now: string, expiresAt: string): Promise<boolean>;
   updateOperation(scope: OrganizationScope, taskId: string, operationKey: string, leaseId: string, operation: OrganizationOperation, now: string): Promise<boolean>;
   finish(scope: OrganizationScope, taskId: string, operationKey: string, leaseId: string, status: OrganizationTaskStatus, now: string): Promise<boolean>;
+  requestExecution(scope: OrganizationScope, taskId: string, operationKey: string, now: string): Promise<boolean>;
+  pause(scope: OrganizationScope, taskId: string, operationKey: string, now: string): Promise<boolean>;
+  listRequested(scope: OrganizationScope, limit: number): Promise<Array<{ taskId: string; operationKey: string }>>;
+  listPlans(scope: OrganizationScope, taskId: string, input: { limit: number; afterOperationKey?: string }): Promise<Array<{ operationKey: string; status: OrganizationTaskStatus; createdAt: string; updatedAt: string; skippedFiles: Array<{fileId:string;reason:string}>; operationCount: number }>>;
+  getPlanSummary(scope: OrganizationScope, taskId: string, operationKey: string): Promise<{ operationKey: string; status: OrganizationTaskStatus; createdAt: string; updatedAt: string; skippedFiles: Array<{fileId:string;reason:string}>; operationCount: number } | null>;
+  listVerifiedLocationsToSync(scope: OrganizationScope, taskId: string, operationKey: string, limit: number): Promise<Array<{ fileId:string; parentId:string; name:string; targetRootId:string; relativePath:string }>>;
+  listVerifiedLocationPlanKeys(scope: OrganizationScope, limit: number): Promise<Array<{taskId:string;operationKey:string}>>;
+  listOperations(scope: OrganizationScope, taskId: string, operationKey: string, input: { limit: number; afterOperationId?: string }): Promise<OrganizationOperation[]>;
+  derivePlanInput(scope: OrganizationScope, taskId: string, input: { fileIds?: readonly string[]; afterFileId?: string; limit: number; operationKey: string }): Promise<OrganizationPlanInput>;
 }
 
-interface PlanRow { account_id: string; connected_storage_id: string; task_id: string; operation_key: string; source_root_ids: string[]; target_root_ids: string[]; target_roots_by_media_type: Partial<Record<OrganizationIdentity["mediaType"],string>>; skipped_files: Array<{fileId:string;reason:string}>; status: OrganizationTaskStatus; created_at: Date; updated_at: Date; }
+interface PlanRow { account_id: string; connected_storage_id: string; task_id: string; operation_key: string; source_root_ids: string[]; target_root_ids: string[]; target_roots_by_media_type: Partial<Record<OrganizationIdentity["mediaType"],string>>; skipped_files: Array<{fileId:string;reason:string}>; status: OrganizationTaskStatus; execute_requested: boolean; created_at: Date; updated_at: Date; }
 interface OperationRow { operation_id: string; file_id: string; original_parent_id: string; original_name: string; target_root_id: string; target_relative_path: string; target_parent_id: string | null; target_name: string; identity: unknown; paired_file_id: string; paired_video_target_path: string; status: OrganizationOperation["status"]; error: string | null; }
 interface ScanConfigRow { status: string; configuration: unknown; }
 interface ScanDirectoryAuthRow { directory_id: string; parent_directory_id: string | null; path: string; }
@@ -96,10 +107,10 @@ export class PostgresOrganizationStore implements OrganizationStore {
     const client = await this.pool.connect();
     try {
       await this.assertStorage(client,input.scope);
-      const context = await loadScanAuthorization(client,input.scope,input.taskId);
+      const context = await loadScanAuthorization(client,input.scope,input.taskId,[...input.confirmedFiles.map(({fileId})=>fileId),...(input.preSkippedFiles ?? []).map(({fileId})=>fileId)]);
       if (!sameSet(input.sourceRoots,context.sourceRootIds)) throw new Error("整理来源根与该扫描任务持久化配置不一致");
       const suppliedById = new Map(input.confirmedFiles.map((file) => [file.fileId,file]));
-      if (suppliedById.size !== input.confirmedFiles.length || suppliedById.size === 0) throw new Error("整理计划必须包含唯一且已确认的媒体文件");
+      if (suppliedById.size !== input.confirmedFiles.length || (suppliedById.size === 0 && !(input.preSkippedFiles?.length))) throw new Error("整理计划必须包含已确认媒体文件或明确的安全跳过项");
       const identities = await loadBoundIdentities(client,input.scope,input.confirmedFiles.map(({fileId}) => fileId));
       const authorizedFiles = input.confirmedFiles.map((file) => {
         const scanFact = context.files.get(file.fileId);
@@ -134,12 +145,70 @@ export class PostgresOrganizationStore implements OrganizationStore {
     } finally { client.release(); }
   }
 
+  /** Constructs planner facts exclusively from the persisted scan and F02 rows. */
+  async derivePlanInput(scope: OrganizationScope, taskId: string, selection: { fileIds?: readonly string[]; afterFileId?: string; limit: number; operationKey: string }): Promise<OrganizationPlanInput> {
+    if (!Number.isSafeInteger(selection.limit) || selection.limit < 1 || selection.limit > 100) throw new RangeError("organization preview batch must be 1..100");
+    if (!selection.operationKey.trim()) throw new Error("整理清单幂等键不能为空");
+    if (selection.fileIds && (selection.fileIds.length < 1 || selection.fileIds.length > 100 || new Set(selection.fileIds).size !== selection.fileIds.length || selection.fileIds.some((id) => !id.trim()))) throw new Error("整理文件选择必须包含1至100个唯一文件ID");
+    await this.ensureSchema();
+    const client = await this.pool.connect();
+    try {
+      await this.assertStorage(client,scope);
+      let requested: string[];
+      if (selection.fileIds) requested = [...selection.fileIds];
+      else {
+        const ids = await client.query<{file_id:string}>(
+          `SELECT f.file_id FROM library_scan_task_files f JOIN library_file_bindings b
+             ON b.account_id=f.account_id AND b.connected_storage_id=f.connected_storage_id AND b.file_id=f.file_id
+            WHERE f.account_id=$1 AND f.connected_storage_id=$2 AND f.task_id=$3 AND NOT f.is_directory
+              AND ($4::text IS NULL OR f.file_id>$4) ORDER BY f.file_id LIMIT $5`,
+          [scope.accountId,scope.connectedStorageId,taskId,selection.afterFileId ?? null,selection.limit],
+        );
+        requested = ids.rows.map(({file_id}) => file_id);
+      }
+      if (requested.length === 0) throw new Error("没有可整理的已导入文件");
+      const context = await loadScanAuthorization(client,scope,taskId,requested);
+      const identities = await loadBoundIdentities(client,scope,requested);
+      const confirmedFiles: OrganizationPlanInput["confirmedFiles"][number][] = [];
+      const preSkippedFiles: Array<{fileId:string;reason:string}> = [];
+      for (const fileId of requested) {
+        const fact = context.files.get(fileId);
+        const binding = identities.get(fileId);
+        if (!fact || fact.isDirectory || !binding || fact.parentDirectoryId !== binding.parent_directory_id) throw new Error(`文件 ${fileId} 不存在于该任务的持久扫描及已导入绑定中`);
+        const codes = Array.isArray(binding.episode_codes) ? binding.episode_codes.filter((value): value is string => typeof value === "string") : [];
+        if (binding.media_type !== "movie" && codes.length !== 1) {
+          preSkippedFiles.push({fileId,reason:`该provider文件绑定了${codes.length}集，当前命名模板不能安全表达完整多集身份，已保留原位`});
+          continue;
+        }
+        const title = asRecord(binding.title_payload);
+        const season = asRecord(binding.season_payload);
+        const episodeCode = codes[0];
+        const episodeMatch = episodeCode ? /^S\d{2}E(\d+)$/u.exec(episodeCode) : null;
+        confirmedFiles.push({fileId,parentDirectoryId:fact.parentDirectoryId,name:fact.name,isDirectory:false,confirmed:true,identity:{
+          mediaTitleId:binding.media_title_id,trackedSeasonId:binding.tracked_season_id,mediaType:binding.media_type as OrganizationIdentity["mediaType"],
+          title:String(title.title ?? ""),originalTitle:String(title.originalTitle ?? ""),year:Number(title.year),tmdbId:Number(binding.tmdb_id),
+          season:Number(season.seasonNumber ?? 1),...(episodeCode ? {episodeCode} : {}),...(episodeMatch ? {episode:Number(episodeMatch[1])} : {}),
+          ...(binding.quality ? {resolution:binding.quality} : {}),
+        }});
+      }
+      if (!confirmedFiles.length && !preSkippedFiles.length) throw new Error("所选范围内没有可整理的已导入文件");
+      const targetRootByMediaType: Partial<Record<OrganizationIdentity["mediaType"],string>> = {};
+      for (const file of confirmedFiles) {
+        const configured = configuredTarget(context.configuration,file.identity.mediaType);
+        if (!configured) throw new Error(`媒体类型 ${file.identity.mediaType} 尚未配置整理目标目录`);
+        targetRootByMediaType[file.identity.mediaType] = configured;
+      }
+      const targetRoots = [...new Set(Object.values(targetRootByMediaType).filter((value): value is string => typeof value === "string"))];
+      return {scope,taskId,operationKey:selection.operationKey,sourceRoots:context.sourceRootIds,targetRoots,targetRootByMediaType,graph:context.graph,confirmedFiles,preSkippedFiles};
+    } finally { client.release(); }
+  }
+
   async authorizeExecution(plan: OrganizationPlan): Promise<void> {
     await this.ensureSchema();
     const client = await this.pool.connect();
     try {
       await this.assertStorage(client,plan.scope);
-      const context = await loadScanAuthorization(client,plan.scope,plan.taskId);
+      const context = await loadScanAuthorization(client,plan.scope,plan.taskId,[...plan.operations.map(({fileId})=>fileId),...plan.operations.map(({pairedFileId})=>pairedFileId)]);
       if (!sameSet(plan.sourceRootIds,context.sourceRootIds)) throw new Error("整理清单来源根已不再匹配持久化扫描配置");
       const pairedIds = [...new Set(plan.operations.map(({pairedFileId}) => pairedFileId))];
       const identities = await loadBoundIdentities(client,plan.scope,pairedIds);
@@ -251,8 +320,75 @@ export class PostgresOrganizationStore implements OrganizationStore {
 
   async finish(scope: OrganizationScope, taskId: string, operationKey: string, leaseId: string, status: OrganizationTaskStatus, now: string): Promise<boolean> {
     await this.ensureSchema();
-    const result = await this.pool.query(`UPDATE library_organization_plans SET status=$6,lease_id=NULL,lease_expires_at=NULL,updated_at=$7 WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND operation_key=$4 AND lease_id=$5`, [scope.accountId,scope.connectedStorageId,taskId,operationKey,leaseId,status,now]);
+    const result = await this.pool.query(`UPDATE library_organization_plans SET status=$6,execute_requested=CASE WHEN $6 IN ('completed','failed') THEN false ELSE execute_requested END,lease_id=NULL,lease_expires_at=NULL,updated_at=$7 WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND operation_key=$4 AND lease_id=$5`, [scope.accountId,scope.connectedStorageId,taskId,operationKey,leaseId,status,now]);
     return result.rowCount === 1;
+  }
+
+  async requestExecution(scope: OrganizationScope, taskId: string, operationKey: string, now: string): Promise<boolean> {
+    await this.ensureSchema();
+    const result = await this.pool.query(`UPDATE library_organization_plans SET execute_requested=true,status=CASE WHEN status IN ('completed','running') THEN status ELSE 'planned' END,updated_at=$5 WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND operation_key=$4 AND status <> 'completed'`,[scope.accountId,scope.connectedStorageId,taskId,operationKey,now]);
+    return result.rowCount === 1;
+  }
+
+  async pause(scope: OrganizationScope, taskId: string, operationKey: string, now: string): Promise<boolean> {
+    await this.ensureSchema();
+    const result = await this.pool.query(`UPDATE library_organization_plans SET execute_requested=false,status=CASE WHEN status IN ('planned','running') THEN 'paused' ELSE status END,lease_id=NULL,lease_expires_at=NULL,updated_at=$5 WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND operation_key=$4 AND status <> 'completed'`,[scope.accountId,scope.connectedStorageId,taskId,operationKey,now]);
+    return result.rowCount === 1;
+  }
+
+  async listRequested(scope: OrganizationScope, limit: number): Promise<Array<{ taskId: string; operationKey: string }>> {
+    await this.ensureSchema();
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new RangeError("requested organization page must be 1..20");
+    const result = await this.pool.query<{ task_id:string; operation_key:string }>(`SELECT task_id,operation_key FROM library_organization_plans WHERE account_id=$1 AND connected_storage_id=$2 AND execute_requested=true AND status IN ('planned','paused','failed','running') AND (lease_id IS NULL OR lease_expires_at <= now()) ORDER BY updated_at,task_id,operation_key LIMIT $3`,[scope.accountId,scope.connectedStorageId,limit]);
+    return result.rows.map((row) => ({ taskId:row.task_id,operationKey:row.operation_key }));
+  }
+
+  async listPlans(scope: OrganizationScope, taskId: string, input: { limit: number; afterOperationKey?: string }): Promise<Array<{ operationKey: string; status: OrganizationTaskStatus; createdAt: string; updatedAt: string; skippedFiles: Array<{fileId:string;reason:string}>; operationCount: number }>> {
+    await this.ensureSchema();
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 201) throw new RangeError("organization plan page must be 1..201");
+    const result = await this.pool.query<PlanRow & { operation_count:string }>(`SELECT p.*,COUNT(o.operation_id)::text AS operation_count FROM library_organization_plans p LEFT JOIN library_organization_operations o USING(account_id,connected_storage_id,task_id,operation_key) WHERE p.account_id=$1 AND p.connected_storage_id=$2 AND p.task_id=$3 AND ($4::text IS NULL OR p.operation_key > $4) GROUP BY p.account_id,p.connected_storage_id,p.task_id,p.operation_key ORDER BY p.operation_key LIMIT $5`,[scope.accountId,scope.connectedStorageId,taskId,input.afterOperationKey ?? null,input.limit]);
+    return result.rows.map((row) => ({operationKey:row.operation_key,status:row.status,createdAt:row.created_at.toISOString(),updatedAt:row.updated_at.toISOString(),skippedFiles:row.skipped_files ?? [],operationCount:Number(row.operation_count)}));
+  }
+
+  async getPlanSummary(scope: OrganizationScope, taskId: string, operationKey: string): Promise<{ operationKey: string; status: OrganizationTaskStatus; createdAt: string; updatedAt: string; skippedFiles: Array<{fileId:string;reason:string}>; operationCount: number } | null> {
+    await this.ensureSchema();
+    const result = await this.pool.query<PlanRow & { operation_count:string }>(`SELECT p.*,COUNT(o.operation_id)::text AS operation_count FROM library_organization_plans p LEFT JOIN library_organization_operations o USING(account_id,connected_storage_id,task_id,operation_key) WHERE p.account_id=$1 AND p.connected_storage_id=$2 AND p.task_id=$3 AND p.operation_key=$4 GROUP BY p.account_id,p.connected_storage_id,p.task_id,p.operation_key`,[scope.accountId,scope.connectedStorageId,taskId,operationKey]);
+    const row=result.rows[0];
+    return row?{operationKey:row.operation_key,status:row.status,createdAt:row.created_at.toISOString(),updatedAt:row.updated_at.toISOString(),skippedFiles:row.skipped_files??[],operationCount:Number(row.operation_count)}:null;
+  }
+
+  async listVerifiedLocationsToSync(scope: OrganizationScope, taskId: string, operationKey: string, limit: number): Promise<Array<{ fileId:string; parentId:string; name:string; targetRootId:string; relativePath:string }>> {
+    await this.ensureSchema();
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) throw new RangeError("verified location sync page must be 1..200");
+    const result=await this.pool.query<{file_id:string;target_parent_id:string;target_name:string;target_root_id:string;target_relative_path:string}>(
+      `SELECT o.file_id,o.target_parent_id,o.target_name,o.target_root_id,o.target_relative_path FROM library_organization_operations o
+        JOIN library_file_bindings b ON b.account_id=o.account_id AND b.connected_storage_id=o.connected_storage_id AND b.file_id=o.file_id
+       WHERE o.account_id=$1 AND o.connected_storage_id=$2 AND o.task_id=$3 AND o.operation_key=$4
+         AND o.status='verified' AND o.target_parent_id IS NOT NULL AND b.parent_directory_id<>o.target_parent_id
+       ORDER BY o.operation_id LIMIT $5`,
+      [scope.accountId,scope.connectedStorageId,taskId,operationKey,limit],
+    );
+    return result.rows.map((row)=>({fileId:row.file_id,parentId:row.target_parent_id,name:row.target_name,targetRootId:row.target_root_id,relativePath:row.target_relative_path}));
+  }
+
+  async listVerifiedLocationPlanKeys(scope: OrganizationScope, limit: number): Promise<Array<{taskId:string;operationKey:string}>> {
+    await this.ensureSchema();
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new RangeError("verified location recovery page must be 1..20");
+    const result=await this.pool.query<{task_id:string;operation_key:string}>(
+      `SELECT DISTINCT o.task_id,o.operation_key FROM library_organization_operations o
+        JOIN library_file_bindings b ON b.account_id=o.account_id AND b.connected_storage_id=o.connected_storage_id AND b.file_id=o.file_id
+       WHERE o.account_id=$1 AND o.connected_storage_id=$2 AND o.status='verified' AND o.target_parent_id IS NOT NULL
+         AND b.parent_directory_id<>o.target_parent_id ORDER BY o.task_id,o.operation_key LIMIT $3`,
+      [scope.accountId,scope.connectedStorageId,limit],
+    );
+    return result.rows.map((row)=>({taskId:row.task_id,operationKey:row.operation_key}));
+  }
+
+  async listOperations(scope: OrganizationScope, taskId: string, operationKey: string, input: { limit: number; afterOperationId?: string }): Promise<OrganizationOperation[]> {
+    await this.ensureSchema();
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 201) throw new RangeError("organization operation page must be 1..201");
+    const result = await this.pool.query<OperationRow>(`SELECT o.* FROM library_organization_operations o WHERE o.account_id=$1 AND o.connected_storage_id=$2 AND o.task_id=$3 AND o.operation_key=$4 AND ($5::text IS NULL OR o.operation_id > $5) ORDER BY o.operation_id LIMIT $6`,[scope.accountId,scope.connectedStorageId,taskId,operationKey,input.afterOperationId ?? null,input.limit]);
+    return result.rows.map((row) => ({operationId:row.operation_id,fileId:row.file_id,originalParentId:row.original_parent_id,originalName:row.original_name,targetRootId:row.target_root_id,targetRelativePath:row.target_relative_path,targetParentId:row.target_parent_id,targetName:row.target_name,identity:asIdentity(row.identity),pairedFileId:row.paired_file_id,pairedVideoTargetPath:row.paired_video_target_path,status:row.status,error:row.error}));
   }
 
   private async assertStorage(client: PoolClient, scope: OrganizationScope): Promise<void> {
@@ -275,10 +411,11 @@ async function readPlan(client: PoolClient, scope: OrganizationScope, taskId: st
   const plan = await client.query<PlanRow>(`SELECT * FROM library_organization_plans WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND operation_key=$4`, [scope.accountId,scope.connectedStorageId,taskId,key]);
   const row = plan.rows[0]; if (!row) return null;
   const operations = await client.query<OperationRow>(`SELECT * FROM library_organization_operations WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND operation_key=$4 ORDER BY operation_id`, [scope.accountId,scope.connectedStorageId,taskId,key]);
-  return { scope, taskId, operationKey:key, sourceRootIds:row.source_root_ids, targetRootIds:row.target_root_ids,targetRootByMediaType:row.target_roots_by_media_type ?? {},skippedFiles:row.skipped_files ?? [], status:row.status, createdAt:row.created_at.toISOString(), updatedAt:row.updated_at.toISOString(), operations:operations.rows.map((operation) => ({ operationId:operation.operation_id,fileId:operation.file_id,originalParentId:operation.original_parent_id,originalName:operation.original_name,targetRootId:operation.target_root_id,targetRelativePath:operation.target_relative_path,targetParentId:operation.target_parent_id,targetName:operation.target_name,identity:asIdentity(operation.identity),pairedFileId:operation.paired_file_id,pairedVideoTargetPath:operation.paired_video_target_path,status:operation.status,error:operation.error })) };
+  return { scope, taskId, operationKey:key, sourceRootIds:row.source_root_ids, targetRootIds:row.target_root_ids,targetRootByMediaType:row.target_roots_by_media_type ?? {},skippedFiles:row.skipped_files ?? [], status:row.status, createdAt:row.created_at.toISOString(), updatedAt:row.updated_at.toISOString(), executeRequested:row.execute_requested, operations:operations.rows.map((operation) => ({ operationId:operation.operation_id,fileId:operation.file_id,originalParentId:operation.original_parent_id,originalName:operation.original_name,targetRootId:operation.target_root_id,targetRelativePath:operation.target_relative_path,targetParentId:operation.target_parent_id,targetName:operation.target_name,identity:asIdentity(operation.identity),pairedFileId:operation.paired_file_id,pairedVideoTargetPath:operation.paired_video_target_path,status:operation.status,error:operation.error })) };
 }
 
-async function loadScanAuthorization(client: PoolClient, scope: OrganizationScope, taskId: string): Promise<TrustedScanContext> {
+async function loadScanAuthorization(client: PoolClient, scope: OrganizationScope, taskId: string, referencedFileIds: readonly string[]): Promise<TrustedScanContext> {
+  if (referencedFileIds.length > 400) throw new Error("整理授权检查超过安全文件上限");
   const taskResult = await client.query<ScanConfigRow>(
     `SELECT t.status,c.configuration FROM library_scan_tasks t JOIN library_scan_configs c
        ON c.account_id=t.account_id AND c.connected_storage_id=t.connected_storage_id AND c.config_id=t.config_id
@@ -291,7 +428,26 @@ async function loadScanAuthorization(client: PoolClient, scope: OrganizationScop
   const rootEntries = Array.isArray(configuration.sourceRoots) ? configuration.sourceRoots.map(asRecord) : [];
   const roots = rootEntries.map((root) => ({ directoryId:asNonEmptyString(root.directoryId),name:asNonEmptyString(root.name) }));
   if (!roots.length || roots.some((root) => !root.directoryId || !root.name) || new Set(roots.map(({directoryId}) => directoryId)).size !== roots.length) throw new Error("持久化扫描配置中的来源根无效");
-  const directoryResult = await client.query<ScanDirectoryAuthRow>(`SELECT directory_id,parent_directory_id,path FROM library_scan_directories WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3`, [scope.accountId,scope.connectedStorageId,taskId]);
+  const requestedFiles = referencedFileIds.length ? await client.query<ScanFileAuthRow>(
+    `SELECT file_id,parent_directory_id,name,is_directory FROM library_scan_task_files
+      WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND file_id=ANY($4::text[])`,
+    [scope.accountId,scope.connectedStorageId,taskId,[...referencedFileIds]],
+  ) : { rows:[] as ScanFileAuthRow[] };
+  const targetIds=configuredTargetIds(configuration);
+  const seedIds=[...new Set([...roots.map(({directoryId})=>directoryId),...targetIds,...requestedFiles.rows.map(({parent_directory_id})=>parent_directory_id)])];
+  const directoryResult = await client.query<ScanDirectoryAuthRow>(
+    `WITH RECURSIVE seed(directory_id) AS (SELECT unnest($4::text[])),
+      relevant(directory_id,parent_directory_id,path,depth) AS (
+        SELECT d.directory_id,d.parent_directory_id,d.path,0 FROM library_scan_directories d JOIN seed s USING(directory_id)
+         WHERE d.account_id=$1 AND d.connected_storage_id=$2 AND d.task_id=$3
+        UNION ALL
+        SELECT p.directory_id,p.parent_directory_id,p.path,r.depth+1 FROM relevant r
+          JOIN library_scan_directories p ON p.account_id=$1 AND p.connected_storage_id=$2 AND p.task_id=$3 AND p.directory_id=r.parent_directory_id
+         WHERE r.depth<128
+      )
+      SELECT DISTINCT ON(directory_id) directory_id,parent_directory_id,path FROM relevant ORDER BY directory_id,depth`,
+    [scope.accountId,scope.connectedStorageId,taskId,seedIds],
+  );
   const directoryParents = new Map(directoryResult.rows.map((row) => [row.directory_id,row.parent_directory_id]));
   const rootNames = new Map(roots.map(({directoryId,name}) => [directoryId,name]));
   const directories = directoryResult.rows.map((row) => ({
@@ -300,7 +456,14 @@ async function loadScanAuthorization(client: PoolClient, scope: OrganizationScop
     name:rootNames.get(row.directory_id) ?? pathLeaf(row.path),
   }));
   if (roots.some(({directoryId}) => !directoryParents.has(directoryId))) throw new Error("扫描任务未保存配置中的全部来源根目录事实");
-  const fileResult = await client.query<ScanFileAuthRow>(`SELECT file_id,parent_directory_id,name,is_directory FROM library_scan_task_files WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3`, [scope.accountId,scope.connectedStorageId,taskId]);
+  const parentIds=[...new Set(requestedFiles.rows.filter(({is_directory})=>!is_directory).map(({parent_directory_id})=>parent_directory_id))];
+  const fileResult = parentIds.length ? await client.query<ScanFileAuthRow>(
+    `SELECT file_id,parent_directory_id,name,is_directory FROM library_scan_task_files
+      WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND parent_directory_id=ANY($4::text[])
+      ORDER BY parent_directory_id,file_id LIMIT 1001`,
+    [scope.accountId,scope.connectedStorageId,taskId,parentIds],
+  ) : { rows:[] as ScanFileAuthRow[] };
+  if (fileResult.rows.length > 1000) throw new Error("所选来源目录同级文件超过1000项，无法在安全上限内准确配对字幕，请缩小整理范围");
   const files = new Map(fileResult.rows.map((row) => [row.file_id,{fileId:row.file_id,parentDirectoryId:row.parent_directory_id,name:row.name,isDirectory:row.is_directory}]));
   if (files.size !== fileResult.rows.length || directories.length !== directoryParents.size) throw new Error("扫描任务授权图包含重复provider ID");
   if (fileResult.rows.some((row) => !directoryParents.has(row.parent_directory_id))) throw new Error("扫描任务文件指向未记录的父目录");
@@ -384,6 +547,7 @@ function isSubtitleName(name: string): boolean { return new Set([".srt",".ass","
 
 function validatePlan(plan: OrganizationPlan, key: string): void {
   if (!key.trim() || !plan.scope.accountId.trim() || !plan.scope.connectedStorageId.trim() || !plan.taskId.trim()) throw new Error("整理清单作用域和幂等键不能为空");
+  if (plan.operations.length > 200) throw new Error("整理清单最多允许200个持久化操作");
   const mappedTargets = [...new Set(Object.values(plan.targetRootByMediaType).filter((value): value is string => typeof value === "string"))];
   if (!sameSet(plan.targetRootIds,mappedTargets) || !Array.isArray(plan.skippedFiles)) throw new Error("整理清单目标映射或跳过项无效");
   const ids = new Set<string>();

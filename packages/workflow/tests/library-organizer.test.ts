@@ -29,6 +29,15 @@ class MemoryStore implements OrganizationStore {
   async ensureSchema() {}
   async authorizePlan(value:Parameters<OrganizationStore["authorizePlan"]>[0]) { return value; }
   async authorizeExecution() {}
+  async requestExecution() { return false; }
+  async pause() { return false; }
+  async listRequested() { return []; }
+  async listPlans() { return []; }
+  async getPlanSummary() { return null; }
+  async listVerifiedLocationsToSync() { return []; }
+  async listVerifiedLocationPlanKeys() { return []; }
+  async listOperations() { return []; }
+  async derivePlanInput(): Promise<Awaited<ReturnType<OrganizationStore["derivePlanInput"]>>> { throw new Error("not implemented in organizer unit fixture"); }
   async createOrGet({plan}: {plan:OrganizationPlan; operationKey:string}): Promise<OrganizationPlan> { this.createCalls += 1; this.planValue ??= structuredClone(plan); return structuredClone(this.planValue); }
   async get(): Promise<OrganizationPlan | null> { return this.planValue ? structuredClone(this.planValue) : null; }
   async claim(_scope:OrganizationScope,_taskId:string,_key:string,lease:string): Promise<boolean> { if (this.lease) return false; this.lease = lease; return true; }
@@ -58,6 +67,15 @@ class MemoryStorage implements OrganizationStorage {
 }
 
 describe("safe library organizer", () => {
+  it("persists a skip-only plan when a multi-episode file cannot be represented safely", () => {
+    const base=input([],baseGraph());
+    base.targetRoots=[];
+    const plan=buildOrganizationPlan({...base,preSkippedFiles:[{fileId:"double-episode",reason:"当前模板不能安全表达完整多集身份，已保留原位"}]});
+    expect(plan.operations).toEqual([]);
+    expect(plan.skippedFiles).toEqual([{fileId:"double-episode",reason:"当前模板不能安全表达完整多集身份，已保留原位"}]);
+    expect(plan.targetRootIds).toEqual([]);
+  });
+
   it("skips an already compliant movie and preserves the original extension case", () => {
     const compliant = confirmed("m1","movie-dir","Film (2024).MKV");
     const graph = baseGraph();
