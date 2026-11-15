@@ -32,6 +32,14 @@
     "./preparation-consumer": {
       "types": "./dist/library/preparation-consumer.d.ts",
       "default": "./dist/library/preparation-consumer.js"
+    },
+    "./library-query": {
+      "types": "./dist/library/library-query.d.ts",
+      "default": "./dist/library/library-query.js"
+    },
+    "./summary-cache": {
+      "types": "./dist/library/summary-cache.d.ts",
+      "default": "./dist/library/summary-cache.js"
     }
   },
   "dependencies": {
