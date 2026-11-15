@@ -16,6 +16,17 @@ export { JEV_MODEL };
 export const JEV_CHUNK_SIZE = 150;
 /** p90 was 0.9s over OpenRouter, 1.1s for a 322-candidate batch. 8s is a wide ceiling. */
 export const JEV_TIMEOUT_MS = 8_000;
+const JEV_SLOTS = Symbol.for("media-track.jev.request-slots");
+type RequestSlot = { active: number; limit: number; waiters: Array<() => void> };
+type SlotRegistry = typeof globalThis & { [JEV_SLOTS]?: Map<string, RequestSlot> };
+
+export function configuredJevConcurrency(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.MEDIA_TRACK_AI_CONCURRENCY?.trim();
+  if (!raw) return 2;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1 || value > 10) throw new Error("JEV_CONCURRENCY_INVALID");
+  return value;
+}
 
 export interface JevClientConfig {
   apiKey: string;
@@ -66,12 +77,12 @@ export function createJevJudge(config: JevClientConfig): JevJudge {
     };
     let response: Response;
     try {
-      response = await fetchImpl(baseUrl, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs),
-      });
+      response = await withJevRequestSlot(baseUrl, () => fetchImpl(baseUrl, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(timeoutMs),
+        }));
     } catch (error) {
       // undici quotes the offending header VALUE in its message ('Headers.append: "Bearer
       // sk-…" is an invalid header value.'), and this message is persisted verbatim into
@@ -164,4 +175,36 @@ export function createJevJudge(config: JevClientConfig): JevJudge {
       return merged;
     },
   };
+}
+
+async function withJevRequestSlot<T>(endpoint: string, request: () => Promise<T>): Promise<T> {
+  const registry = globalThis as SlotRegistry;
+  const slots = registry[JEV_SLOTS] ?? new Map<string, RequestSlot>();
+  registry[JEV_SLOTS] = slots;
+  const key = canonicalEndpoint(endpoint);
+  const limit = configuredJevConcurrency();
+  const slot = slots.get(key) ?? { active: 0, limit, waiters: [] };
+  slot.limit = Math.min(slot.limit, limit);
+  slots.set(key, slot);
+  if (slot.active >= slot.limit) await new Promise<void>((resolve) => slot.waiters.push(resolve));
+  else slot.active += 1;
+  try { return await request(); }
+  finally {
+    const next = slot.waiters.shift();
+    if (next) next();
+    else if ((slot.active -= 1) === 0) slots.delete(key);
+  }
+}
+
+function canonicalEndpoint(value: string): string {
+  try {
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().toLowerCase();
+  } catch {
+    return value.trim().toLowerCase();
+  }
 }

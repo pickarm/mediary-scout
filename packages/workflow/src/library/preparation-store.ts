@@ -245,6 +245,7 @@ function validateDescriptor(value: PreparationDescriptor): void {
   if (value.year !== undefined && (!Number.isInteger(value.year) || value.year < 1800 || value.year > 2200)) throw new Error("PREPARATION_YEAR_INVALID");
   if (Buffer.byteLength(JSON.stringify(value), "utf8") > 8192) throw new Error("PREPARATION_DESCRIPTOR_TOO_LARGE");
 }
+export { validateDescriptor as validatePreparationDescriptor };
 function toStoredDescriptor(value: PreparationDescriptor): PreparationDescriptor {
   return {
     accountId: value.accountId,

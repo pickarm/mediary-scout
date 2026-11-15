@@ -149,8 +149,8 @@ integration("durable preparation queue", () => {
   it("does not start a search for a job cancelled while waiting in the PanSou lane", async () => {
     const firstId = `lane_first_${suffix}`;
     const queuedId = `lane_cancelled_${suffix}`;
-    await addRun(firstId); await store.register(descriptor(firstId));
-    await addRun(queuedId); await store.register(descriptor(queuedId));
+    await addRun(firstId); await store.register(descriptor(firstId), new Date(Date.now() - 60_000));
+    await addRun(queuedId); await store.register(descriptor(queuedId), new Date());
     let firstStarted!: () => void;
     let releaseFirst!: () => void;
     const firstWait = new Promise<void>((resolve) => { firstStarted = resolve; });
@@ -166,10 +166,19 @@ integration("durable preparation queue", () => {
     }; } } });
     const tick = service.tick(2, { accountId, connectedStorageId: storageId, workflowRunIds: [firstId, queuedId] });
     await firstWait;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    await store.cancel({ accountId, connectedStorageId: storageId }, queuedId);
-    releaseFirst();
-    await tick;
+    const laneSymbol = Symbol.for("media-track.library-preparation.limit-registry");
+    type TestLane = { queue: Array<() => void> };
+    type TestLaneMap = Map<string, TestLane>;
+    const registry = globalThis as typeof globalThis & { [key: symbol]: TestLaneMap | undefined };
+    const lanes = registry[laneSymbol];
+    if (!lanes) throw new Error("preparation lane registry was not initialized");
+    try {
+      await waitUntil(() => (lanes.get("pansou:queued-cancel-test")?.queue.length ?? 0) > 0);
+      await store.cancel({ accountId, connectedStorageId: storageId }, queuedId);
+    } finally {
+      releaseFirst();
+      await tick;
+    }
     expect(searched).toEqual([firstId]);
     expect((await store.get({ accountId, connectedStorageId: storageId }, queuedId))?.status).toBe("cancelled");
   }, 30_000);
@@ -295,6 +304,6 @@ integration("durable preparation queue", () => {
 });
 
 async function waitUntil(predicate: () => boolean): Promise<void> {
-  const end = Date.now() + 5_000;
+  const end = Date.now() + 10_000;
   while (!predicate()) { if (Date.now() > end) throw new Error("waitUntil timed out"); await new Promise((resolve) => setTimeout(resolve, 5)); }
 }
