@@ -39,6 +39,8 @@ export * from "./quark-qrcode-login.js";
 export * from "./quark-storage-executor.js";
 export * from "./guangya-client.js";
 export * from "./library/guangya-write-coordinator.js";
+export * from "./library/guangya-auth-coordinator.js";
+export * from "./library/guangya-token-persister.js";
 export * from "./guangya-device-login.js";
 export * from "./guangya-storage-executor.js";
 export * from "./tianyi-client.js";

@@ -24,7 +24,7 @@ export async function GET(request: NextRequest, context: RouteContext): Promise<
     const scope = { accountId, connectedStorageId: storageId };
     const service = await getLibraryIdentificationService(scope);
     const page = await service.list(scope, requireString(taskId, "扫描任务 ID", 150), {
-      limit: limit + 1,
+      limit,
       ...(afterFileId === undefined ? {} : { afterFileId }),
       ...(statusValue === null ? {} : { status: statusValue as "confirmed" | "pending" | "ignored" | "failed" }),
     });

@@ -5,10 +5,12 @@ import type { GuangYaRequestPriority } from "./library/guangya-request-scheduler
 import {
   GUANGYA_CLIENT_ID,
   GuangYaAuthError,
+  GuangYaConnectionChangedError,
   GuangYaClient,
   isGuangYaAuthError,
   parseGuangYaUid,
 } from "./guangya-client.js";
+import { createGuangYaAuthCoordinator } from "./library/guangya-auth-coordinator.js";
 
 /** A typed mock fetch so `mock.calls` tuples are `[url, init]` under strict tsc. */
 function mockFetch(impl: GuangYaFetch) {
@@ -211,6 +213,89 @@ describe("GuangYaClient.listFiles", () => {
 });
 
 describe("GuangYaClient 401 -> refresh -> retry", () => {
+  it("shares one refresh across independent clients and persists before either lock exits", async () => {
+    let current = { accessToken: ACCESS, refreshToken: REFRESH, deviceId: "device-1" };
+    let refreshCount = 0;
+    let finishPersist!: () => void;
+    let persistStarted!: () => void;
+    const persistGate = new Promise<void>((resolve) => { finishPersist = resolve; });
+    const persistStartedGate = new Promise<void>((resolve) => { persistStarted = resolve; });
+    const scheduler = createGuangYaRequestScheduler({ accountKey: "guangya:aj6Qo5l86EF4O2AM", minIntervalMs: 0 });
+    const fetchImpl = mockFetch(async (url, init) => {
+      if (url === `${AUTH_HOST}/v1/auth/token`) {
+        refreshCount += 1;
+        expect(JSON.parse(String((init as RequestInit).body))).toMatchObject({ refresh_token: REFRESH });
+        return jsonResponse(200, { access_token: "access-2", refresh_token: "refresh-2" });
+      }
+      const headers = (init as RequestInit).headers as Record<string, string>;
+      if (headers.Authorization === `Bearer ${ACCESS}`) return jsonResponse(401, { msg: "expired" });
+      return jsonResponse(200, { msg: "success", data: { list: [] } });
+    });
+    const options = () => ({
+      ...current,
+      fetchImpl,
+      requestScheduler: scheduler,
+      authCoordinator: createGuangYaAuthCoordinator(),
+      authAccountKey: "guangya:aj6Qo5l86EF4O2AM",
+      loadCurrentCredentials: async () => current,
+      onTokensRefreshed: async (tokens: { accessToken: string; refreshToken: string; deviceId: string }) => {
+        persistStarted();
+        await persistGate;
+        current = { ...tokens };
+        return true;
+      },
+    });
+    const first = new GuangYaClient(options());
+    const second = new GuangYaClient(options());
+
+    const requests = Promise.all([first.listFilesPage("root", 0), second.listFilesPage("root", 0)]);
+    await persistStartedGate;
+    expect(refreshCount).toBe(1);
+    expect(fetchImpl.mock.calls.filter(([url, init]) =>
+      url === `${API_HOST}/userres/v1/file/get_file_list` &&
+      ((init as RequestInit).headers as Record<string, string>).Authorization === "Bearer access-2",
+    )).toHaveLength(0);
+    finishPersist();
+    await requests;
+
+    expect(refreshCount).toBe(1);
+    expect(current).toEqual({ accessToken: "access-2", refreshToken: "refresh-2", deviceId: "device-1" });
+    const refreshedApiCalls = fetchImpl.mock.calls.filter(([url, init]) =>
+      url === `${API_HOST}/userres/v1/file/get_file_list` &&
+      ((init as RequestInit).headers as Record<string, string>).Authorization === "Bearer access-2",
+    );
+    expect(refreshedApiCalls).toHaveLength(2);
+  });
+
+  it("stops a client whose connection is rebound during refresh without classifying it as auth failure", async () => {
+    let rowActive = true;
+    const fetchImpl = mockFetch(async (url) => {
+      if (url === `${AUTH_HOST}/v1/auth/token`) {
+        rowActive = false;
+        return jsonResponse(200, { access_token: "stale-rotated", refresh_token: "stale-refresh" });
+      }
+      return jsonResponse(401, { msg: "expired" });
+    });
+    const client = new GuangYaClient({
+      accessToken: ACCESS,
+      refreshToken: REFRESH,
+      deviceId: "device-1",
+      fetchImpl,
+      authCoordinator: createGuangYaAuthCoordinator(),
+      authAccountKey: "guangya:aj6Qo5l86EF4O2AM",
+      loadCurrentCredentials: async () => rowActive
+        ? { accessToken: ACCESS, refreshToken: REFRESH, deviceId: "device-1" }
+        : null,
+      onTokensRefreshed: async () => false,
+    });
+
+    let caught: unknown;
+    try { await client.listFilesPage("root", 0); } catch (error) { caught = error; }
+    expect(caught).toBeInstanceOf(GuangYaConnectionChangedError);
+    expect(isGuangYaAuthError(caught)).toBe(false);
+    expect(fetchImpl.mock.calls.filter(([url]) => url === `${API_HOST}/userres/v1/file/get_file_list`)).toHaveLength(1);
+  });
+
   it("refreshes tokens on 401, retries once, and reports new tokens", async () => {
     const newAccess = makeJwt({ sub: "aj6Qo5l86EF4O2AM" });
     const newRefresh = "refresh-token-1";

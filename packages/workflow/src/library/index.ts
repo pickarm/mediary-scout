@@ -6,4 +6,7 @@ export * from "./scan-store.js";
 export * from "./identification.js";
 export * from "./identification-store.js";
 export * from "./identification-service.js";
+export * from "./scan-scheduler.js";
 export * from "./guangya-request-scheduler.js";
+export * from "./preparation.js";
+export * from "./preparation-store.js";

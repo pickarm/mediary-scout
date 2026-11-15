@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { LanguageModel } from "ai";
 import { isAgentMemoryEnabled } from "./agent-memory-server";
+import { createGuangYaAuthHooks, freezeGuangYaStorageIfUnchanged } from "./guangya-auth-runtime";
 import { cache } from "react";
 import {
   checkLoginAllowed,
@@ -69,11 +70,16 @@ import {
   parseTianyiUid,
   UC_PROFILE,
   parsePan123Uid,
+  parseGuangYaUid,
+  getGuangYaAuthCoordinator,
   generateGuangYaDeviceId,
   GuangYaClient,
+  getGuangYaAuthFailureSnapshot,
+  isGuangYaAuthError,
   isRunOrItsSeasonRecord,
   type QueueClaimOptions,
   type ResolveAccountWorkerContext,
+  type GuangYaTokens,
   hashPassword,
   verifyPassword,
   signSession,
@@ -1196,7 +1202,7 @@ async function runNextQueuedWorkflowNow(claim: QueueClaimOptions | undefined) {
   const parents = await getWorkerStorageParents(accountId);
   const resolveAccountContext = buildAccountContextResolver();
   const startedAt = new Date().toISOString();
-  const onAuthErrorFreeze = (id: string, reason: string) => freezeConnectedStorage(id, reason);
+  const onAuthErrorFreeze = (id: string, reason: string, error?: unknown) => freezeConnectedStorage(id, reason, error);
   const claimOption = claim === undefined ? {} : { claim };
   // Urgent user messages ("现在处理", written mid-run, or retry after a failure) get a
   // replace_request as soon as the queue is free — never waiting for the patrol.
@@ -2206,7 +2212,7 @@ async function runScheduledType3Now(options?: { force?: boolean }): Promise<Sche
       maxConcurrentRuns: await getPatrolConcurrency(repository),
       resolveDriveId: defaultDriveIdOf,
       resolveAccountContext: buildAccountContextResolver(),
-      onAuthErrorFreeze: (id, reason) => freezeConnectedStorage(id, reason),
+      onAuthErrorFreeze: (id, reason, error) => freezeConnectedStorage(id, reason, error),
       mayStartRun: () => {
         const allowed = mayStartRun();
         if (!allowed) heldBack = true;
@@ -2527,6 +2533,8 @@ interface AccountStorageCredentials {
   cookie: string;
   /** Token blob for token-auth brands (光鸭/天翼). null for cookie-auth brands. */
   credential: TokenCredential | null;
+  /** Changes on reconnect/rebind, while token refresh preserves payload.meta. */
+  connectionMarker: string;
   rootCid: string | null;
   moviesCid: string | null;
   tvCid: string | null;
@@ -2670,6 +2678,34 @@ function makeTokenPersister(
   };
 }
 
+function makeGuangYaAuthHooks(
+  accountId: string,
+  storageId: string,
+  providerUid: string,
+  credential: unknown,
+  connectionMarker: string,
+  allowFrozenForProbe = false,
+): ReturnType<typeof createGuangYaAuthHooks> {
+  const blob = (credential ?? {}) as Record<string, unknown>;
+  const credentials: GuangYaTokens = {
+    accessToken: typeof blob.accessToken === "string" ? blob.accessToken : "",
+    refreshToken: typeof blob.refreshToken === "string" ? blob.refreshToken : "",
+    deviceId: typeof blob.deviceId === "string" ? blob.deviceId : "",
+  };
+  const uid = providerUid.trim() || parseGuangYaUid(credentials.accessToken)?.trim() || credentials.deviceId.trim();
+  return createGuangYaAuthHooks({ accountId, connectedStorageId: storageId, providerUid: uid, credentials,
+    rawCredentialDeviceId: typeof blob.deviceId === "string" ? blob.deviceId : null,
+    connectionMarker, allowFrozenForProbe });
+}
+
+function connectionMarkerFromPayload(payload: unknown): string {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return "";
+  const meta = (payload as Record<string, unknown>).meta;
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return "";
+  const connectedAt = (meta as Record<string, unknown>).connectedAt;
+  return typeof connectedAt === "string" ? connectedAt.trim() : "";
+}
+
 function hasUsableStorageCredential(storage: { provider: string; payload: unknown }): boolean {
   const { cookie, credential } = extractStorageCredential(storage.provider, storage.payload);
   return Boolean(cookie || credential);
@@ -2764,6 +2800,7 @@ async function getAccountStorageCredentials(
       status: drive.status,
       cookie,
       credential,
+      connectionMarker: connectionMarkerFromPayload(drive.payload),
       rootCid,
       moviesCid,
       tvCid,
@@ -2826,8 +2863,14 @@ export function frozenDriveMessage(provider: string | null, action: "获取" | "
 
 /** Marks a drive frozen — its cookie died. Called when a worker/probe hits a
  *  Pan115AuthError. Resolves the run/drive's owning connected_storage id. */
-async function freezeConnectedStorage(storageId: string, reason: string): Promise<void> {
+async function freezeConnectedStorage(storageId: string, reason: string, error?: unknown): Promise<void> {
   try {
+    const snapshot = getGuangYaAuthFailureSnapshot(error);
+    if (snapshot) {
+      await freezeGuangYaStorageIfUnchanged(snapshot, reason);
+      return;
+    }
+    if (isGuangYaAuthError(error)) return;
     await getWorkflowRepository().setConnectedStorageStatus(
       storageId,
       "frozen",
@@ -2856,21 +2899,41 @@ export async function testConnection(
   }
   const brand = getStorageBrand(creds.provider);
   try {
+    const guangYaAuth = creds.provider === "guangya"
+      ? makeGuangYaAuthHooks(accountId, creds.id, creds.providerUid, creds.credential, creds.connectionMarker, true)
+      : undefined;
     await probeStorageConnection(
       creds.provider,
       creds.cookie,
       creds.rootCid,
       creds.credential,
       makeTokenPersister(accountId, creds.id, creds.provider),
+      guangYaAuth,
     );
-    await getWorkflowRepository().setConnectedStorageStatus(creds.id, "active", null, null);
+    if (guangYaAuth) {
+      if (!await guangYaAuth.reactivateIfUnchanged()) {
+        return { ok: false, status: creds.status, message: "连接已变化，请重新测试。" };
+      }
+    } else {
+      await getWorkflowRepository().setConnectedStorageStatus(creds.id, "active", null, null);
+    }
     await resolveCachedDriveSpace(accountId, creds.id, "active", { forceRefresh: true });
     return { ok: true, status: "active", message: "连接正常。" };
   } catch (error) {
     // The brand's own dead-cookie signal → freeze; anything else (network/
     // transient) is NOT a reason to freeze.
     if (brand.isAuthError(error)) {
-      await freezeConnectedStorage(creds.id, error instanceof Error ? error.message : String(error));
+      if (creds.provider === "guangya") {
+        const failedSnapshot = getGuangYaAuthFailureSnapshot(error);
+        if (!failedSnapshot) {
+          return { ok: false, status: creds.status, message: "连接已变化或鉴权探测信息不完整，请重新测试。" };
+        }
+        const froze = await freezeGuangYaStorageIfUnchanged(failedSnapshot, error instanceof Error ? error.message : String(error));
+        return froze
+          ? { ok: false, status: "frozen", message: `网盘登录已失效，请重新绑定同一个${brand.label}。` }
+          : { ok: false, status: creds.status, message: "连接已变化，请重新测试。" };
+      }
+      await freezeConnectedStorage(creds.id, error instanceof Error ? error.message : String(error), error);
       return { ok: false, status: "frozen", message: `网盘登录已失效，请重新绑定同一个${brand.label}。` };
     }
     return { ok: false, status: creds.status, message: `连接检测失败：${String(error)}` };
@@ -2886,7 +2949,8 @@ async function probeStorageConnection(
   credential: TokenCredential | null,
   // Persist a rotated credential if the probe refreshes it mid-flight. Wired by
   // testConnection (an existing drive). Omitted at first-connect (no row yet).
-  onCredentialRefresh?: ((creds: unknown) => Promise<void>) | undefined,
+  onCredentialRefresh?: ((creds: unknown) => void | Promise<void>) | undefined,
+  guangYaAuth?: ReturnType<typeof createGuangYaAuthHooks>,
 ): Promise<void> {
   const { Pan115CookieClient, Pan123Client, QuarkCookieClient, TianyiClient } = await import(
     "@media-track/workflow"
@@ -2901,11 +2965,17 @@ async function probeStorageConnection(
       // Pin the SAME persisted device id as connect/worker so "Test connection"
       // doesn't mint a fresh one (harmless today — validate is account-host — but
       // consistent with the rest of the brand's device-pinning).
-      ...(blob.deviceId === undefined ? {} : { deviceId: blob.deviceId }),
+      ...(guangYaAuth ? { deviceId: guangYaAuth.credentials.deviceId } : blob.deviceId === undefined ? {} : { deviceId: blob.deviceId }),
       // A 401 during the probe refreshes the token pair; persist it so the DB
       // doesn't keep a stale token that later wrongly freezes the drive. (The
       // client option keeps 光鸭's own onTokensRefreshed vocabulary.)
-      ...(onCredentialRefresh ? { onTokensRefreshed: onCredentialRefresh } : {}),
+      ...(!guangYaAuth && onCredentialRefresh ? { onTokensRefreshed: onCredentialRefresh } : {}),
+      ...(guangYaAuth ? {
+        authCoordinator: getGuangYaAuthCoordinator(),
+        authAccountKey: guangYaAuth.accountKey,
+        loadCurrentCredentials: guangYaAuth.loadCurrentCredentials,
+        onTokensRefreshed: guangYaAuth.onTokensRefreshed,
+      } : {}),
     }).validateToken();
     return;
   }
@@ -3027,13 +3097,18 @@ async function getWorkerStorageExecutor(
       // writes the new blob back into this drive's payload. Cookie brands (115/
       // 夸克) keep the cookie path untouched.
       if (isRegisteredStorageProvider(creds.provider) && getStorageBrand(creds.provider).authKind === "token") {
+        const guangYaAuth = creds.provider === "guangya"
+          ? makeGuangYaAuthHooks(accountId, creds.id, creds.providerUid, creds.credential, creds.connectionMarker)
+          : null;
         return createExecutorForBrand({
           provider: creds.provider,
-          credential: creds.credential ?? {},
+          credential: guangYaAuth?.credentials ?? creds.credential ?? {},
           providerUid: creds.providerUid,
           scopeCids,
           env: process.env,
           onCredentialRefresh: makeTokenPersister(accountId, creds.id, creds.provider),
+          ...(guangYaAuth ? { persistGuangYaTokens: guangYaAuth.onTokensRefreshed } : {}),
+          ...(guangYaAuth ? { loadGuangYaCredentials: guangYaAuth.loadCurrentCredentials } : {}),
         });
       }
       return createExecutorForBrand({
@@ -3549,15 +3624,20 @@ export async function resolveCachedDriveSpace(
       const scopeCids = [drive.rootCid, drive.moviesCid, drive.tvCid, drive.animeCid].filter(
         (cid): cid is string => Boolean(cid),
       );
+      const guangYaAuth = drive.provider === "guangya"
+        ? makeGuangYaAuthHooks(accountId, drive.id, drive.providerUid, credential ?? {}, connectionMarkerFromPayload(drive.payload))
+        : undefined;
       const executor =
         getStorageBrand(drive.provider).authKind === "token"
           ? createExecutorForBrand({
               provider: drive.provider,
-              credential: credential ?? {},
+              credential: guangYaAuth?.credentials ?? credential ?? {},
               providerUid: drive.providerUid,
               scopeCids,
               env: process.env,
               onCredentialRefresh: makeTokenPersister(accountId, drive.id, drive.provider),
+              ...(guangYaAuth ? { persistGuangYaTokens: guangYaAuth.onTokensRefreshed } : {}),
+              ...(guangYaAuth ? { loadGuangYaCredentials: guangYaAuth.loadCurrentCredentials } : {}),
             })
           : createExecutorForBrand({
               provider: drive.provider,

@@ -277,11 +277,51 @@ export class PostgresScanStore implements ScanStore {
     return this.withTransaction(async (client) => {
       await this.assertOwnership(client, input.scope);
       const config = await client.query<{ configuration: ScanConfiguration; matches: boolean }>(
-        "SELECT configuration,configuration=$4::jsonb AS matches FROM library_scan_configs WHERE account_id=$1 AND connected_storage_id=$2 AND config_id=$3 FOR KEY SHARE",
+        "SELECT configuration,configuration=$4::jsonb AS matches FROM library_scan_configs WHERE account_id=$1 AND connected_storage_id=$2 AND config_id=$3 FOR UPDATE",
         [input.scope.accountId, input.scope.connectedStorageId, input.configuration.configId, JSON.stringify(input.configuration)],
       );
       const saved = config.rows[0]?.configuration;
       if (!saved || config.rows[0]?.matches !== true || !sameRoots(saved.sourceRoots, input.roots)) throw new ScanStorageScopeError("扫描根与已保存授权配置不匹配");
+      await client.query(
+        "INSERT INTO library_scan_tasks (account_id,connected_storage_id,task_id,config_id,status,created_at,updated_at) VALUES ($1,$2,$3,$4,'queued',$5,$5)",
+        [input.scope.accountId, input.scope.connectedStorageId, input.taskId, input.configuration.configId, input.now],
+      );
+      for (const root of input.roots) {
+        await client.query(
+          "INSERT INTO library_scan_directories (account_id,connected_storage_id,task_id,directory_id,parent_directory_id,path,next_page,status) VALUES ($1,$2,$3,$4,NULL,$5,0,'pending') ON CONFLICT DO NOTHING",
+          [input.scope.accountId, input.scope.connectedStorageId, input.taskId, root.directoryId, root.name],
+        );
+      }
+      await client.query("UPDATE library_scan_tasks SET directories_discovered=$4 WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3",
+        [input.scope.accountId, input.scope.connectedStorageId, input.taskId, input.roots.length]);
+      return (await this.selectTask(client, input.scope, input.taskId))!;
+    });
+  }
+
+  /** Creates a daily scan only while holding the same configuration lock as manual creation. */
+  async createScheduledTask(input: { taskId: string; scope: ScanScope; configuration: ScanConfiguration; roots: readonly { directoryId: string; name: string }[]; now: string }): Promise<ScanTask | null> {
+    if (!input.taskId.trim() || input.roots.length === 0) throw new ScanStoreInputError("task id and at least one root are required");
+    await this.ensureSchema();
+    return this.withTransaction(async (client) => {
+      await this.assertOwnership(client, input.scope);
+      const config = await client.query<{ configuration: ScanConfiguration; matches: boolean }>(
+        "SELECT configuration,configuration=$4::jsonb AS matches FROM library_scan_configs WHERE account_id=$1 AND connected_storage_id=$2 AND config_id=$3 FOR UPDATE",
+        [input.scope.accountId, input.scope.connectedStorageId, input.configuration.configId, JSON.stringify(input.configuration)],
+      );
+      const saved = config.rows[0]?.configuration;
+      if (!saved || config.rows[0]?.matches !== true || !sameRoots(saved.sourceRoots, input.roots)) throw new ScanStorageScopeError("扫描根与已保存授权配置不匹配");
+
+      const existing = await this.selectTask(client, input.scope, input.taskId);
+      if (existing) {
+        if (existing.configId !== input.configuration.configId) throw new ScanStoreInputError("scheduled task id is already used by another configuration");
+        return existing;
+      }
+      const active = await client.query(
+        "SELECT 1 FROM library_scan_tasks WHERE account_id=$1 AND connected_storage_id=$2 AND config_id=$3 AND status IN ('queued','running','paused','cancelling') LIMIT 1",
+        [input.scope.accountId, input.scope.connectedStorageId, input.configuration.configId],
+      );
+      if (active.rowCount === 1) return null;
+
       await client.query(
         "INSERT INTO library_scan_tasks (account_id,connected_storage_id,task_id,config_id,status,created_at,updated_at) VALUES ($1,$2,$3,$4,'queued',$5,$5)",
         [input.scope.accountId, input.scope.connectedStorageId, input.taskId, input.configuration.configId, input.now],
@@ -303,6 +343,19 @@ export class PostgresScanStore implements ScanStore {
     return this.withTransaction(async (client) => {
       await this.assertOwnership(client, scope);
       return this.selectTask(client, scope, taskId);
+    });
+  }
+
+  /** True for queued, running, paused, or cancelling tasks owned by this configuration. */
+  async hasActiveTaskForConfiguration(scope: ScanScope, configId: string): Promise<boolean> {
+    await this.ensureSchema();
+    return this.withTransaction(async (client) => {
+      await this.assertOwnership(client, scope);
+      const result = await client.query(
+        "SELECT 1 FROM library_scan_tasks WHERE account_id=$1 AND connected_storage_id=$2 AND config_id=$3 AND status IN ('queued','running','paused','cancelling') LIMIT 1",
+        [scope.accountId, scope.connectedStorageId, configId],
+      );
+      return result.rowCount === 1;
     });
   }
 

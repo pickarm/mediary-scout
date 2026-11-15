@@ -31,8 +31,19 @@ describe("scan identifications route", () => {
     const request = new NextRequest("http://localhost/api/library/scans/task-1/identifications?storageId=storage-1&limit=20");
     const response = await GET(request, { params: Promise.resolve({ taskId: "task-1" }) });
     expect(response.status).toBe(200);
-    expect(service.list).toHaveBeenCalledWith({ accountId: "account_test", connectedStorageId: "storage-1" }, "task-1", { limit: 21 });
+    expect(service.list).toHaveBeenCalledWith({ accountId: "account_test", connectedStorageId: "storage-1" }, "task-1", { limit: 20 });
     expect(service.enqueueForScan).not.toHaveBeenCalled();
+  });
+
+  it("passes the requested size and decoded filters to the service", async () => {
+    const request = new NextRequest("http://localhost/api/library/scans/task-1/identifications?storageId=storage-1&limit=200&cursor=ZmlsZS0wMTA&status=confirmed");
+    const response = await GET(request, { params: Promise.resolve({ taskId: "task-1" }) });
+    expect(response.status).toBe(200);
+    expect(service.list).toHaveBeenCalledWith(
+      { accountId: "account_test", connectedStorageId: "storage-1" },
+      "task-1",
+      { limit: 200, afterFileId: "file-010", status: "confirmed" },
+    );
   });
 
   it("enqueues asynchronously and rejects unsupported request fields", async () => {
