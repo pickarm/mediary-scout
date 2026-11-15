@@ -88,6 +88,11 @@ export interface IdentificationScanFact {
   fileId: string; parentDirectoryId: string; name: string; isDirectory: boolean;
   sizeBytes: number | null; path: string; modifiedAt: string | null;
 }
+export interface IdentificationTrackingFact {
+  fileId: string;
+  trackedSeasonId: string;
+  autoAcquire: boolean | null;
+}
 export interface IdentificationDirectoryFact { directoryId: string; parentDirectoryId: string | null; name: string; path: string }
 
 export class IdentificationStoreScopeError extends Error {
@@ -211,6 +216,21 @@ export class PostgresIdentificationStore {
       [scope.accountId, scope.connectedStorageId, taskId, [...fileIds]],
     );
     return result.rows.map((row) => ({ fileId: row.file_id, parentDirectoryId: row.parent_directory_id, name: row.name, isDirectory: row.is_directory, sizeBytes: row.size_bytes === null ? null : Number(row.size_bytes), path: row.path, modifiedAt: row.modified_at }));
+  }
+
+  /** Reads current F02 tracking state for one bounded result page in a single query. */
+  async listTrackingForFiles(scope: ScanScope, fileIds: readonly string[]): Promise<IdentificationTrackingFact[]> {
+    if (fileIds.length > 201) throw new IdentificationStoreInputError("单批追更状态查询不能超过 201 个文件");
+    if (fileIds.length === 0) return [];
+    await this.ensureSchema();
+    const result = await this.pool.query<{ file_id: string; tracked_season_id: string; auto_acquire: unknown }>(
+      "SELECT b.file_id,b.tracked_season_id,s.payload->'autoAcquire' AS auto_acquire " +
+      "FROM library_file_bindings b JOIN tracked_seasons s " +
+      "ON s.id=b.tracked_season_id AND s.account_id=b.account_id AND s.connected_storage_id=b.connected_storage_id " +
+      "WHERE b.account_id=$1 AND b.connected_storage_id=$2 AND b.file_id=ANY($3::text[]) ORDER BY b.file_id",
+      [scope.accountId, scope.connectedStorageId, [...fileIds]],
+    );
+    return result.rows.map((row) => ({ fileId: row.file_id, trackedSeasonId: row.tracked_season_id, autoAcquire: typeof row.auto_acquire === "boolean" ? row.auto_acquire : null }));
   }
 
   async listNextUnidentifiedFiles(scope: ScanScope, taskId: string, afterFileId: string | null, limit: number): Promise<IdentificationScanFact[]> {

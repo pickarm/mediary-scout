@@ -17,9 +17,9 @@
 | F08b | 识别导入API | identification API及后台识别接入 | F02/F05/F08a | 身份确认、导入与补缺设置 | 审核通过：7项PG、4项API；事务原子性/逆序lookup复核通过，启动恢复由F08d接入 |
 | F08c | 整理任务API | organize API及后台整理接入 | F06/F07b/F08a | 清单预览、执行、回读和恢复 | 待开发 |
 | F08d | 每日扫描调度 | scan scheduler及worker接入 | F08a/F08b | 时区、每天一次、重启/暂停不误跑 | 审核通过：4纯测/4PG、生产适配严格类型；原子创建与有界独立调度 |
-| F08e | 识别结果分页查询 | identification list/store/API及测试 | F08b | 完整分页、文件事实与绑定追更摘要 | 待修：集成发现服务端limit哨兵不一致，不能翻后续页 |
+| F08e | 识别结果分页查询 | identification list/store/API及测试 | F08b | 完整分页、文件事实与绑定追更摘要 | 审核通过：3路由/2PG，57项多页及筛选遍历；完整源测试类型与lint |
 | F09a | 持久化搜索准备队列 | preparation store/service及测试 | F02 | 同盘五任务独立准备、租约/取消/过期 | 审核通过：2项纯测、11项PG、完整源/测试严格类型与lint；待F09b接入 |
-| F09b | 准备结果接入获取 | worker/runtime/provider适配 | F09a/F07c | 配置绑定、当前注册表消费及原校验保留 | 待开发 |
+| F09b | 准备结果接入获取 | worker/runtime/provider适配 | F09a/F07c | 配置绑定、当前注册表消费及原校验保留 | 开发中；独立准备后台及原流程缓存消费 |
 | F10a | 媒体库分页查询 | library摘要查询及API契约 | F02 | 有界分页、SQL聚合、媒体身份/作用域 | 审核通过：6项PG含多季执行计划；549标题副本对比一致 |
 | F10b | 队列摘要查询 | activity摘要查询及API契约 | F02 | SQL筛选活动任务、历史分页、不装完整快照 | 审核通过：14项PG/API/原活动视图回归；有界两SQL及5000历史执行计划 |
 | F11a | Redis摘要缓存 | Redis缓存适配及摘要接入 | F10a/F10b | 故障降级、隔离、缓存失效 | 待开发 |
