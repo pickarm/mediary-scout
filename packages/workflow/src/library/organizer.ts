@@ -63,6 +63,8 @@ export interface OrganizationPlan {
   targetRootIds: string[];
   targetRootByMediaType: Partial<Record<OrganizationIdentity["mediaType"],string>>;
   status: OrganizationTaskStatus;
+  /** Durable user intent. A merely planned preview is never auto-executed. */
+  executeRequested?: boolean;
   createdAt: string;
   updatedAt: string;
   operations: OrganizationOperation[];
@@ -80,6 +82,8 @@ export interface OrganizationPlanInput {
   graph: OrganizationGraph;
   confirmedFiles: readonly OrganizationAuthorizedFile[];
   templates?: Partial<Record<NamingTemplateKind, string>>;
+  /** Service-derived conservative skips, e.g. a multi-episode file whose full identity cannot be rendered safely. */
+  preSkippedFiles?: readonly { fileId: string; reason: string }[];
   /** Required for deterministic plan retries. */
   now?: string;
 }
@@ -312,7 +316,7 @@ export function buildOrganizationPlan(input: OrganizationPlanInput, idFactory: (
   const videos = input.confirmedFiles.filter((file) => isVideo(file.name));
   const confirmedVideoIds = new Set(videos.map(({fileId}) => fileId));
   const subtitleAssignments = new Map<string,OrganizationFileFact[]>();
-  const skippedFiles: Array<{fileId:string;reason:string}> = [];
+  const skippedFiles: Array<{fileId:string;reason:string}> = [...(input.preSkippedFiles ?? [])];
   const scannedVideos = input.graph.files.filter((candidate) => isVideo(candidate.name));
   for (const subtitle of input.graph.files.filter((candidate) => isSubtitle(candidate.name))) {
     const candidates = scannedVideos.filter((video) => video.parentDirectoryId === subtitle.parentDirectoryId && subtitleMatchesVideoName(subtitle.name,video.name));
@@ -378,7 +382,7 @@ export function buildOrganizationPlan(input: OrganizationPlanInput, idFactory: (
 
 function validateInput(input: OrganizationPlanInput): void {
   if (!input.scope.accountId.trim() || !input.scope.connectedStorageId.trim() || !input.taskId.trim() || !input.operationKey.trim()) throw new OrganizationConflictError("整理清单账号/网盘/任务/幂等键不能为空");
-  if (!input.sourceRoots.length || !input.targetRoots.length) throw new OrganizationAuthorizationError("必须提供已授权的来源根和目标根");
+  if (!input.sourceRoots.length || (!input.targetRoots.length && (input.confirmedFiles.length > 0 || !(input.preSkippedFiles?.length)))) throw new OrganizationAuthorizationError("必须提供已授权的来源根和目标根，或明确的安全跳过项");
   const dirs = new Map(input.graph.directories.map((directory) => [directory.directoryId,directory]));
   const files = new Map(input.graph.files.map((file) => [file.fileId,file]));
   if (dirs.size !== input.graph.directories.length || files.size !== input.graph.files.length || [...dirs.keys()].some((id) => files.has(id))) throw new OrganizationAuthorizationError("授权图包含重复 provider ID");

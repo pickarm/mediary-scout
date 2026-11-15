@@ -15,7 +15,7 @@
 | F07c | 光鸭共享凭证刷新 | client认证刷新与两类server client工厂 | F07b/F08a | 同账号刷新去重、重绑不覆盖、读取不误冻连接 | 审核通过：132项原流程回归+11PG；原始凭证/代次CAS及冻结探测安全 |
 | F08a | 扫描配置与控制API | 新增server/runtime与scan API | F04/F07a | 同源鉴权、目录选择、开始暂停恢复取消 | 审核通过：流式body/CAS修复，9纯测/8PG及独立复核 |
 | F08b | 识别导入API | identification API及后台识别接入 | F02/F05/F08a | 身份确认、导入与补缺设置 | 审核通过：7项PG、4项API；事务原子性/逆序lookup复核通过，启动恢复由F08d接入 |
-| F08c | 整理任务API | organize API及后台整理接入 | F06/F07b/F08a | 清单预览、执行、回读和恢复 | 待开发 |
+| F08c | 整理任务API | organize API及后台整理接入 | F06/F07b/F08a | 清单预览、执行、回读和恢复 | 审核通过：17API/纯测、2PG（含假网盘执行/恢复）；源测试类型与lint |
 | F08d | 每日扫描调度 | scan scheduler及worker接入 | F08a/F08b | 时区、每天一次、重启/暂停不误跑 | 审核通过：4纯测/4PG、生产适配严格类型；原子创建与有界独立调度 |
 | F08e | 识别结果分页查询 | identification list/store/API及测试 | F08b | 完整分页、文件事实与绑定追更摘要 | 审核通过：3路由/2PG，57项多页及筛选遍历；完整源测试类型与lint |
 | F09a | 持久化搜索准备队列 | preparation store/service及测试 | F02 | 同盘五任务独立准备、租约/取消/过期 | 审核通过：2项纯测、11项PG、完整源/测试严格类型与lint；待F09b接入 |

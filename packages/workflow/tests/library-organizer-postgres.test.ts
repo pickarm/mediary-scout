@@ -60,6 +60,9 @@ describe.skipIf(!adminURL)("Postgres organization authorization (isolated databa
       });
 
       const store = new PostgresOrganizationStore(testPool);
+      const trustedInput = await store.derivePlanInput(scope,"task",{limit:10,operationKey:"pending"});
+      expect(trustedInput.confirmedFiles.map(({fileId})=>fileId)).toEqual(["file"]);
+      expect(trustedInput.graph.files).toEqual([{fileId:"file",parentDirectoryId:"src",name:"raw.mkv",isDirectory:false}]);
       const baseInput: OrganizationPlanInput = {
         scope,taskId:"task",operationKey:"once",sourceRoots:["src","target"],targetRoots:["target"],
         targetRootByMediaType:{movie:"target"},
@@ -72,6 +75,27 @@ describe.skipIf(!adminURL)("Postgres organization authorization (isolated databa
       expect(plan.operations[0]?.targetName).toBe("Film [2024].mkv");
       await expect(store.authorizeExecution({...plan,targetRootByMediaType:{movie:"target",tv:"target"}})).resolves.toBeUndefined();
       await expect(store.authorizePlan({...baseInput,templates:{movieFile:"{title} ({year}){ext}"}})).rejects.toThrow(/持久化扫描配置/);
+      expect(await store.listRequested(scope,10)).toEqual([]);
+      expect(await store.requestExecution(scope,"task",plan.operationKey,"2026-11-14T00:00:03.000Z")).toBe(true);
+      expect(await store.listRequested(scope,10)).toEqual([{taskId:"task",operationKey:plan.operationKey}]);
+      expect(await store.getPlanSummary(scope,"task",plan.operationKey)).toMatchObject({operationKey:plan.operationKey,status:"planned",operationCount:1});
+      expect(await store.listOperations(scope,"task",plan.operationKey,{limit:10})).toHaveLength(1);
+      const organizationLease="org-test-lease";
+      expect(await store.claim(scope,"task",plan.operationKey,organizationLease,"2026-11-14T00:00:03.000Z","2026-11-14T00:02:03.000Z")).toBe(true);
+      const verifiedOperation={...plan.operations[0]!,targetParentId:"targetdir",status:"verified" as const};
+      expect(await store.updateOperation(scope,"task",plan.operationKey,organizationLease,verifiedOperation,"2026-11-14T00:00:04.000Z")).toBe(true);
+      expect(await store.listVerifiedLocationsToSync(scope,"task",plan.operationKey,10)).toEqual([{fileId:"file",parentId:"targetdir",name:verifiedOperation.targetName,targetRootId:"target",relativePath:verifiedOperation.targetRelativePath}]);
+      expect(await store.listVerifiedLocationPlanKeys(scope,10)).toEqual([{taskId:"task",operationKey:plan.operationKey}]);
+      const libraryStore=new PostgresLibraryStore(testPool);
+      expect(await libraryStore.updateVerifiedOrganizationLocation({accountId:"acct",connectedStorageId:"drive",taskId:"task",operationKey:plan.operationKey,fileId:"file",parentDirectoryId:"targetdir",parentOfTargetDirectoryId:"target",name:verifiedOperation.targetName})).toBe(true);
+      expect((await libraryStore.listPhysicalFileBindings({accountId:"acct",connectedStorageId:"drive",limit:10})).find(({fileId})=>fileId==="file")?.parentDirectoryId).toBe("targetdir");
+      expect(await libraryStore.updateVerifiedOrganizationLocation({accountId:"acct",connectedStorageId:"drive",taskId:"task",operationKey:plan.operationKey,fileId:"file",parentDirectoryId:"targetdir",parentOfTargetDirectoryId:"wrong-parent",name:verifiedOperation.targetName})).toBe(false);
+      expect((await libraryStore.listPhysicalFileBindings({accountId:"acct",connectedStorageId:"drive",limit:10})).find(({fileId})=>fileId==="file")?.parentDirectoryId).toBe("targetdir");
+      expect(await store.listVerifiedLocationsToSync(scope,"task",plan.operationKey,10)).toEqual([]);
+      expect(await store.listVerifiedLocationPlanKeys(scope,10)).toEqual([]);
+      expect(await store.pause(scope,"task",plan.operationKey,"2026-11-14T00:00:04.000Z")).toBe(true);
+      expect(await store.listRequested(scope,10)).toEqual([]);
+      expect(await store.requestExecution(scope,"task",plan.operationKey,"2026-11-14T00:00:05.000Z")).toBe(true);
 
       // A saved plan with no operations still carries the authorized media target.
       // The executor must complete it and subsequent execute calls must not touch
