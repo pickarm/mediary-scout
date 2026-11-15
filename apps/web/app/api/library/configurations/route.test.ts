@@ -1,17 +1,17 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ getServices: vi.fn() }));
+const mocks = vi.hoisted(() => ({ getServices: vi.fn(), getReadServices: vi.fn() }));
 vi.mock("../../../../lib/library-api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../../lib/library-api")>();
   return { ...actual, libraryAccount: vi.fn(async () => "api-test-account") };
 });
 vi.mock("../../../../lib/library-runtime", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../../lib/library-runtime")>();
-  return { ...actual, getLibraryServices: mocks.getServices };
+  return { ...actual, getLibraryServices: mocks.getServices, getLibraryReadServices: mocks.getReadServices };
 });
 
-import { POST } from "./route";
+import { GET, POST } from "./route";
 import { issueDirectorySelectionTicket } from "../../../../lib/library-runtime";
 
 const scope = { accountId: "api-test-account", connectedStorageId: "storage-a" };
@@ -42,6 +42,7 @@ describe("configuration source directory authorization", () => {
   });
 
   beforeEach(() => {
+    vi.clearAllMocks();
     saved.length = 0;
     previous = null;
     listing.mockClear();
@@ -52,6 +53,15 @@ describe("configuration source directory authorization", () => {
         saveConfiguration: vi.fn(async (value: unknown) => { saved.push(value); }),
       },
     });
+    mocks.getReadServices.mockResolvedValue({ scanStore: { listConfigurations: vi.fn(async () => []) } });
+  });
+
+  it("lists saved configurations through the readonly PG runtime", async () => {
+    const request = new NextRequest("https://library.example/api/library/configurations?storageId=storage-a");
+    const response = await GET(request);
+    expect(response.status).toBe(200);
+    expect(mocks.getReadServices).toHaveBeenCalledWith(scope);
+    expect(mocks.getServices).not.toHaveBeenCalled();
   });
 
   it("accepts deep paginated choices only after rereading the signed parent page", async () => {

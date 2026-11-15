@@ -9,6 +9,8 @@ import { createTmdbMetadataProvider, createTmdbSearchProvider } from "@media-tra
 import { getAgentModelForSearch, getAccountScopedSettings, getTmdbAccesses } from "./workflow-runtime";
 import { getLibraryServices } from "./library-runtime";
 
+export { getLibraryReadIdentificationService } from "./library-read-runtime";
+
 const identificationWatches = new Map<string, Promise<void>>();
 
 export async function getLibraryIdentificationService(scope: ScanScope): Promise<IdentificationService> {

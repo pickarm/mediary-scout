@@ -37,6 +37,18 @@ export function getLibraryPool() {
   return getLibraryDatabasePool();
 }
 
+/** Resolves an account-owned GuangYa connection for historical PG reads only. */
+export async function getLibraryReadServices(scope: ScanScope): Promise<{ pool: Pool; scanStore: PostgresScanStore }> {
+  requireScope(scope);
+  const pg = getLibraryPool();
+  const result = await pg.query<{ id: string }>(
+    "SELECT id FROM connected_storages WHERE id=$1 AND account_id=$2 AND provider='guangya'",
+    [scope.connectedStorageId, scope.accountId],
+  );
+  if (!result.rows[0]) throw new LibraryRuntimeError("storage_not_found", "找不到该账号的光鸭连接。");
+  return { pool: pg, scanStore: new PostgresScanStore(pg) };
+}
+
 function requireScope(scope: ScanScope): void {
   if (!scope.accountId.trim() || !scope.connectedStorageId.trim()) throw new LibraryRuntimeError("storage_not_found", "请先选择有效的光鸭网盘连接。");
 }

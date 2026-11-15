@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server";
 import { IdentificationConflictError, IdentificationInputError, IdentificationStoreScopeError, ScanScopeError, ScanStorageScopeError, ScanStoreInputError, LibraryImportConflictError, LibraryStorageScopeError } from "@media-track/workflow/library";
 import { apiErrorResponse, decodeCursor, encodeCursor, LibraryApiError, libraryAccount, parseLimit, readJson, requireString } from "../../../../../../lib/library-api";
-import { getLibraryIdentificationService, watchLibraryScanForIdentification } from "../../../../../../lib/library-identification-runtime";
+import { getLibraryIdentificationService, getLibraryReadIdentificationService, watchLibraryScanForIdentification } from "../../../../../../lib/library-identification-runtime";
 
 type RouteContext = { params: Promise<{ taskId: string }> };
 
@@ -22,8 +22,8 @@ export async function GET(request: NextRequest, context: RouteContext): Promise<
     if (statusValue !== null && !["confirmed", "pending", "ignored", "failed"].includes(statusValue)) throw new LibraryApiError(400, "识别状态筛选值无效。");
     const { taskId } = await context.params;
     const scope = { accountId, connectedStorageId: storageId };
-    const service = await getLibraryIdentificationService(scope);
-    const page = await service.list(scope, requireString(taskId, "扫描任务 ID", 150), {
+    const service = await getLibraryReadIdentificationService(scope);
+    const page = await service.list(requireString(taskId, "扫描任务 ID", 150), {
       limit,
       ...(afterFileId === undefined ? {} : { afterFileId }),
       ...(statusValue === null ? {} : { status: statusValue as "confirmed" | "pending" | "ignored" | "failed" }),

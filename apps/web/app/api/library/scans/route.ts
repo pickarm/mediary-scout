@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { apiErrorResponse, decodeCursor, encodeCursor, libraryAccount, parseLimit, readJson, requireString, LibraryApiError } from "../../../../lib/library-api";
-import { getLibraryServices } from "../../../../lib/library-runtime";
+import { getLibraryReadServices, getLibraryServices } from "../../../../lib/library-runtime";
 import { getLibraryIdentificationService, watchLibraryScanForIdentification } from "../../../../lib/library-identification-runtime";
 
 export async function GET(request: NextRequest): Promise<Response> {
@@ -10,7 +10,7 @@ export async function GET(request: NextRequest): Promise<Response> {
     const requestedLimit = parseLimit(request.nextUrl.searchParams.get("limit"), 20, 99);
     const afterTaskId = decodeCursor(request.nextUrl.searchParams.get("cursor"));
     const scope = { accountId, connectedStorageId: storageId };
-    const { scanStore } = await getLibraryServices(scope);
+    const { scanStore } = await getLibraryReadServices(scope);
     const rows = await scanStore.listTasks(scope, { limit: requestedLimit + 1, ...(afterTaskId === undefined ? {} : { afterTaskId }) });
     const hasMore = rows.length > requestedLimit;
     const page = rows.slice(0, requestedLimit);

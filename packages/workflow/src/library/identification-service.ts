@@ -176,20 +176,7 @@ export class IdentificationService {
   }
 
   async list(scope: ScanScope, taskId: string, input: { limit: number; afterFileId?: string; status?: StoredIdentification["status"] }): Promise<{ summary: Awaited<ReturnType<PostgresIdentificationStore["getSummary"]>>; items: Array<StoredIdentification & { file: IdentificationScanFact | null; tracking: Omit<IdentificationTrackingFact, "fileId"> | null }>; nextCursor: string | null; hasMore: boolean }> {
-    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 200) throw new IdentificationInputError("识别结果分页大小必须介于 1 到 200");
-    if (!(await this.scans.getTask(scope, taskId))) throw new IdentificationStoreScopeError("扫描任务不存在或不属于当前账号与网盘");
-    const summary = await this.identificationStore.getSummary(scope, taskId);
-    const rows = await this.identificationStore.listResults(scope, taskId, { ...input, limit: input.limit + 1 });
-    const hasMore = rows.length > input.limit;
-    const page = rows.slice(0, input.limit);
-    const facts = await this.identificationStore.listUnidentifiedFiles(scope, taskId, page.map((row) => row.fileId));
-    const factById = new Map(facts.map((fact) => [fact.fileId, fact]));
-    // The scan and identification stores do not own the F02 schema; initialize it before reading bindings.
-    if (page.length > 0) await this.library.listPhysicalFileBindings({ accountId: scope.accountId, connectedStorageId: scope.connectedStorageId, limit: 1 });
-    const tracking = await this.identificationStore.listTrackingForFiles(scope, page.map((row) => row.fileId));
-    const trackingById = new Map(tracking.map((fact) => [fact.fileId, { trackedSeasonId: fact.trackedSeasonId, autoAcquire: fact.autoAcquire }]));
-    const items = page.map((row) => ({ ...row, file: factById.get(row.fileId) ?? null, tracking: trackingById.get(row.fileId) ?? null }));
-    return { summary, items, nextCursor: hasMore && page.length ? page[page.length - 1]!.fileId : null, hasMore };
+    return listIdentificationResults({ scope, taskId, input, scans: this.scans, identifications: this.identificationStore, library: this.library });
   }
 
   async confirmFile(input: ManualIdentificationInput): Promise<{ item: StoredIdentification }> {
@@ -334,6 +321,32 @@ export class IdentificationService {
   private kickDrain(scope: ScanScope): void {
     setTimeout(() => { void this.drainPending(scope).catch(() => undefined); }, 0);
   }
+}
+
+/** Shared bounded PG query used by the write service and read-only API runtime. */
+export async function listIdentificationResults(input: {
+  scope: ScanScope;
+  taskId: string;
+  input: { limit: number; afterFileId?: string; status?: StoredIdentification["status"] };
+  scans: PostgresScanStore;
+  identifications: PostgresIdentificationStore;
+  library: PostgresLibraryStore;
+}): Promise<{ summary: Awaited<ReturnType<PostgresIdentificationStore["getSummary"]>>; items: Array<StoredIdentification & { file: IdentificationScanFact | null; tracking: Omit<IdentificationTrackingFact, "fileId"> | null }>; nextCursor: string | null; hasMore: boolean }> {
+  const { scope, taskId, input: query } = input;
+  if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 200) throw new IdentificationInputError("识别结果分页大小必须介于 1 到 200");
+  if (!(await input.scans.getTask(scope, taskId))) throw new IdentificationStoreScopeError("扫描任务不存在或不属于当前账号与网盘");
+  const summary = await input.identifications.getSummary(scope, taskId);
+  const rows = await input.identifications.listResults(scope, taskId, { ...query, limit: query.limit + 1 });
+  const hasMore = rows.length > query.limit;
+  const page = rows.slice(0, query.limit);
+  const facts = await input.identifications.listUnidentifiedFiles(scope, taskId, page.map((row) => row.fileId));
+  const factById = new Map(facts.map((fact) => [fact.fileId, fact]));
+  // The scan and identification stores do not own the F02 schema; initialize it before reading bindings.
+  if (page.length > 0) await input.library.listPhysicalFileBindings({ accountId: scope.accountId, connectedStorageId: scope.connectedStorageId, limit: 1 });
+  const tracking = await input.identifications.listTrackingForFiles(scope, page.map((row) => row.fileId));
+  const trackingById = new Map(tracking.map((fact) => [fact.fileId, { trackedSeasonId: fact.trackedSeasonId, autoAcquire: fact.autoAcquire }]));
+  const items = page.map((row) => ({ ...row, file: factById.get(row.fileId) ?? null, tracking: trackingById.get(row.fileId) ?? null }));
+  return { summary, items, nextCursor: hasMore && page.length ? page[page.length - 1]!.fileId : null, hasMore };
 }
 
 function boundedEnv(name: string, fallback: number, min: number, max: number): number {

@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { apiErrorResponse, libraryAccount, readJson, requireString, LibraryApiError } from "../../../../../lib/library-api";
-import { getLibraryServices } from "../../../../../lib/library-runtime";
+import { getLibraryReadServices, getLibraryServices } from "../../../../../lib/library-runtime";
 
 type RouteContext = { params: Promise<{ taskId: string }> };
 
@@ -10,7 +10,7 @@ export async function GET(request: NextRequest, context: RouteContext): Promise<
     const storageId = requireString(request.nextUrl.searchParams.get("storageId"), "网盘");
     const { taskId } = await context.params;
     const scope = { accountId, connectedStorageId: storageId };
-    const { scanStore } = await getLibraryServices(scope);
+    const { scanStore } = await getLibraryReadServices(scope);
     const task = await scanStore.getTask(scope, requireString(taskId, "扫描任务", 100));
     if (!task) return Response.json({ error: "扫描任务不存在或已不可访问。" }, { status: 404 });
     const { scope: _scope, ...dto } = task;

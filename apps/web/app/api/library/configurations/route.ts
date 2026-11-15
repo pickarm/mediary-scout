@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server";
 import { DEFAULT_NAMING_TEMPLATES, parseNamingTemplate, SCAN_SCHEDULE_TIME_ZONE, type ScanConfiguration, type ScanMediaKind } from "@media-track/workflow/library";
 import { apiErrorResponse, decodeCursor, encodeCursor, libraryAccount, readJson, requireString, parseLimit, LibraryApiError } from "../../../../lib/library-api";
-import { getLibraryServices, verifyDirectorySelectionTicket } from "../../../../lib/library-runtime";
+import { getLibraryReadServices, getLibraryServices, verifyDirectorySelectionTicket } from "../../../../lib/library-runtime";
 
 const allowed = new Set(["storageId", "configId", "sourceRoots", "movieTargetDirectoryId", "movieTargetSelectionToken", "tvTargetDirectoryId", "tvTargetSelectionToken", "mediaKind", "dailyScheduleEnabled", "dailyScheduleTime", "templates"]);
 const kinds = new Set<ScanMediaKind>(["movie", "tv", "mixed"]);
@@ -13,7 +13,7 @@ export async function GET(request: NextRequest): Promise<Response> {
     const storageId = requireString(request.nextUrl.searchParams.get("storageId"), "网盘");
     const limit = parseLimit(request.nextUrl.searchParams.get("limit"), 20, 99);
     const afterConfigId = decodeCursor(request.nextUrl.searchParams.get("cursor"));
-    const { scanStore } = await getLibraryServices({ accountId, connectedStorageId: storageId });
+    const { scanStore } = await getLibraryReadServices({ accountId, connectedStorageId: storageId });
     const rows = await scanStore.listConfigurations({ accountId, connectedStorageId: storageId }, limit + 1, afterConfigId);
     const hasMore = rows.length > limit;
     const items = rows.slice(0, limit);

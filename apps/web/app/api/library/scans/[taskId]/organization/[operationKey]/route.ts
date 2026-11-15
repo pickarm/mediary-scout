@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { apiErrorResponse, decodeCursor, encodeCursor, libraryAccount, LibraryApiError, parseLimit, readJson, requireString } from "../../../../../../../lib/library-api";
 import { getLibraryOrganizationService, LibraryOrganizationRuntimeError } from "../../../../../../../lib/library-organization-runtime";
+import { getLibraryReadOrganizationService } from "../../../../../../../lib/library-read-runtime";
 import { OrganizationAuthorizationError, OrganizationConflictError } from "@media-track/workflow/library";
 
 type Context = { params: Promise<{taskId:string;operationKey:string}> };
@@ -11,7 +12,7 @@ export async function GET(request: NextRequest, context: Context): Promise<Respo
     const storageId=requireString(request.nextUrl.searchParams.get("storageId"),"storageId");
     const limit=parseLimit(request.nextUrl.searchParams.get("limit"),50,200);
     const afterOperationId=decodeCursor(request.nextUrl.searchParams.get("cursor"));
-    const service=await getLibraryOrganizationService(accountId,storageId);
+    const service=await getLibraryReadOrganizationService(accountId,storageId);
     const [summary,rows]=await Promise.all([
       service.store.getPlanSummary(service.scope,taskId,operationKey),
       service.store.listOperations(service.scope,taskId,operationKey,{limit:limit+1,...(afterOperationId?{afterOperationId}:{})}),

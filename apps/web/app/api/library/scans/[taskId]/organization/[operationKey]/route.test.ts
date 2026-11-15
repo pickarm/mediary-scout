@@ -10,6 +10,9 @@ vi.mock("../../../../../../../lib/library-organization-runtime",async(importOrig
   const actual=await importOriginal<typeof import("../../../../../../../lib/library-organization-runtime")>();
   return {...actual,getLibraryOrganizationService:vi.fn(async()=>({scope:{accountId:"account-a",connectedStorageId:"storage-a"},store:mocks.store}))};
 });
+vi.mock("../../../../../../../lib/library-read-runtime",()=>({
+  getLibraryReadOrganizationService:vi.fn(async()=>({scope:{accountId:"account-a",connectedStorageId:"storage-a"},store:mocks.store})),
+}));
 
 import { GET, POST } from "./route";
 

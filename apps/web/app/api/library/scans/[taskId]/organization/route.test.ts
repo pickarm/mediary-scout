@@ -6,7 +6,13 @@ vi.mock("../../../../../../lib/library-api",async(importOriginal)=>{
   const actual=await importOriginal<typeof import("../../../../../../lib/library-api")>();
   return {...actual,libraryAccount:vi.fn(async()=>"account-a")};
 });
-vi.mock("../../../../../../lib/library-organization-runtime",()=>({getLibraryOrganizationService:vi.fn(async()=>({...mocks.service,scope:{accountId:"account-a",connectedStorageId:"storage-a"}}))}));
+vi.mock("../../../../../../lib/library-organization-runtime",async(importOriginal)=>{
+  const actual=await importOriginal<typeof import("../../../../../../lib/library-organization-runtime")>();
+  return {...actual,getLibraryOrganizationService:vi.fn(async()=>({...mocks.service,scope:{accountId:"account-a",connectedStorageId:"storage-a"}}))};
+});
+vi.mock("../../../../../../lib/library-read-runtime",()=>({
+  getLibraryReadOrganizationService:vi.fn(async()=>({...mocks.service,scope:{accountId:"account-a",connectedStorageId:"storage-a"}})),
+}));
 
 import { GET, POST } from "./route";
 
