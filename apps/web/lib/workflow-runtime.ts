@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { LanguageModel } from "ai";
 import { isAgentMemoryEnabled } from "./agent-memory-server";
+import { createGuangYaAuthHooks, freezeGuangYaStorageIfUnchanged } from "./guangya-auth-runtime";
 import { cache } from "react";
 import {
   checkLoginAllowed,
@@ -61,6 +62,7 @@ import {
   provisionCategoryDirs,
   parsePan115Uid,
   createExecutorForBrand,
+  withStorageWriteTask,
   getStorageBrand,
   isRegisteredStorageProvider,
   allowedResourceTypesForProviders,
@@ -68,11 +70,17 @@ import {
   parseTianyiUid,
   UC_PROFILE,
   parsePan123Uid,
+  parseGuangYaUid,
+  getGuangYaAuthCoordinator,
   generateGuangYaDeviceId,
   GuangYaClient,
+  getGuangYaAuthFailureSnapshot,
+  isGuangYaAuthError,
   isRunOrItsSeasonRecord,
+  isQueueClaimableKind,
   type QueueClaimOptions,
   type ResolveAccountWorkerContext,
+  type GuangYaTokens,
   hashPassword,
   verifyPassword,
   signSession,
@@ -81,6 +89,7 @@ import {
   generateSessionId,
   DuplicateUsernameError,
   DEFAULT_ACCOUNT_ID,
+  UNSCOPED_STORAGE,
   pickWorkspaceStorageId,
   resolveQueueStorageChoice,
   resolveWorkspaceFromParam,
@@ -91,6 +100,7 @@ import {
   type DriveSpaceCacheEntry,
   type DriveSpaceInfo,
   type Account,
+  type ConnectedStorage,
   type WorkflowScope,
   type MediaSearchCandidate,
   type MediaTitle,
@@ -107,6 +117,9 @@ import {
   type VerifiedFile,
   type WorkflowRepository,
 } from "@media-track/workflow";
+import { createPreparationConsumer } from "@media-track/workflow/preparation-consumer";
+import { validatePreparationDescriptor } from "@media-track/workflow/library";
+import type { PreparationDescriptor, ResolvedPreparationContext } from "@media-track/workflow/library";
 import {
   buildPanSouProviderChain,
   resolveUserPanSouBaseUrl,
@@ -171,6 +184,13 @@ export function getWorkflowRepository(): WorkflowRepository {
       : createPostgresWorkflowRepositorySync({ connectionString: postgresConnectionString() });
   }
   return repository;
+}
+
+/** Close the cached repository pool after isolated integration tests. */
+export async function closeWorkflowRepositoryForTests(): Promise<void> {
+  const current = repository;
+  repository = null;
+  if (current && "close" in current && typeof current.close === "function") await current.close();
 }
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -1013,11 +1033,29 @@ export function buildAccountContextResolver(): ResolveAccountWorkerContext {
       return true;
     });
     const drives = await resolveAccountActiveDrives(accountId);
-    const activeProviders =
-      drives.length > 0 ? drives.map((d) => d.provider) : [driveProvider];
+    const activeProviders = drives.length > 0 ? drives.map((drive) => drive.provider) : [driveProvider];
+    const resourceProvider = await getWorkerResourceProvider(scoped, activeProviders, accountId);
+    const expectedPreparationFingerprint = driveProvider === "guangya"
+      ? await currentPreparationFingerprint(accountId, connectedStorageId ?? null, activeProviders)
+      : null;
+    const consumer = driveProvider === "guangya"
+      ? createPreparationConsumer({
+          inner: resourceProvider,
+          ...(jevJudge === undefined ? {} : { judge: jevJudge }),
+          loadDescriptor: async (workflowRunId) => {
+            return resolveLibraryPreparationDescriptor(accountId, connectedStorageId ?? null, workflowRunId, activeProviders, expectedPreparationFingerprint ?? undefined);
+          },
+          reader: {
+            async getReadyResult(descriptor) {
+              const runtime = await import("./library-preparation-runtime");
+              return runtime.getLibraryPreparationService().getReadyResult(descriptor);
+            },
+          },
+        })
+      : { resourceProvider, ...(jevJudge === undefined ? {} : { jevJudge }) };
     return {
       storage: await getWorkerStorageExecutor(accountId, connectedStorageId),
-      resourceProvider: await getWorkerResourceProvider(scoped, activeProviders, accountId),
+      resourceProvider: consumer.resourceProvider,
       storageProvider: driveProvider,
       model,
       // The worker uses this ONLY to pick the free-preset failure copy for THIS
@@ -1026,7 +1064,7 @@ export function buildAccountContextResolver(): ResolveAccountWorkerContext {
       llmConfig,
       ...(assrtToken === undefined ? {} : { assrtToken }),
       titleResearch,
-      ...(jevJudge === undefined ? {} : { jevJudge }),
+      ...(consumer.jevJudge === undefined ? {} : { jevJudge: consumer.jevJudge }),
       agentMemory,
       ...(preferredLanguage === undefined ? {} : { preferredLanguage }),
       ...(qualityPreference === undefined ? {} : { qualityPreference }),
@@ -1195,7 +1233,7 @@ async function runNextQueuedWorkflowNow(claim: QueueClaimOptions | undefined) {
   const parents = await getWorkerStorageParents(accountId);
   const resolveAccountContext = buildAccountContextResolver();
   const startedAt = new Date().toISOString();
-  const onAuthErrorFreeze = (id: string, reason: string) => freezeConnectedStorage(id, reason);
+  const onAuthErrorFreeze = (id: string, reason: string, error?: unknown) => freezeConnectedStorage(id, reason, error);
   const claimOption = claim === undefined ? {} : { claim };
   // Urgent user messages ("现在处理", written mid-run, or retry after a failure) get a
   // replace_request as soon as the queue is free — never waiting for the patrol.
@@ -1648,6 +1686,265 @@ export async function resolveJevJudge(
   const cfg = await getJevConfig(repository, env);
   if (!isJevPrefilterActive(cfg) || !cfg.apiKey) return undefined;
   return createJevJudge({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl });
+}
+
+interface PreparationPageRun {
+  workflowRunId: string;
+  accountId: string;
+  connectedStorageId: string | null;
+  kind: string;
+  status: string;
+  nextAttemptAt?: string | null;
+  mediaType: string;
+  tmdbId: number;
+  title: string;
+  aliases: unknown;
+  year: number;
+}
+
+interface PreparationNativeRun extends PreparationPageRun {
+  connectedStorageId: string | null;
+}
+
+interface PreparationAccountState {
+  storages: ConnectedStorage[];
+  candidateProviders: string[];
+  scoped: ReturnType<typeof getAccountScopedSettings>;
+  sourceFingerprints: Map<string, Promise<string>>;
+}
+
+interface TrustedPreparationStorage {
+  id: string;
+  provider: string;
+  providerUid: string;
+  connectionGeneration: string;
+}
+
+async function resolvePreparationAccountState(accountId: string): Promise<PreparationAccountState> {
+  const storages = await getWorkflowRepository().listConnectedStorages(accountId);
+  const active = process.env.MEDIA_TRACK_STORAGE_ADAPTER === "115"
+    ? sortDrivesByOrder(storages.filter((storage) => storage.status === "active" && isRegisteredStorageProvider(storage.provider) && hasUsableStorageCredential(storage) && hasPreparationCategoryRoots(storage)), await getAccountDriveOrder(accountId))
+    : [];
+  const scoped = getAccountScopedSettings(accountId);
+  return { storages, candidateProviders: [...new Set(active.map((storage) => storage.provider))], scoped, sourceFingerprints: new Map() };
+}
+
+function trustedPreparationStorage(state: PreparationAccountState, requestedStorageId: string | null): TrustedPreparationStorage | null {
+  const selected = requestedStorageId === null
+    ? pickDefaultConnectedStorage(state.storages)
+    : state.storages.find((storage) => storage.id === requestedStorageId && isRegisteredStorageProvider(storage.provider));
+  if (!selected || selected.status !== "active" || selected.provider !== "guangya") return null;
+  const { credential } = extractStorageCredential("guangya", selected.payload);
+  if (!credential) return null;
+  return { id: selected.id, provider: selected.provider, providerUid: selected.providerUid, connectionGeneration: connectionMarkerFromPayload(selected.payload) };
+}
+
+function hasPreparationCategoryRoots(storage: ConnectedStorage): boolean {
+  const is115 = storage.provider === "pan115";
+  const tv = storage.tvCid || (is115 ? storageParentDirectoryId() : "");
+  const anime = storage.animeCid || storage.tvCid || (is115 ? animeParentDirectoryId() : "");
+  const movies = storage.moviesCid || (is115 ? moviesParentDirectoryId() : "");
+  return Boolean(tv && anime && movies);
+}
+
+function providersForPreparation(state: PreparationAccountState, storage: TrustedPreparationStorage): string[] {
+  return state.candidateProviders.length > 0 ? state.candidateProviders : [storage.provider];
+}
+
+async function sourceFingerprintForPreparation(state: PreparationAccountState, providers: readonly string[]): Promise<string> {
+  const key = JSON.stringify([...new Set(providers)].sort());
+  let fingerprint = state.sourceFingerprints.get(key);
+  if (!fingerprint) {
+    fingerprint = preparationSearchFingerprint(state.scoped, providers);
+    state.sourceFingerprints.set(key, fingerprint);
+  }
+  return fingerprint;
+}
+
+/** Source/API settings are hashed; token rotation deliberately does not affect this
+ * fingerprint. The storage connection generation below handles rebind invalidation. */
+async function preparationSearchFingerprint(
+  scoped: ReturnType<typeof getAccountScopedSettings>,
+  providers: readonly string[],
+): Promise<string> {
+  const [pansouOverride, prowlarr, haisouKey, jev] = await Promise.all([
+    scoped.getSetting(PANSOU_BASE_URL_SETTING_KEY),
+    getProwlarrConfig(scoped),
+    getHaisouApiKey(scoped),
+    getJevConfig(scoped),
+  ]);
+  const { kinds, allowedTypes } = allowedResourceTypesForProviders(providers);
+  const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  return digest({
+    adapter: process.env.MEDIA_TRACK_WORKFLOW_ADAPTER ?? "fake",
+    providers: [...new Set(providers)].sort(),
+    kinds: [...kinds].sort(),
+    allowedTypes: [...allowedTypes].sort(),
+    pansou: resolveUserPanSouBaseUrl(pansouOverride),
+    prowlarr: { baseURL: prowlarr.baseURL ?? "", credentialRevision: digest(prowlarr.apiKey ?? "") },
+    haisouCredentialRevision: digest(haisouKey ?? ""),
+    jev: {
+      enabled: jev.enabled,
+      healthy: jev.health === "ok",
+      configRevision: jevConfigFingerprint(jev.apiKey ?? "", jev.baseUrl),
+    },
+  });
+}
+
+async function currentPreparationFingerprint(accountId: string, connectedStorageId: string | null, providers: readonly string[]): Promise<string | null> {
+  if (process.env.MEDIA_TRACK_WORKFLOW_ADAPTER !== "pansou") return null;
+  const state = await resolvePreparationAccountState(accountId);
+  const storage = trustedPreparationStorage(state, connectedStorageId);
+  if (!storage) return null;
+  return preparationFingerprintForStorage(await sourceFingerprintForPreparation(state, providers), storage);
+}
+
+function preparationFingerprintForStorage(sourceFingerprint: string, storage: TrustedPreparationStorage): string {
+  return createHash("sha256").update(JSON.stringify({
+    sourceFingerprint,
+    storageId: storage.id,
+    providerUid: storage.providerUid,
+    connectionGeneration: storage.connectionGeneration,
+  })).digest("hex");
+}
+
+async function makePreparationDescriptor(run: PreparationPageRun, state: PreparationAccountState, providerOverride?: readonly string[]): Promise<PreparationDescriptor | null> {
+  if (run.status !== "queued" && run.status !== "running") return null;
+  if (run.status === "queued" && run.nextAttemptAt && Date.parse(run.nextAttemptAt) > Date.now()) return null;
+  if (run.kind === "staging_recovery" || !isQueueClaimableKind(run.kind as Parameters<typeof isQueueClaimableKind>[0])) return null;
+  if (!(run.mediaType === "movie" || run.mediaType === "tv" || run.mediaType === "anime")
+    || !Number.isSafeInteger(run.tmdbId) || run.tmdbId < 1
+    || typeof run.title !== "string" || !run.title.trim() || !Number.isInteger(run.year)
+    || !Array.isArray(run.aliases) || run.aliases.length > 20 || run.aliases.some((alias) => typeof alias !== "string")) return null;
+  const storage = trustedPreparationStorage(state, run.connectedStorageId);
+  if (!storage) return null;
+  const providers = providerOverride ? [...providerOverride] : providersForPreparation(state, storage);
+  if (providers.length === 0) return null;
+  const aliases = (run.aliases as unknown[]).filter((alias): alias is string => typeof alias === "string");
+  if (aliases.length !== (run.aliases as unknown[]).length) return null;
+  const descriptor: PreparationDescriptor = {
+    accountId: run.accountId,
+    connectedStorageId: run.connectedStorageId,
+    workflowRunId: run.workflowRunId,
+    mediaType: run.mediaType,
+    tmdbId: run.tmdbId,
+    title: run.title,
+    aliases,
+    year: run.year,
+    searchConfigFingerprint: preparationFingerprintForStorage(await sourceFingerprintForPreparation(state, providers), storage),
+  };
+  try {
+    validatePreparationDescriptor(descriptor);
+  } catch {
+    return null;
+  }
+  return descriptor;
+}
+
+async function readMinimalNativePreparationRun(accountId: string, connectedStorageId: string | null, workflowRunId: string): Promise<PreparationNativeRun | null> {
+  const { getLibraryPreparationPool } = await import("./library-preparation-runtime");
+  const result = await getLibraryPreparationPool().query<{
+    id: string; account_id: string; connected_storage_id: string; kind: string; status: string; next_attempt_at: string | null;
+    media_type: string; tmdb_id: number; title: string; aliases: unknown; year: number;
+  }>(
+    `SELECT wr.id,wr.account_id,wr.connected_storage_id,wr.payload->>'kind' AS kind,wr.payload->>'status' AS status,
+            wr.payload->>'nextAttemptAt' AS next_attempt_at,mt.payload->>'type' AS media_type,
+            (mt.payload->>'tmdbId')::integer AS tmdb_id,mt.payload->>'title' AS title,
+            mt.payload->'aliases' AS aliases,(mt.payload->>'year')::integer AS year
+       FROM workflow_runs wr
+       JOIN tracked_seasons ts ON ts.id=wr.tracked_season_id AND ts.account_id=wr.account_id AND ts.connected_storage_id=wr.connected_storage_id
+       JOIN media_titles mt ON mt.id=ts.media_title_id
+      WHERE wr.id=$1 AND wr.account_id=$2 AND wr.connected_storage_id=$3
+      LIMIT 1`,
+    [workflowRunId, accountId, connectedStorageId ?? UNSCOPED_STORAGE],
+  );
+  const row = result.rows[0];
+  return row ? {
+    workflowRunId: row.id,
+    accountId: row.account_id,
+    connectedStorageId: row.connected_storage_id === UNSCOPED_STORAGE ? null : row.connected_storage_id,
+    kind: row.kind,
+    status: row.status,
+    nextAttemptAt: row.next_attempt_at,
+    mediaType: row.media_type,
+    tmdbId: row.tmdb_id,
+    title: row.title,
+    aliases: row.aliases,
+    year: row.year,
+  } : null;
+}
+
+export async function resolveLibraryPreparationDescriptorsForPage(runs: readonly PreparationPageRun[]): Promise<PreparationDescriptor[]> {
+  if (process.env.MEDIA_TRACK_WORKFLOW_ADAPTER !== "pansou") return [];
+  const accounts = new Map<string, Promise<PreparationAccountState>>();
+  const descriptors: PreparationDescriptor[] = [];
+  for (const run of runs) {
+    let accountState = accounts.get(run.accountId);
+    if (!accountState) {
+      accountState = resolvePreparationAccountState(run.accountId);
+      accounts.set(run.accountId, accountState);
+    }
+    const descriptor = await makePreparationDescriptor(run, await accountState);
+    if (descriptor) descriptors.push(descriptor);
+  }
+  return descriptors;
+}
+
+export async function resolveLibraryPreparationDescriptor(
+  accountId: string,
+  connectedStorageId: string | null,
+  workflowRunId: string,
+  activeProviderUnion?: readonly string[],
+  expectedSearchConfigFingerprint?: string,
+): Promise<PreparationDescriptor | null> {
+  if (process.env.MEDIA_TRACK_WORKFLOW_ADAPTER !== "pansou") return null;
+  const run = await readMinimalNativePreparationRun(accountId, connectedStorageId, workflowRunId);
+  if (!run || run.connectedStorageId !== connectedStorageId) return null;
+  const state = await resolvePreparationAccountState(accountId);
+  const descriptor = await makePreparationDescriptor(run, state, activeProviderUnion);
+  return expectedSearchConfigFingerprint !== undefined && descriptor?.searchConfigFingerprint !== expectedSearchConfigFingerprint
+    ? null
+    : descriptor;
+}
+
+/** Refresh a durable preparation lease using only native workflow metadata,
+ * account settings and the exact active Guangya credential. This deliberately
+ * avoids acquisition context factories, storage executors and parent-directory
+ * or drive-space probes. */
+export async function refreshLibraryPreparationContext(job: PreparationDescriptor): Promise<ResolvedPreparationContext> {
+  if (process.env.MEDIA_TRACK_WORKFLOW_ADAPTER !== "pansou") throw new Error("PREPARATION_PROVIDER_INACTIVE");
+  const run = await readMinimalNativePreparationRun(job.accountId, job.connectedStorageId, job.workflowRunId);
+  if (!run || run.connectedStorageId !== job.connectedStorageId) throw new Error("PREPARATION_RUN_INACTIVE");
+  const state = await resolvePreparationAccountState(job.accountId);
+  const descriptor = await makePreparationDescriptor(run, state);
+  if (!descriptor || descriptor.mediaType !== job.mediaType || descriptor.tmdbId !== job.tmdbId) throw new Error("PREPARATION_SCOPE_MISMATCH");
+  const scoped = getAccountScopedSettings(job.accountId);
+  const trustedStorage = trustedPreparationStorage(state, job.connectedStorageId);
+  if (!trustedStorage) throw new Error("PREPARATION_STORAGE_INACTIVE");
+  const providers = providersForPreparation(state, trustedStorage);
+  const jev = await resolveJevJudge(scoped);
+  const jevConfig = await getJevConfig(scoped);
+  return {
+    target: { title: descriptor.title, aliases: [...descriptor.aliases], ...(descriptor.year === undefined ? {} : { year: descriptor.year }), searchConfigFingerprint: descriptor.searchConfigFingerprint },
+    resourceProvider: await getWorkerResourceProvider(scoped, providers, job.accountId),
+    ...(jev === undefined ? {} : { jev }),
+    searchServiceKey: nonSecretEndpointKey((await getPanSouBaseUrl(scoped)) || PUBLIC_PANSOU_BASE_URL),
+    searchLane: "pansou",
+    ...(jev === undefined ? {} : { aiServiceKey: nonSecretEndpointKey(jevConfig.baseUrl) }),
+  };
+}
+
+function nonSecretEndpointKey(value: string): string {
+  try {
+    const endpoint = new URL(value);
+    endpoint.username = "";
+    endpoint.password = "";
+    endpoint.search = "";
+    endpoint.hash = "";
+    return endpoint.toString().toLowerCase();
+  } catch {
+    return `endpoint:${createHash("sha256").update(value).digest("hex")}`;
+  }
 }
 
 export const DAILY_SWEEP_TIME_SETTING_KEY = "daily_sweep_time";
@@ -2205,7 +2502,7 @@ async function runScheduledType3Now(options?: { force?: boolean }): Promise<Sche
       maxConcurrentRuns: await getPatrolConcurrency(repository),
       resolveDriveId: defaultDriveIdOf,
       resolveAccountContext: buildAccountContextResolver(),
-      onAuthErrorFreeze: (id, reason) => freezeConnectedStorage(id, reason),
+      onAuthErrorFreeze: (id, reason, error) => freezeConnectedStorage(id, reason, error),
       mayStartRun: () => {
         const allowed = mayStartRun();
         if (!allowed) heldBack = true;
@@ -2519,12 +2816,15 @@ interface AccountStorageCredentials {
   id: string;
   /** The drive's brand — drives executor/probe/resource dispatch (tree model). */
   provider: string;
+  providerUid: string;
   status: "active" | "frozen";
   /** Cookie credential for cookie-auth brands (115/夸克). Empty for token-auth
    *  brands (光鸭/天翼), which carry their token blob in `credential` instead. */
   cookie: string;
   /** Token blob for token-auth brands (光鸭/天翼). null for cookie-auth brands. */
   credential: TokenCredential | null;
+  /** Changes on reconnect/rebind, while token refresh preserves payload.meta. */
+  connectionMarker: string;
   rootCid: string | null;
   moviesCid: string | null;
   tvCid: string | null;
@@ -2549,6 +2849,13 @@ function extractStorageCredential(
     // the raw blob as-is (the brand client trims/validates the rest downstream);
     // any required key missing → not-connected, exactly like an empty cookie.
     const blob = (payload ?? {}) as Record<string, unknown>;
+    if (provider === "guangya") {
+      const accessToken = typeof blob.accessToken === "string" ? blob.accessToken.trim() : typeof blob.access_token === "string" ? blob.access_token.trim() : "";
+      const refreshToken = typeof blob.refreshToken === "string" ? blob.refreshToken.trim() : typeof blob.refresh_token === "string" ? blob.refresh_token.trim() : "";
+      if (!accessToken || !refreshToken) return { cookie: "", credential: null };
+      const deviceId = typeof blob.deviceId === "string" ? blob.deviceId : typeof blob.device_id === "string" ? blob.device_id : undefined;
+      return { cookie: "", credential: { ...blob, accessToken, refreshToken, ...(deviceId === undefined ? {} : { deviceId }) } };
+    }
     // A token brand with no requiredCredentialKeys is a REGISTRY MISCONFIG, not a
     // connected drive: `[].every(...)` is vacuously true, so without this guard any
     // payload (even {}) would silently pass. Require a non-empty key list.
@@ -2574,6 +2881,7 @@ async function provisionDriveCategoryDirs(
   provider: string,
   cookie: string,
   credential: TokenCredential | null,
+  providerUid?: string,
 ): Promise<{ rootCid: string; moviesCid: string; tvCid: string; animeCid: string }> {
   // Per-brand provisioning root is DATA in the registry ("0"/"0"/""/"-11"), not
   // logic — one lookup drives every arm below (was hardcoded per branch).
@@ -2587,20 +2895,20 @@ async function provisionDriveCategoryDirs(
   // and the provision silently failed, leaving the drive with no CIDs.
   let executor: StorageExecutor;
   if (brand.authKind === "token") {
-    executor = createExecutorForBrand({ provider, credential: credential ?? {}, scopeCids: [] });
+    executor = createExecutorForBrand({ provider, credential: credential ?? {}, scopeCids: [], ...(providerUid ? { providerUid } : {}) });
   } else if (provider === "pan115") {
     executor = createBootstrapPan115CookieStorageExecutor({ cookie });
   } else {
     executor = createExecutorForBrand({ provider, cookie, scopeCids: [] });
   }
-  return provisionCategoryDirs({
+  return withStorageWriteTask([executor], () => provisionCategoryDirs({
     baseParentId,
     ...customDirNamesFromEnv(process.env),
     storage: {
       listChildDirs: (parentId: string) => executor.listChildDirectories(parentId),
       createDirectory: (dir) => executor.createDirectory(dir),
     },
-  });
+  }));
 }
 
 /**
@@ -2665,6 +2973,34 @@ function makeTokenPersister(
       console.error(`[media-track] token refresh persist failed for ${storageId}: ${String(error)}`);
     }
   };
+}
+
+function makeGuangYaAuthHooks(
+  accountId: string,
+  storageId: string,
+  providerUid: string,
+  credential: unknown,
+  connectionMarker: string,
+  allowFrozenForProbe = false,
+): ReturnType<typeof createGuangYaAuthHooks> {
+  const blob = (credential ?? {}) as Record<string, unknown>;
+  const credentials: GuangYaTokens = {
+    accessToken: typeof blob.accessToken === "string" ? blob.accessToken : "",
+    refreshToken: typeof blob.refreshToken === "string" ? blob.refreshToken : "",
+    deviceId: typeof blob.deviceId === "string" ? blob.deviceId : "",
+  };
+  const uid = providerUid.trim() || parseGuangYaUid(credentials.accessToken)?.trim() || credentials.deviceId.trim();
+  return createGuangYaAuthHooks({ accountId, connectedStorageId: storageId, providerUid: uid, credentials,
+    rawCredentialDeviceId: typeof blob.deviceId === "string" ? blob.deviceId : null,
+    connectionMarker, allowFrozenForProbe });
+}
+
+function connectionMarkerFromPayload(payload: unknown): string {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return "";
+  const meta = (payload as Record<string, unknown>).meta;
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return "";
+  const connectedAt = (meta as Record<string, unknown>).connectedAt;
+  return typeof connectedAt === "string" ? connectedAt.trim() : "";
 }
 
 function hasUsableStorageCredential(storage: { provider: string; payload: unknown }): boolean {
@@ -2734,7 +3070,7 @@ async function getAccountStorageCredentials(
     const liveMode = process.env.MEDIA_TRACK_STORAGE_ADAPTER === "115";
     if (liveMode && drive.status === "active" && !(rootCid && moviesCid && tvCid && animeCid)) {
       try {
-        const p = await provisionDriveCategoryDirs(drive.provider, cookie, credential);
+        const p = await provisionDriveCategoryDirs(drive.provider, cookie, credential, drive.providerUid);
         ({ rootCid, moviesCid, tvCid, animeCid } = p);
         await getWorkflowRepository().upsertConnectedStorage({
           id: drive.id,
@@ -2757,9 +3093,11 @@ async function getAccountStorageCredentials(
     return {
       id: drive.id,
       provider: drive.provider,
+      providerUid: drive.providerUid,
       status: drive.status,
       cookie,
       credential,
+      connectionMarker: connectionMarkerFromPayload(drive.payload),
       rootCid,
       moviesCid,
       tvCid,
@@ -2822,8 +3160,14 @@ export function frozenDriveMessage(provider: string | null, action: "获取" | "
 
 /** Marks a drive frozen — its cookie died. Called when a worker/probe hits a
  *  Pan115AuthError. Resolves the run/drive's owning connected_storage id. */
-async function freezeConnectedStorage(storageId: string, reason: string): Promise<void> {
+async function freezeConnectedStorage(storageId: string, reason: string, error?: unknown): Promise<void> {
   try {
+    const snapshot = getGuangYaAuthFailureSnapshot(error);
+    if (snapshot) {
+      await freezeGuangYaStorageIfUnchanged(snapshot, reason);
+      return;
+    }
+    if (isGuangYaAuthError(error)) return;
     await getWorkflowRepository().setConnectedStorageStatus(
       storageId,
       "frozen",
@@ -2852,21 +3196,41 @@ export async function testConnection(
   }
   const brand = getStorageBrand(creds.provider);
   try {
+    const guangYaAuth = creds.provider === "guangya"
+      ? makeGuangYaAuthHooks(accountId, creds.id, creds.providerUid, creds.credential, creds.connectionMarker, true)
+      : undefined;
     await probeStorageConnection(
       creds.provider,
       creds.cookie,
       creds.rootCid,
       creds.credential,
       makeTokenPersister(accountId, creds.id, creds.provider),
+      guangYaAuth,
     );
-    await getWorkflowRepository().setConnectedStorageStatus(creds.id, "active", null, null);
+    if (guangYaAuth) {
+      if (!await guangYaAuth.reactivateIfUnchanged()) {
+        return { ok: false, status: creds.status, message: "连接已变化，请重新测试。" };
+      }
+    } else {
+      await getWorkflowRepository().setConnectedStorageStatus(creds.id, "active", null, null);
+    }
     await resolveCachedDriveSpace(accountId, creds.id, "active", { forceRefresh: true });
     return { ok: true, status: "active", message: "连接正常。" };
   } catch (error) {
     // The brand's own dead-cookie signal → freeze; anything else (network/
     // transient) is NOT a reason to freeze.
     if (brand.isAuthError(error)) {
-      await freezeConnectedStorage(creds.id, error instanceof Error ? error.message : String(error));
+      if (creds.provider === "guangya") {
+        const failedSnapshot = getGuangYaAuthFailureSnapshot(error);
+        if (!failedSnapshot) {
+          return { ok: false, status: creds.status, message: "连接已变化或鉴权探测信息不完整，请重新测试。" };
+        }
+        const froze = await freezeGuangYaStorageIfUnchanged(failedSnapshot, error instanceof Error ? error.message : String(error));
+        return froze
+          ? { ok: false, status: "frozen", message: `网盘登录已失效，请重新绑定同一个${brand.label}。` }
+          : { ok: false, status: creds.status, message: "连接已变化，请重新测试。" };
+      }
+      await freezeConnectedStorage(creds.id, error instanceof Error ? error.message : String(error), error);
       return { ok: false, status: "frozen", message: `网盘登录已失效，请重新绑定同一个${brand.label}。` };
     }
     return { ok: false, status: creds.status, message: `连接检测失败：${String(error)}` };
@@ -2882,7 +3246,8 @@ async function probeStorageConnection(
   credential: TokenCredential | null,
   // Persist a rotated credential if the probe refreshes it mid-flight. Wired by
   // testConnection (an existing drive). Omitted at first-connect (no row yet).
-  onCredentialRefresh?: ((creds: unknown) => Promise<void>) | undefined,
+  onCredentialRefresh?: ((creds: unknown) => void | Promise<void>) | undefined,
+  guangYaAuth?: ReturnType<typeof createGuangYaAuthHooks>,
 ): Promise<void> {
   const { Pan115CookieClient, Pan123Client, QuarkCookieClient, TianyiClient } = await import(
     "@media-track/workflow"
@@ -2897,11 +3262,17 @@ async function probeStorageConnection(
       // Pin the SAME persisted device id as connect/worker so "Test connection"
       // doesn't mint a fresh one (harmless today — validate is account-host — but
       // consistent with the rest of the brand's device-pinning).
-      ...(blob.deviceId === undefined ? {} : { deviceId: blob.deviceId }),
+      ...(guangYaAuth ? { deviceId: guangYaAuth.credentials.deviceId } : blob.deviceId === undefined ? {} : { deviceId: blob.deviceId }),
       // A 401 during the probe refreshes the token pair; persist it so the DB
       // doesn't keep a stale token that later wrongly freezes the drive. (The
       // client option keeps 光鸭's own onTokensRefreshed vocabulary.)
-      ...(onCredentialRefresh ? { onTokensRefreshed: onCredentialRefresh } : {}),
+      ...(!guangYaAuth && onCredentialRefresh ? { onTokensRefreshed: onCredentialRefresh } : {}),
+      ...(guangYaAuth ? {
+        authCoordinator: getGuangYaAuthCoordinator(),
+        authAccountKey: guangYaAuth.accountKey,
+        loadCurrentCredentials: guangYaAuth.loadCurrentCredentials,
+        onTokensRefreshed: guangYaAuth.onTokensRefreshed,
+      } : {}),
     }).validateToken();
     return;
   }
@@ -3023,12 +3394,18 @@ async function getWorkerStorageExecutor(
       // writes the new blob back into this drive's payload. Cookie brands (115/
       // 夸克) keep the cookie path untouched.
       if (isRegisteredStorageProvider(creds.provider) && getStorageBrand(creds.provider).authKind === "token") {
+        const guangYaAuth = creds.provider === "guangya"
+          ? makeGuangYaAuthHooks(accountId, creds.id, creds.providerUid, creds.credential, creds.connectionMarker)
+          : null;
         return createExecutorForBrand({
           provider: creds.provider,
-          credential: creds.credential ?? {},
+          credential: guangYaAuth?.credentials ?? creds.credential ?? {},
+          providerUid: creds.providerUid,
           scopeCids,
           env: process.env,
           onCredentialRefresh: makeTokenPersister(accountId, creds.id, creds.provider),
+          ...(guangYaAuth ? { persistGuangYaTokens: guangYaAuth.onTokensRefreshed } : {}),
+          ...(guangYaAuth ? { loadGuangYaCredentials: guangYaAuth.loadCurrentCredentials } : {}),
         });
       }
       return createExecutorForBrand({
@@ -3544,14 +3921,20 @@ export async function resolveCachedDriveSpace(
       const scopeCids = [drive.rootCid, drive.moviesCid, drive.tvCid, drive.animeCid].filter(
         (cid): cid is string => Boolean(cid),
       );
+      const guangYaAuth = drive.provider === "guangya"
+        ? makeGuangYaAuthHooks(accountId, drive.id, drive.providerUid, credential ?? {}, connectionMarkerFromPayload(drive.payload))
+        : undefined;
       const executor =
         getStorageBrand(drive.provider).authKind === "token"
           ? createExecutorForBrand({
               provider: drive.provider,
-              credential: credential ?? {},
+              credential: guangYaAuth?.credentials ?? credential ?? {},
+              providerUid: drive.providerUid,
               scopeCids,
               env: process.env,
               onCredentialRefresh: makeTokenPersister(accountId, drive.id, drive.provider),
+              ...(guangYaAuth ? { persistGuangYaTokens: guangYaAuth.onTokensRefreshed } : {}),
+              ...(guangYaAuth ? { loadGuangYaCredentials: guangYaAuth.loadCurrentCredentials } : {}),
             })
           : createExecutorForBrand({
               provider: drive.provider,
@@ -3676,7 +4059,7 @@ async function bindTokenConnectedStorage(input: {
     animeCid: null,
   };
   try {
-    cids = await provisionDriveCategoryDirs(provider, "", credentialBlob);
+    cids = await provisionDriveCategoryDirs(provider, "", credentialBlob, providerUid);
   } catch (error) {
     console.error(`[media-track] ${provider} directory provision failed (will store without CIDs): ${String(error)}`);
   }

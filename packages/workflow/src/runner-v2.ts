@@ -27,6 +27,7 @@ import { userMessageDrive } from "./user-requests.js";
 import { formatReportPushText, stampReplaceNotification } from "./notification-report.js";
 import { shortDriveLabel } from "./storage-brands.js";
 import { episodeCodeFromFileName } from "./episode-code.js";
+import { withStorageWriteTask } from "./library/guangya-write-coordinator.js";
 
 /**
  * Phase 7d — production persist wrappers on the V2 engine. These mirror the old
@@ -766,7 +767,7 @@ async function persistSingleSeason(input: {
   });
 }
 
-export async function runType2InitializationV2AndPersist(
+async function runType2InitializationV2AndPersistUncoordinated(
   input: TvV2Common & { season: TrackedSeason },
 ): Promise<BridgedV2Result> {
   const now = resolveNow(input);
@@ -815,7 +816,7 @@ export async function runType2InitializationV2AndPersist(
   return bridged;
 }
 
-export async function runType3MonitoringV2AndPersist(
+async function runType3MonitoringV2AndPersistUncoordinated(
   input: TvV2Common & {
     season: TrackedSeason;
     /** This drive's own episode records. */
@@ -907,7 +908,7 @@ function keepDriveLocalRecords(
   return { ...seasonResult, episodes };
 }
 
-export async function runSeriesInitializationV2AndPersist(
+async function runSeriesInitializationV2AndPersistUncoordinated(
   // `seasonQualityRecord` is the LEGACY per-season record string (e.g. "4K"),
   // distinct from TvV2Common.qualityPreference (the new high/medium agent
   // preference that drives qualityGuidance via passthrough). Renamed to avoid a
@@ -1042,7 +1043,7 @@ export async function runSeriesInitializationV2AndPersist(
  * which follows the lock run id, sees it finish). With holdLockOpen the lock record is
  * saved `running` and the caller writes the terminal one last (see HeldLockRun).
  */
-export async function runReplaceRequestV2AndPersist(
+async function runReplaceRequestV2AndPersistUncoordinated(
   input: TvV2Common & {
     seasons: Array<{ season: TrackedSeason; episodes: EpisodeState[] }>;
     /** The claimed lock run's season and audit trail (queued/claimed events are kept). */
@@ -1233,7 +1234,7 @@ export async function runReplaceRequestV2AndPersist(
  * when the season was untracked while this hidden run was going — the untrack wins.
  * Memory reflection is skipped inside the engine (`stagingRecovery`).
  */
-export async function runStagingRecoveryV2AndPersist(
+async function runStagingRecoveryV2AndPersistUncoordinated(
   input: TvV2Common & {
     seasons: Array<{ season: TrackedSeason; episodes: EpisodeState[] }>;
     lockSeasonNumber: number;
@@ -1428,7 +1429,7 @@ function stampNotifications<T extends NotificationEvent>(notifications: T[], not
   return notice ? notifications.map((n) => stampReplaceNotification(n, notice)) : notifications;
 }
 
-export async function runMovieAcquisitionV2AndPersist(input: {
+async function runMovieAcquisitionV2AndPersistUncoordinated(input: {
   title: MediaTitle;
   categoryParentId: string;
   resourceProvider: ResourceProvider;
@@ -1733,4 +1734,44 @@ export async function runMovieAcquisitionV2AndPersist(input: {
     notifications,
   }));
   return { ...result, ...held };
+}
+
+function writeTaskExecutors(input: { storage: StorageExecutor; drives?: AcquisitionDriveContext[] }): StorageExecutor[] {
+  return [input.storage, ...(input.drives ?? []).map((drive) => drive.storage)];
+}
+
+export function runType2InitializationV2AndPersist(
+  input: Parameters<typeof runType2InitializationV2AndPersistUncoordinated>[0],
+): ReturnType<typeof runType2InitializationV2AndPersistUncoordinated> {
+  return withStorageWriteTask(writeTaskExecutors(input), () => runType2InitializationV2AndPersistUncoordinated(input));
+}
+
+export function runType3MonitoringV2AndPersist(
+  input: Parameters<typeof runType3MonitoringV2AndPersistUncoordinated>[0],
+): ReturnType<typeof runType3MonitoringV2AndPersistUncoordinated> {
+  return withStorageWriteTask(writeTaskExecutors(input), () => runType3MonitoringV2AndPersistUncoordinated(input));
+}
+
+export function runSeriesInitializationV2AndPersist(
+  input: Parameters<typeof runSeriesInitializationV2AndPersistUncoordinated>[0],
+): ReturnType<typeof runSeriesInitializationV2AndPersistUncoordinated> {
+  return withStorageWriteTask(writeTaskExecutors(input), () => runSeriesInitializationV2AndPersistUncoordinated(input));
+}
+
+export function runReplaceRequestV2AndPersist(
+  input: Parameters<typeof runReplaceRequestV2AndPersistUncoordinated>[0],
+): ReturnType<typeof runReplaceRequestV2AndPersistUncoordinated> {
+  return withStorageWriteTask(writeTaskExecutors(input), () => runReplaceRequestV2AndPersistUncoordinated(input));
+}
+
+export function runStagingRecoveryV2AndPersist(
+  input: Parameters<typeof runStagingRecoveryV2AndPersistUncoordinated>[0],
+): ReturnType<typeof runStagingRecoveryV2AndPersistUncoordinated> {
+  return withStorageWriteTask(writeTaskExecutors(input), () => runStagingRecoveryV2AndPersistUncoordinated(input));
+}
+
+export function runMovieAcquisitionV2AndPersist(
+  input: Parameters<typeof runMovieAcquisitionV2AndPersistUncoordinated>[0],
+): ReturnType<typeof runMovieAcquisitionV2AndPersistUncoordinated> {
+  return withStorageWriteTask(writeTaskExecutors(input), () => runMovieAcquisitionV2AndPersistUncoordinated(input));
 }

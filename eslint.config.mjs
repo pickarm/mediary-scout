@@ -15,6 +15,8 @@ export default tseslint.config(
       "**/dist/**",
       "**/.next/**",
       "**/node_modules/**",
+      // Local verification caches and isolated test tooling are not product source.
+      ".worktrees/**",
       ".omo/**",
       "**/*.js",
       "**/*.cjs",

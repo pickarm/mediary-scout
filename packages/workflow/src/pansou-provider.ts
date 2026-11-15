@@ -31,20 +31,37 @@ export interface PanSouFetchInit {
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
-/** PanSou searches in progress per server, across every provider in this process.
+/** PanSou searches in progress per server, across every provider/module copy in this process.
  *  One PanSou fans each search out to dozens of channels and starts answering 502
  *  at about four simultaneous searches (measured 2026-09-25); parallel patrol runs
  *  share it, so their searches queue here instead of failing as "source down". */
-const MAX_IN_FLIGHT_PER_SERVER = 2;
-const serverSlots = new Map<string, { inFlight: number; waiters: Array<() => void> }>();
+const PANSOU_SLOTS = Symbol.for("media-track.pansou.request-slots");
+type RequestSlot = { inFlight: number; limit: number; waiters: Array<() => void> };
+type SlotRegistry = typeof globalThis & { [PANSOU_SLOTS]?: Map<string, RequestSlot> };
+
+export function configuredPanSouConcurrency(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.MEDIA_TRACK_PANSOU_CONCURRENCY?.trim();
+  if (!raw) return 2;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1 || value > 10) throw new Error("PANSOU_CONCURRENCY_INVALID");
+  return value;
+}
 
 async function withServerSlot<T>(baseURL: string, call: () => Promise<T>): Promise<T> {
-  let slot = serverSlots.get(baseURL);
+  const registry = globalThis as SlotRegistry;
+  const slots = registry[PANSOU_SLOTS] ?? new Map<string, RequestSlot>();
+  registry[PANSOU_SLOTS] = slots;
+  const key = canonicalServerKey(baseURL);
+  const limit = configuredPanSouConcurrency();
+  let slot = slots.get(key);
   if (!slot) {
-    slot = { inFlight: 0, waiters: [] };
-    serverSlots.set(baseURL, slot);
+    slot = { inFlight: 0, limit, waiters: [] };
+    slots.set(key, slot);
   }
-  if (slot.inFlight >= MAX_IN_FLIGHT_PER_SERVER) {
+  // If independent module copies or env reloads disagree, honor the strictest
+  // ceiling so a second registry cannot silently add capacity.
+  slot.limit = Math.min(slot.limit, limit);
+  if (slot.inFlight >= slot.limit) {
     await new Promise<void>((resolve) => slot!.waiters.push(resolve));
   } else {
     slot.inFlight += 1;
@@ -55,7 +72,21 @@ async function withServerSlot<T>(baseURL: string, call: () => Promise<T>): Promi
     // Hand the slot straight to the next waiter (inFlight unchanged), or free it.
     const next = slot.waiters.shift();
     if (next) next();
-    else if ((slot.inFlight -= 1) === 0) serverSlots.delete(baseURL);
+    else if ((slot.inFlight -= 1) === 0) slots.delete(key);
+  }
+}
+
+function canonicalServerKey(value: string): string {
+  try {
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    return url.toString().replace(/\/$/, "").toLowerCase();
+  } catch {
+    return value.trim().replace(/\/+$/, "").toLowerCase();
   }
 }
 

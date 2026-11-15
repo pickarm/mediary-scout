@@ -20,10 +20,31 @@
     "./user-requests": {
       "types": "./dist/user-requests.d.ts",
       "default": "./dist/user-requests.js"
+    },
+    "./library": {
+      "types": "./dist/library/index.d.ts",
+      "default": "./dist/library/index.js"
+    },
+    "./activity-query": {
+      "types": "./dist/library/activity-query.d.ts",
+      "default": "./dist/library/activity-query.js"
+    },
+    "./preparation-consumer": {
+      "types": "./dist/library/preparation-consumer.d.ts",
+      "default": "./dist/library/preparation-consumer.js"
+    },
+    "./library-query": {
+      "types": "./dist/library/library-query.d.ts",
+      "default": "./dist/library/library-query.js"
+    },
+    "./summary-cache": {
+      "types": "./dist/library/summary-cache.d.ts",
+      "default": "./dist/library/summary-cache.js"
     }
   },
   "dependencies": {
-    "pg": "^8.21.0"
+    "pg": "^8.21.0",
+    "redis": "6.3.1"
   },
   "optionalDependencies": {
     "better-sqlite3": "^12.11.1"

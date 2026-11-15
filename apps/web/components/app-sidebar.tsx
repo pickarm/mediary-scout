@@ -15,7 +15,7 @@ export function AppSidebar({
   basePath = "/",
   activeStorageId,
 }: {
-  active: "search" | "library" | "notifications" | "activity" | "settings" | "none";
+  active: "search" | "library" | "library-manage" | "notifications" | "activity" | "settings" | "none";
   searchQuery?: string;
   /** Tree model: the active workspace path ("/w/<id>" or "/") so the search/library
    *  tabs keep you in the workspace you're viewing. */
@@ -56,6 +56,15 @@ export function AppSidebar({
             >
               <Library size={16} aria-hidden />
               媒体库
+            </Link>
+          </li>
+          <li>
+            <Link
+              className={`nav-item ${active === "library-manage" ? "is-active" : ""}`}
+              href="/library/manage"
+            >
+              <Library size={16} aria-hidden />
+              库管理
             </Link>
           </li>
           <li>

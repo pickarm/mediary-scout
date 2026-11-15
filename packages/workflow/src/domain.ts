@@ -90,6 +90,12 @@ export interface TrackedSeason {
   totalEpisodes: number;
   latestAiredEpisode: number;
   latestAiredSource: LatestAiredSource;
+  /**
+   * Whether unattended patrols should automatically acquire missing episodes.
+   * Absent on legacy records means preserve the historical patrol behavior.
+   * Newly imported library seasons explicitly default to false.
+   */
+  autoAcquire?: boolean;
 }
 
 export interface EpisodeState {
