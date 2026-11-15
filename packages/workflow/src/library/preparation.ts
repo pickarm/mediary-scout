@@ -109,16 +109,24 @@ export class PreparationService {
       let jevResult: JevJudgeResult | undefined;
       if (context.jev && snapshot.candidates.length > 0) {
         const aiKey = safeServiceKey(context.aiServiceKey ?? "default");
-        const judged = await withLane(`ai:${aiKey}`, this.limits.ai, async () => {
-          if (stopped || !(await this.options.store.isLive(job))) return null;
-          return context.jev!.judgeCandidates({
-            target: { kind: job.mediaType === "movie" ? "movie" : "tv", title: target.title, aliases: target.aliases, ...(target.year === undefined ? {} : { year: target.year }) },
-            candidates: snapshot.candidates.map(({ id, title: candidateTitle }) => ({ id, title: candidateTitle })),
+        let judged: JevJudgeResult | null | undefined;
+        try {
+          judged = await withLane(`ai:${aiKey}`, this.limits.ai, async () => {
+            if (stopped || !(await this.options.store.isLive(job))) return null;
+            return context.jev!.judgeCandidates({
+              target: { kind: job.mediaType === "movie" ? "movie" : "tv", title: target.title, aliases: target.aliases, ...(target.year === undefined ? {} : { year: target.year }) },
+              candidates: snapshot.candidates.map(({ id, title: candidateTitle }) => ({ id, title: candidateTitle })),
+            });
           });
-        });
-        if (!judged) return false;
-        jevResult = judged;
+        } catch (error) {
+          // The raw search is the durable useful result. Jev is advisory and the
+          // acquisition's JevPrefilterProvider retains its own fail-open policy.
+          const name = error instanceof Error ? error.name : typeof error;
+          console.warn(`[library-preparation] Jev unavailable (${name}); retaining raw snapshot`);
+          judged = undefined;
+        }
         if (stopped || !(await this.options.store.isLive(job))) return false;
+        if (judged) jevResult = judged;
       }
       const beforeCommit = await this.options.context.refresh(job);
       if (!targetMatchesDescriptor(beforeCommit.target, job)) { await this.options.store.stale(job, this.now()); return false; }

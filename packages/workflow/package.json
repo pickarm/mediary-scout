@@ -28,6 +28,10 @@
     "./activity-query": {
       "types": "./dist/library/activity-query.d.ts",
       "default": "./dist/library/activity-query.js"
+    },
+    "./preparation-consumer": {
+      "types": "./dist/library/preparation-consumer.d.ts",
+      "default": "./dist/library/preparation-consumer.js"
     }
   },
   "dependencies": {
