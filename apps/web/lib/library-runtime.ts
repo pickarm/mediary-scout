@@ -1,5 +1,5 @@
-import { Pool } from "pg";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import type { Pool } from "pg";
 import {
   PostgresScanStore,
   LibraryScanner,
@@ -9,10 +9,23 @@ import {
   type DirectoryReader,
   type ScanScope,
 } from "@media-track/workflow/library";
-import { GuangYaClient, parseGuangYaUid, type ConnectedStorage } from "@media-track/workflow";
-import { getWorkflowRepository, postgresConnectionString } from "./workflow-runtime";
+import {
+  GuangYaClient,
+  getGuangYaAuthCoordinator,
+  parseGuangYaUid,
+  type ConnectedStorage,
+} from "@media-track/workflow";
+import { getWorkflowRepository } from "./workflow-runtime";
+import { getLibraryDatabasePool } from "./library-database";
+import { createGuangYaAuthHooks } from "./guangya-auth-runtime";
+import {
+  createGuangYaTokenPersister as createWorkflowGuangYaTokenPersister,
+  type ConnectedStorageCasQuery,
+  type GuangYaCredentialSnapshot,
+} from "@media-track/workflow";
 
-let pool: Pool | null = null;
+export type { ConnectedStorageCasQuery, GuangYaCredentialSnapshot } from "@media-track/workflow";
+
 let scanStore: PostgresScanStore | null = null;
 const scanners = new Map<string, LibraryScanner>();
 const scannerCredentialFingerprints = new Map<string, string>();
@@ -20,9 +33,8 @@ const DIRECTORY_TICKET_TTL_MS = 10 * 60_000;
 const runtimeGlobals = globalThis as typeof globalThis & { __libraryDirectoryTicketKey?: Buffer };
 const directoryTicketKey = runtimeGlobals.__libraryDirectoryTicketKey ?? (runtimeGlobals.__libraryDirectoryTicketKey = randomBytes(32));
 
-export function getLibraryPool(): Pool {
-  if (!pool) pool = new Pool({ connectionString: postgresConnectionString(), max: 4, application_name: "mediary-library-api" });
-  return pool;
+export function getLibraryPool() {
+  return getLibraryDatabasePool();
 }
 
 function requireScope(scope: ScanScope): void {
@@ -45,54 +57,30 @@ function credentials(storage: ConnectedStorage): { accessToken: string; refreshT
   return { accessToken, refreshToken, deviceId };
 }
 
+function connectionMarker(payload: unknown): string {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return "";
+  const meta = (payload as Record<string, unknown>).meta;
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return "";
+  const connectedAt = (meta as Record<string, unknown>).connectedAt;
+  return typeof connectedAt === "string" ? connectedAt.trim() : "";
+}
+
 async function resolveStorage(scope: ScanScope): Promise<{ storage: ConnectedStorage; uid: string }> {
   requireScope(scope);
   const storage = (await getWorkflowRepository().listConnectedStorages(scope.accountId)).find((row) => row.id === scope.connectedStorageId);
   if (!storage || storage.accountId !== scope.accountId || storage.provider !== "guangya") throw new LibraryRuntimeError("storage_not_found", "找不到该账号的光鸭连接。");
   if (storage.status !== "active") throw new LibraryRuntimeError("storage_frozen", "该光鸭连接已冻结，请重新绑定后再试。");
   const creds = credentials(storage);
-  const uid = storage.providerUid || parseGuangYaUid(creds.accessToken) || creds.deviceId;
+  const uid = storage.providerUid.trim() || parseGuangYaUid(creds.accessToken)?.trim() || creds.deviceId.trim();
   if (!uid) throw new LibraryRuntimeError("storage_credentials_invalid", "光鸭连接身份信息不可用，请重新绑定。");
   return { storage, uid };
 }
 
-export interface GuangYaCredentialSnapshot {
-  accountId: string;
-  connectedStorageId: string;
-  providerUid: string;
-  credentials: { accessToken: string; refreshToken: string; deviceId: string };
-}
-
-export type ConnectedStorageCasQuery = (sql: string, values: readonly unknown[]) => Promise<{ rowCount: number | null }>;
-
 /** Persists refreshes only while the active row still has this client's latest credentials. */
 export function createGuangYaTokenPersister(query: ConnectedStorageCasQuery, snapshot: GuangYaCredentialSnapshot) {
-  let expected = { ...snapshot.credentials };
+  const persist = createWorkflowGuangYaTokenPersister(query, snapshot);
   return async (tokens: { accessToken: string; refreshToken: string; deviceId: string }): Promise<void> => {
-    const result = await query(
-      "UPDATE connected_storages SET payload = (payload - 'access_token' - 'refresh_token' - 'device_id') || " +
-        "jsonb_build_object('accessToken',$7::text,'refreshToken',$8::text,'deviceId',$9::text) " +
-        "WHERE id=$1 AND account_id=$2 AND provider='guangya' AND provider_uid=$3 AND status='active' " +
-        "AND COALESCE(payload->>'accessToken',payload->>'access_token','')=$4 " +
-        "AND COALESCE(payload->>'refreshToken',payload->>'refresh_token','')=$5 " +
-        "AND COALESCE(payload->>'deviceId',payload->>'device_id','')=$6",
-      [snapshot.connectedStorageId, snapshot.accountId, snapshot.providerUid, expected.accessToken, expected.refreshToken,
-        expected.deviceId, tokens.accessToken, tokens.refreshToken, tokens.deviceId],
-    );
-    if (result.rowCount === 1) expected = { ...tokens };
-  };
-}
-
-function tokenPersister(accountId: string, storage: ConnectedStorage, creds: { accessToken: string; refreshToken: string; deviceId: string }) {
-  const persist = createGuangYaTokenPersister((sql, values) => getLibraryPool().query(sql, [...values]), {
-    accountId,
-    connectedStorageId: storage.id,
-    providerUid: storage.providerUid,
-    credentials: creds,
-  });
-  return async (tokens: { accessToken: string; refreshToken: string; deviceId: string }): Promise<void> => {
-    try { await persist(tokens); }
-    catch { /* Refresh persistence is best-effort; never return credential details. */ }
+    await persist(tokens);
   };
 }
 
@@ -100,8 +88,23 @@ export async function getLibraryGuangYaClient(accountId: string, connectedStorag
   const scope = { accountId, connectedStorageId };
   const { storage, uid } = await resolveStorage(scope);
   const creds = credentials(storage);
-  const scheduler = createGuangYaRequestScheduler({ accountKey: `guangya:${uid}`, minIntervalMs: getGuangYaMinIntervalMs() });
-  const client = new GuangYaClient({ ...creds, requestScheduler: scheduler, onTokensRefreshed: tokenPersister(accountId, storage, creds) });
+  const accountKey = `guangya:${uid}`;
+  const authHooks = createGuangYaAuthHooks({
+    accountId,
+    connectedStorageId,
+    providerUid: uid,
+    credentials: creds,
+    connectionMarker: connectionMarker(storage.payload),
+  });
+  const scheduler = createGuangYaRequestScheduler({ accountKey, minIntervalMs: getGuangYaMinIntervalMs() });
+  const client = new GuangYaClient({
+    ...authHooks.credentials,
+    requestScheduler: scheduler,
+    authCoordinator: getGuangYaAuthCoordinator(),
+    authAccountKey: authHooks.accountKey,
+    loadCurrentCredentials: authHooks.loadCurrentCredentials,
+    onTokensRefreshed: authHooks.onTokensRefreshed,
+  });
   return { client, providerUid: uid };
 }
 

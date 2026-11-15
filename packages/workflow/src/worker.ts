@@ -48,11 +48,12 @@ import { userMessageDrive, type UserMessageScope } from "./user-requests.js";
 // Circular with replace-request.ts (it uses this module's claim helpers); both sides
 // only call the other's functions at run time, never at module evaluation.
 import { queueReplaceRequest } from "./replace-request.js";
+import { getGuangYaAuthFailureSnapshot } from "./guangya-client.js";
 
 async function maybeFreezeOnBrandAuthError(input: {
   connectedStorageId: string | null | undefined;
   error: unknown;
-  onAuthErrorFreeze?: (storageId: string, reason: string) => Promise<void>;
+  onAuthErrorFreeze?: (storageId: string, reason: string, error?: unknown) => Promise<void>;
 }): Promise<void> {
   const { connectedStorageId, error, onAuthErrorFreeze } = input;
   if (!onAuthErrorFreeze || !connectedStorageId || !isBrandStorageAuthError(error)) {
@@ -60,14 +61,14 @@ async function maybeFreezeOnBrandAuthError(input: {
   }
   const reason = error instanceof Error ? error.message : String(error);
   try {
-    await onAuthErrorFreeze(connectedStorageId, reason);
+    if (getGuangYaAuthFailureSnapshot(error)) await onAuthErrorFreeze(connectedStorageId, reason, error);
+    else await onAuthErrorFreeze(connectedStorageId, reason);
   } catch (freezeError) {
     console.error(
       `[media-track] onAuthErrorFreeze failed for ${connectedStorageId}: ${String(freezeError)}`,
     );
   }
 }
-
 /**
  * Pick the 115 landing parent for a title. Anime lands under its own parent
  * (when configured) so the 动漫 library shelf is a physically separate tree,
@@ -316,7 +317,7 @@ export async function handleWorkflowRunFailure(input: {
   repository: Pick<WorkflowRepository, "saveWorkflowRunSnapshot">;
   now: () => string;
   /** Freeze the run's connected drive on brand *AuthError (cookie/token dead). */
-  onAuthErrorFreeze?: (storageId: string, reason: string) => Promise<void>;
+  onAuthErrorFreeze?: (storageId: string, reason: string, error?: unknown) => Promise<void>;
   /** Trigger stamped on the failure/retry notification. Default "user" (individual push).
    *  A patrol-origin replace run passes "scheduled" so its failure joins the daily digest,
    *  matching the success path (stampReplaceNotification). */
@@ -464,7 +465,7 @@ export async function runQueuedType2Workflow(input: {
   animeStorageParentDirectoryId?: string;
   /** §7: resolve the claimed run's per-account 115 creds + landing CIDs. */
   resolveAccountContext?: ResolveAccountWorkerContext;
-  onAuthErrorFreeze?: (storageId: string, reason: string) => Promise<void>;
+  onAuthErrorFreeze?: (storageId: string, reason: string, error?: unknown) => Promise<void>;
   mayStartRun?: MayStartRun;
   /** The worker's drive filter and claim callback when queued runs go side by side. */
   claim?: QueueClaimOptions;
@@ -616,7 +617,7 @@ export async function runScheduledType3Monitoring(input: {
   /** §7: resolve each patrolled season's per-account 115 creds + landing CIDs.
    *  The sweep is cross-account; each show runs under its owner's credentials. */
   resolveAccountContext?: ResolveAccountWorkerContext;
-  onAuthErrorFreeze?: (storageId: string, reason: string) => Promise<void>;
+  onAuthErrorFreeze?: (storageId: string, reason: string, error?: unknown) => Promise<void>;
   /** How many shows the sweep works on at once (default 1 = one after another).
    *  Never two on the same drive — see runKeyedPool. */
   maxConcurrentRuns?: number;
@@ -1006,7 +1007,7 @@ async function patrolMovie(args: {
     repository: WorkflowRepository;
     createWorkflowRunId?: () => string;
     staleActiveRunTimeoutMs?: number;
-    onAuthErrorFreeze?: (storageId: string, reason: string) => Promise<void>;
+    onAuthErrorFreeze?: (storageId: string, reason: string, error?: unknown) => Promise<void>;
     mayStartRun?: MayStartRun;
   };
   deps: {
@@ -1259,7 +1260,7 @@ export async function runQueuedMovieAcquisition(input: {
   now?: () => string;
   /** §7: resolve the claimed run's per-account 115 creds + landing CIDs. */
   resolveAccountContext?: ResolveAccountWorkerContext;
-  onAuthErrorFreeze?: (storageId: string, reason: string) => Promise<void>;
+  onAuthErrorFreeze?: (storageId: string, reason: string, error?: unknown) => Promise<void>;
   mayStartRun?: MayStartRun;
   /** The worker's drive filter and claim callback when queued runs go side by side. */
   claim?: QueueClaimOptions;
@@ -1364,7 +1365,7 @@ export async function runQueuedSeriesInitialization(input: {
   now?: () => string;
   /** §7: resolve the claimed run's per-account 115 creds + landing CIDs. */
   resolveAccountContext?: ResolveAccountWorkerContext;
-  onAuthErrorFreeze?: (storageId: string, reason: string) => Promise<void>;
+  onAuthErrorFreeze?: (storageId: string, reason: string, error?: unknown) => Promise<void>;
   mayStartRun?: MayStartRun;
   /** The worker's drive filter and claim callback when queued runs go side by side. */
   claim?: QueueClaimOptions;

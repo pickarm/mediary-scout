@@ -8,8 +8,10 @@
  * in env/protected-wrapper concerns the brand-identity registry must stay free of.
  */
 import { GuangYaClient, parseGuangYaUid } from "./guangya-client.js";
-import type { GuangYaClientOptions } from "./guangya-client.js";
+import type { GuangYaClientOptions, GuangYaTokens } from "./guangya-client.js";
+import type { GuangYaCredentialSnapshot } from "./library/guangya-token-persister.js";
 import { createGuangYaRequestScheduler, getGuangYaMinIntervalMs } from "./library/guangya-request-scheduler.js";
+import { getGuangYaAuthCoordinator } from "./library/guangya-auth-coordinator.js";
 import { getGuangYaWriteCoordinator, setStorageWriteAccountKey } from "./library/guangya-write-coordinator.js";
 import type { GuangYaWriteCoordinator } from "./library/guangya-write-coordinator.js";
 import { GuangYaStorageExecutor } from "./guangya-storage-executor.js";
@@ -39,6 +41,10 @@ export function createExecutorForBrand(input: {
   /** Persist hook for refreshed token-auth credentials (光鸭 refresh rotates tokens;
    *  天翼 session 自愈轮换 sessionKey/accessToken). */
   onCredentialRefresh?: (creds: unknown) => void | Promise<void>;
+  /** CAS persister for GuangYa; false means re-read the bound row under auth lock. */
+  persistGuangYaTokens?: (tokens: GuangYaTokens, expectedSnapshot?: GuangYaCredentialSnapshot) => Promise<boolean>;
+  /** Exact active-row credential source enables shared, rebind-safe refresh. */
+  loadGuangYaCredentials?: () => Promise<GuangYaTokens | { tokens: GuangYaTokens; snapshot: GuangYaCredentialSnapshot } | null>;
   /** Stable 光鸭 account UID from connected_storages.provider_uid, when available. */
   providerUid?: string;
   /** Test seam; production shares the process-wide PostgreSQL coordinator. */
@@ -83,18 +89,22 @@ export function createExecutorForBrand(input: {
     if (c.deviceId !== undefined) {
       clientOptions.deviceId = c.deviceId;
     }
-    const accountKey = input.providerUid?.trim() || parseGuangYaUid(c.accessToken ?? "") || c.deviceId?.trim() || "unknown-account";
+    const accountKey = input.providerUid?.trim() || parseGuangYaUid(c.accessToken ?? "")?.trim() || c.deviceId?.trim() || "unknown-account";
     const physicalAccountKey = `guangya:${accountKey}`;
     const writeCoordinator = input.writeCoordinator ?? getGuangYaWriteCoordinator(input.env ?? process.env);
     clientOptions.requestScheduler = createGuangYaRequestScheduler({
       accountKey: physicalAccountKey,
       minIntervalMs: getGuangYaMinIntervalMs(input.env ?? process.env),
     });
-    clientOptions.beforeWrite = () => writeCoordinator.assertHeld(physicalAccountKey);
-    const onRefresh = input.onCredentialRefresh;
-    if (onRefresh) {
-      clientOptions.onTokensRefreshed = (t) => onRefresh(t);
+    if (input.loadGuangYaCredentials) {
+      if (accountKey === "unknown-account") throw new Error("GUANGYA_AUTH_ACCOUNT_KEY_REQUIRED");
+      clientOptions.authCoordinator = getGuangYaAuthCoordinator();
+      clientOptions.authAccountKey = physicalAccountKey;
+      clientOptions.loadCurrentCredentials = input.loadGuangYaCredentials;
     }
+    clientOptions.beforeWrite = () => writeCoordinator.assertHeld(physicalAccountKey);
+    if (input.persistGuangYaTokens) clientOptions.onTokensRefreshed = input.persistGuangYaTokens;
+    else if (input.onCredentialRefresh) clientOptions.onTokensRefreshed = (t) => input.onCredentialRefresh?.(t);
     return guardGuangYaExecutor(new GuangYaStorageExecutor({
       client: new GuangYaClient(clientOptions),
       writeScopeDirectoryIds: input.scopeCids,
