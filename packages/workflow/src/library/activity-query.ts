@@ -50,18 +50,32 @@ export async function initializePostgresActivityQueryIndexes(pool: Pool): Promis
   finally { client.release(); }
 }
 
-function valid(input: PostgresActivityQueryInput) {
+export interface NormalizedPostgresActivityQueryInput {
+  accountId: string;
+  connectedStorageId: string | null;
+  activePage: number;
+  activePageSize: number;
+  recentLimit: number;
+  historyCursor?: { createdAt: string; id: string };
+  runIds?: readonly string[];
+}
+
+export function normalizePostgresActivityQueryInput(input: PostgresActivityQueryInput): NormalizedPostgresActivityQueryInput {
   const accountId = input.accountId.trim();
   if (!accountId || accountId.length > 200) throw new ActivityQueryInputError("accountId无效。");
-  const storageId = input.connectedStorageId;
-  if (storageId !== null && (!storageId.trim() || storageId.length > 300)) throw new ActivityQueryInputError("storageId无效。");
+  const storageId = input.connectedStorageId === null ? null : input.connectedStorageId.trim();
+  if (storageId !== null && (!storageId || storageId.length > 300)) throw new ActivityQueryInputError("storageId无效。");
   const page = input.activePage ?? 1, pageSize = input.activePageSize ?? 48, recentLimit = input.recentLimit ?? 30;
   if (!Number.isSafeInteger(page) || page < 1 || page > 1_000_000) throw new ActivityQueryInputError("活动页码无效。");
   if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new ActivityQueryInputError("活动页大小无效。");
   if (!Number.isSafeInteger(recentLimit) || recentLimit < 1 || recentLimit > 100) throw new ActivityQueryInputError("近期完成数量无效。");
   if (input.runIds && (input.runIds.length > 100 || input.runIds.some((id) => !id || id.length > 200))) throw new ActivityQueryInputError("任务 ID 数量或格式无效。");
   if (input.historyCursor && (input.historyCursor.id.length > 200 || !Number.isFinite(Date.parse(input.historyCursor.createdAt)))) throw new ActivityQueryInputError("历史游标无效。");
-  return { accountId, storageId, page, pageSize, recentLimit };
+  return {
+    accountId, connectedStorageId: storageId, activePage: page, activePageSize: pageSize, recentLimit,
+    ...(input.historyCursor ? { historyCursor: { createdAt: input.historyCursor.createdAt, id: input.historyCursor.id } } : {}),
+    ...(input.runIds ? { runIds: [...input.runIds].sort() } : {}),
+  };
 }
 
 interface ActiveRow {
@@ -92,7 +106,9 @@ function compactProgress(value: unknown): WorkflowRunProgress | null {
 export class PostgresActivityQuery {
   constructor(private readonly pool: Pool) {}
   async getPage(input: PostgresActivityQueryInput): Promise<PostgresActivityPage> {
-    const args = valid(input);
+    const normalized = normalizePostgresActivityQueryInput(input);
+    const args = { accountId: normalized.accountId, storageId: normalized.connectedStorageId,
+      page: normalized.activePage, pageSize: normalized.activePageSize, recentLimit: normalized.recentLimit };
     const offset = (args.page - 1) * args.pageSize;
     const active = await this.pool.query<ActiveRow>(`
       WITH scoped AS (
@@ -147,7 +163,7 @@ export class PostgresActivityQuery {
         LEFT JOIN media_titles m ON m.id=pr.media_title_id
         LEFT JOIN episode_summary es ON es.tracked_season_id=pr.tracked_season_id AND es.connected_storage_id=pr.connected_storage_id
        ORDER BY CASE WHEN pr.status='running' THEN 0 ELSE 1 END, pr.started_at, pr.id
-    `, [args.accountId, args.storageId, args.pageSize, offset, input.runIds ? [...input.runIds] : null]);
+    `, [args.accountId, args.storageId, args.pageSize, offset, normalized.runIds ? [...normalized.runIds] : null]);
     const first = active.rows[0];
     const total = Number(first?.total ?? 0);
     const queuedTotal = Number(first?.queued_total ?? 0), runningTotal = Number(first?.running_total ?? 0);
@@ -190,7 +206,7 @@ export class PostgresActivityQuery {
          AND NULLIF(n.payload->'report'->>'status','') IS NOT NULL
          AND ($4::text IS NULL OR (n.payload->>'createdAt', n.id) < ($4::text, $5::text))
        ORDER BY n.payload->>'createdAt' DESC, n.id DESC LIMIT $3
-    `, [args.accountId, args.storageId, args.recentLimit + 1, input.historyCursor?.createdAt ?? null, input.historyCursor?.id ?? null]);
+    `, [args.accountId, args.storageId, args.recentLimit + 1, normalized.historyCursor?.createdAt ?? null, normalized.historyCursor?.id ?? null]);
     const completedRows = completed.rows.slice(0, args.recentLimit);
     const completedItems = completedRows.filter((row) => row.title && row.status).map((row): ActivityCompletedSummary => {
       const size = landedSize({

@@ -8,8 +8,8 @@ export interface PostgresLibraryQueryInput {
   accountId: string;
   /** Null means all storages owned by this account. */
   connectedStorageId: string | null;
-  type?: LibraryQueryMediaType;
-  state?: LibraryQueryState;
+  type?: LibraryQueryMediaType | null;
+  state?: LibraryQueryState | null;
   search?: string;
   sort?: LibraryQuerySort;
   direction?: "asc" | "desc";
@@ -102,7 +102,7 @@ function pageInteger(value: number | undefined, fallback: number, name: string, 
   return candidate;
 }
 
-interface ValidatedLibraryQueryInput {
+export interface ValidatedLibraryQueryInput {
   accountId: string;
   connectedStorageId: string | null;
   type: LibraryQueryMediaType | null;
@@ -114,15 +114,15 @@ interface ValidatedLibraryQueryInput {
   pageSize: number;
 }
 
-function validateInput(input: PostgresLibraryQueryInput): ValidatedLibraryQueryInput {
+export function normalizePostgresLibraryQueryInput(input: PostgresLibraryQueryInput): ValidatedLibraryQueryInput {
   const accountId = boundedText(input.accountId, "accountId", 200);
   const connectedStorageId = input.connectedStorageId === null
     ? null
     : boundedText(input.connectedStorageId, "connectedStorageId", 200);
-  if (input.type !== undefined && !["movie", "tv", "anime"].includes(input.type)) {
+  if (input.type != null && !["movie", "tv", "anime"].includes(input.type)) {
     throw new LibraryQueryInputError("type must be movie, tv, or anime");
   }
-  if (input.state !== undefined && !["complete", "tracking", "partial", "reserved"].includes(input.state)) {
+  if (input.state != null && !["complete", "tracking", "partial", "reserved"].includes(input.state)) {
     throw new LibraryQueryInputError("state must be complete, tracking, partial, or reserved");
   }
   const search = input.search?.trim() ?? "";
@@ -166,7 +166,7 @@ export class PostgresLibraryQuery {
   constructor(private readonly pool: Pool) {}
 
   async list(input: PostgresLibraryQueryInput): Promise<LibraryQueryPage> {
-    const parsed = validateInput(input);
+    const parsed = normalizePostgresLibraryQueryInput(input);
     const sortColumns: Record<LibraryQuerySort, string> = {
       title: "title",
       year: "year",
