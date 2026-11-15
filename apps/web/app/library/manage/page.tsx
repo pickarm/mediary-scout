@@ -1,7 +1,7 @@
 import { connection } from "next/server";
 import { Suspense } from "react";
 import { AppSidebar } from "../../../components/app-sidebar";
-import { LibraryScanSettings } from "../../../components/library-scan-settings";
+import { LibraryManagement } from "../../../components/library-management";
 import type { SafeLibraryStorage } from "../../../components/library-scan-client";
 import { DEFAULT_NAMING_TEMPLATES } from "@media-track/workflow/library";
 import { getWorkflowRepository, requireAuthenticatedAccountId } from "../../../lib/workflow-runtime";
@@ -36,7 +36,7 @@ async function ManageSurface() {
         <div className="section-heading library-heading">
           <div><h1>库管理</h1><p>配置光鸭媒体库扫描与查看扫描任务</p></div>
         </div>
-        <LibraryScanSettings storages={storages} defaultTemplates={DEFAULT_NAMING_TEMPLATES} settingsHref="/settings" />
+        <LibraryManagement storages={storages} defaultTemplates={DEFAULT_NAMING_TEMPLATES} settingsHref="/settings" />
       </main>
     </div>
   );

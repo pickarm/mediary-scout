@@ -170,11 +170,19 @@ export function LibraryScanSettings({
   const selectConfiguration = (id: string) => {
     const configuration = configurations.find((item) => item.configId === id) ?? null;
     applyConfiguration(configuration);
+    if (selectedTaskId && tasks.find((task) => task.taskId === selectedTaskId)?.configId !== id) setSelectedTaskId(null);
   };
 
   const beginNewConfiguration = () => {
     applyConfiguration(null);
     setSelectedConfigId(null);
+    setSelectedTaskId(null);
+  };
+
+  const selectTask = (task: LibraryScanTask, knownConfiguration?: LibraryScanConfiguration) => {
+    setSelectedTaskId(task.taskId);
+    const configuration = knownConfiguration ?? configurations.find((item) => item.configId === task.configId) ?? null;
+    applyConfiguration(configuration);
   };
 
   const reload = () => {
@@ -280,7 +288,7 @@ export function LibraryScanSettings({
       if (!isCurrentScope(id, scopeGeneration, signal)) return;
       setTasks((current) => isCurrentScope(id, scopeGeneration, signal)
         ? [task, ...current.filter((item) => item.taskId !== task.taskId)] : current);
-      setSelectedTaskId(task.taskId);
+      selectTask(task, saved);
     } catch (error) { if (isCurrentScope(id, scopeGeneration, signal)) setPageError(error instanceof Error ? error.message : "开始扫描失败。"); }
     finally { if (isCurrentScope(id, scopeGeneration, signal)) setStarting(false); }
   };
@@ -295,7 +303,7 @@ export function LibraryScanSettings({
       if (!isCurrentScope(id, scopeGeneration, signal)) return;
       setTasks((current) => isCurrentScope(id, scopeGeneration, signal)
         ? current.map((item) => item.taskId === updated.taskId ? updated : item) : current);
-      setSelectedTaskId(updated.taskId);
+      selectTask(updated);
     } catch (error) { if (isCurrentScope(id, scopeGeneration, signal)) setPageError(error instanceof Error ? error.message : "扫描操作失败。"); }
     finally { if (isCurrentScope(id, scopeGeneration, signal)) setBusyTaskId(null); }
   };
@@ -403,7 +411,7 @@ export function LibraryScanSettings({
           </div>
           {tasks.length === 0 && !loading ? <div className={styles.emptyTasks}>还没有扫描任务。保存配置并开始扫描后，任务会显示在这里。</div> : <div className={styles.taskList}>
             {tasks.map((task) => <article className={`${styles.task} ${selectedTaskId === task.taskId ? styles.selectedTask : ""}`} key={task.taskId}>
-              <button type="button" className={styles.taskSelect} onClick={() => setSelectedTaskId(task.taskId)}>
+              <button type="button" className={styles.taskSelect} aria-label={`查看${statusLabel(task.status)}任务的识别结果 ${task.taskId}`} onClick={() => selectTask(task)}>
                 <span className={`${styles.statusDot} ${styles[`status_${task.status}`] ?? ""}`} />
                 <span className={styles.taskTitle}>{statusLabel(task.status)}</span>
                 <span className={styles.taskTime}>{formatDate(task.updatedAt)}</span>
