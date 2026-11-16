@@ -1,19 +1,24 @@
 import { compareReleaseTags, parseReleaseNotes, parseReleaseTag, type ReleaseNote } from "./release-version";
 import { normalizeCommit } from "./deployment-update";
+import { FORK_REPO } from "./fork-release";
 
-const REPO = "fancydirty/mediary-scout";
-/** Every `v…` tag in one response (the tags list API pages at 30, which would lose the
- *  running release once 30 newer ones exist). Old semver tags come back too and are
- *  dropped by parseReleaseTag. Release tags must be lightweight: an annotated tag's
- *  ref points at a tag object, not a commit. */
+const REPO = FORK_REPO;
+/** Tags are only used to attach a commit to a *published* release. A tag by itself is
+ *  deliberately not enough: the Fork workflow pushes the image first and creates the
+ *  GitHub release afterwards, so a tag whose image is still building (or failed) is
+ *  never offered as a pullable update. */
 const TAGS_URL = `https://api.github.com/repos/${REPO}/git/matching-refs/tags/v`;
+const RELEASES_URL = `https://api.github.com/repos/${REPO}/releases?per_page=100`;
+/** Bounded pagination: 500 published releases is far beyond a date-tagged feed. */
+const RELEASES_PAGE_LIMIT = 5;
 const OK_TTL_MS = 60 * 60 * 1000;
 const FAIL_TTL_MS = 5 * 60 * 1000;
-/** Notes fetched for the newest N releases only (the tab shows 3, "更早" expands to 10). */
-const NOTES_LIMIT = 10;
 const LATEST_RELEASE_URL = `https://api.github.com/repos/${REPO}/releases/latest`;
 /** Installers are only trusted from this repo's own release downloads. */
 const DOWNLOAD_PREFIX = `https://github.com/${REPO}/releases/download/`;
+/** Our release workflow writes this line, so an annotated tag (or a temporarily
+ *  unavailable tags API) can still be tied to the commit stamped into the image. */
+const RELEASE_COMMIT_RE = /提交[：:]\s*`([0-9a-f]{40})`/i;
 
 export interface ReleaseEntry {
   tag: string;
@@ -116,35 +121,92 @@ async function loadReleaseFeed(fetchImpl: typeof fetch, started: number): Promis
   let feed: ReleaseEntry[] = [];
   let ttl = FAIL_TTL_MS;
   try {
-    const raw = await getText(fetchImpl, TAGS_URL);
-    const list = raw ? (JSON.parse(raw) as Array<{ ref?: unknown; object?: { sha?: unknown; type?: unknown } }>) : [];
-    const releases = list
-      .map((item) => {
-        const name = typeof item.ref === "string" ? item.ref.replace(/^refs\/tags\//, "") : "";
-        const parsed = parseReleaseTag(name);
+    const [tagsRaw, published] = await Promise.all([
+      getText(fetchImpl, TAGS_URL),
+      loadPublishedReleases(fetchImpl),
+    ]);
+    // A release whose tag is not visible yet (or is an annotated tag) cannot be tied to
+    // a build SHA. Such an entry is withheld rather than guessed from a branch name.
+    const commits = releaseCommits(tagsRaw);
+    feed = (published ?? [])
+      .map((release) => {
+        const parsed = parseReleaseTag(release.tag);
         const commit =
-          item.object?.type === "commit" && typeof item.object.sha === "string" ? normalizeCommit(item.object.sha) : null;
-        return parsed && commit ? { tag: parsed.tag, date: parsed.date, commit } : null;
+          commits.get(release.tag) ?? releaseCommitFromBody(release.body) ?? normalizeCommit(release.target);
+        return parsed && commit
+          ? { tag: parsed.tag, date: parsed.date, commit, notes: parseReleaseNotes(release.body) }
+          : null;
       })
-      .filter((item): item is { tag: string; date: string; commit: string } => item !== null)
+      .filter((item): item is ReleaseEntry => item !== null)
       .sort((a, b) => compareReleaseTags(b.tag, a.tag));
-    feed = await Promise.all(
-      releases.map(async (release, index) => {
-        if (index >= NOTES_LIMIT) return { ...release, notes: [] };
-        const md = await getText(
-          fetchImpl,
-          `https://api.github.com/repos/${REPO}/contents/release-notes/${release.tag}.md?ref=${release.tag}`,
-          "application/vnd.github.raw",
-        ).catch(() => null);
-        return { ...release, notes: md ? parseReleaseNotes(md) : [] };
-      }),
-    );
-    if (raw) ttl = OK_TTL_MS;
+    if (tagsRaw && published) ttl = OK_TTL_MS;
   } catch {
     feed = [];
   }
   if (started === generation) cache = { at: Date.now(), ttl, feed };
   return feed;
+}
+
+function releaseCommitFromBody(body: string): string | null {
+  return normalizeCommit(RELEASE_COMMIT_RE.exec(body)?.[1] ?? null);
+}
+
+interface PublishedRelease {
+  tag: string;
+  body: string;
+  target: string | null;
+}
+
+/** Published, non-draft, non-prerelease releases only. The release body is the
+ *  changelog, so no per-tag content requests are needed. */
+async function loadPublishedReleases(fetchImpl: typeof fetch): Promise<PublishedRelease[] | null> {
+  const releases: PublishedRelease[] = [];
+  for (let page = 1; page <= RELEASES_PAGE_LIMIT; page += 1) {
+    const raw = await getText(fetchImpl, `${RELEASES_URL}&page=${page}`);
+    if (raw === null) return page === 1 ? null : releases;
+    let list: unknown;
+    try {
+      list = JSON.parse(raw);
+    } catch {
+      return page === 1 ? null : releases;
+    }
+    if (!Array.isArray(list)) return page === 1 ? null : releases;
+    for (const item of list as Array<{
+      tag_name?: unknown;
+      draft?: unknown;
+      prerelease?: unknown;
+      body?: unknown;
+      target_commitish?: unknown;
+    } | null>) {
+      if (!item || typeof item.tag_name !== "string" || item.draft === true || item.prerelease === true) continue;
+      releases.push({
+        tag: item.tag_name,
+        body: typeof item.body === "string" ? item.body : "",
+        target: typeof item.target_commitish === "string" ? item.target_commitish : null,
+      });
+    }
+    if (list.length < 100) break;
+  }
+  return releases;
+}
+
+/** `tag -> commit` for lightweight tags only: an annotated tag's ref points at a tag
+ *  object, not a commit. */
+function releaseCommits(raw: string | null): Map<string, string> {
+  const commits = new Map<string, string>();
+  if (!raw) return commits;
+  try {
+    const list = JSON.parse(raw) as Array<{ ref?: unknown; object?: { sha?: unknown; type?: unknown } }>;
+    for (const item of list) {
+      if (typeof item.ref !== "string" || item.object?.type !== "commit") continue;
+      const tag = item.ref.replace(/^refs\/tags\//, "");
+      const commit = typeof item.object.sha === "string" ? normalizeCommit(item.object.sha) : null;
+      if (parseReleaseTag(tag) && commit) commits.set(tag, commit);
+    }
+  } catch {
+    // A malformed tag list just means no release can be tied to a commit this time.
+  }
+  return commits;
 }
 
 /** Null when GitHub is unreachable, the latest release is not a date release (e.g. v1.4.1),

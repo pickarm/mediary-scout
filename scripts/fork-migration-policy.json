@@ -1,0 +1,333 @@
+{
+  "format": "media-track-fork-migration-policy@1",
+  "localHosts": ["localhost", "127.0.0.1", "::1"],
+  "isolatedHosts": [],
+  "rehearsalEnv": {
+    "MEDIA_TRACK_REHEARSAL": "1",
+    "MEDIA_TRACK_INPROCESS_WORKER": "0",
+    "MEDIA_TRACK_STORAGE_ADAPTER": "fake",
+    "MEDIA_TRACK_AGENT_ADAPTER": "fake",
+    "MEDIA_TRACK_WORKFLOW_ADAPTER": "fake",
+    "MEDIA_TRACK_SEARCH_PROVIDER": "demo",
+    "MEDIA_TRACK_DEMO_SEED": "0",
+    "MEDIA_TRACK_DISTRIBUTION": "fork-image",
+    "REDIS_URL": ""
+  },
+  "rehearsalBlockedEnv": [
+    "PAN115_COOKIE",
+    "PAN115_REFRESH_TOKEN",
+    "QUARK_COOKIE",
+    "TIANYI_COOKIE",
+    "PAN123_COOKIE",
+    "MEDIA_TRACK_115_WRITE_SCOPE_CIDS",
+    "MEDIA_TRACK_115_TEST_ROOT_CID",
+    "MEDIA_TRACK_115_PROTECTED_CIDS",
+    "MEDIA_TRACK_115_ROOT_CID",
+    "CLAWD_MEDIA_ROOT_CID",
+    "MOVIES_CID",
+    "TV_SHOWS_CID",
+    "ANIME_CID",
+    "TUNNEL_TOKEN",
+    "MEDIA_TRACK_WORKER_SECRET",
+    "AGENT_MODEL_API_KEY",
+    "TMDB_READ_TOKEN",
+    "JEV_API_KEY",
+    "PROWLARR_API_KEY",
+    "HAISOU_API_KEY",
+    "PANSOU_BASE_URL",
+    "REDIS_URL"
+  ],
+  "rehearsalAllowedEnv": [
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "TEMP",
+    "TMP",
+    "SystemRoot",
+    "ComSpec",
+    "PATHEXT",
+    "OS",
+    "NUMBER_OF_PROCESSORS",
+    "NODE_ENV",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "NEXT_TELEMETRY_DISABLED"
+  ],
+  "fingerprintTables": [
+    {
+      "id": "media_titles",
+      "table": "media_titles",
+      "columns": ["id", "payload"],
+      "group": "works",
+      "required": true
+    },
+    {
+      "id": "tracked_seasons",
+      "table": "tracked_seasons",
+      "columns": ["id", "media_title_id", "payload"],
+      "group": "tracking",
+      "required": true
+    },
+    {
+      "id": "episode_states",
+      "table": "episode_states",
+      "columns": ["tracked_season_id", "episode_code", "payload"],
+      "group": "tracking",
+      "required": true
+    },
+    {
+      "id": "episode_copies",
+      "table": "episode_copies",
+      "columns": ["tracked_season_id", "episode_code", "storage_id", "file_ids", "size_bytes", "quality", "run_id", "recorded_at"],
+      "group": "tracking",
+      "required": true
+    },
+    {
+      "id": "workflow_runs",
+      "table": "workflow_runs",
+      "columns": ["id", "tracked_season_id", "payload"],
+      "group": "tasks",
+      "required": true
+    },
+    {
+      "id": "resource_snapshots",
+      "table": "resource_snapshots",
+      "columns": ["id", "workflow_run_id", "ordinal", "payload"],
+      "group": "tasks",
+      "required": true
+    },
+    {
+      "id": "agent_decisions",
+      "table": "agent_decisions",
+      "columns": ["workflow_run_id", "ordinal", "snapshot_id", "payload"],
+      "group": "tasks",
+      "required": true
+    },
+    {
+      "id": "agent_steps",
+      "table": "agent_steps",
+      "columns": ["workflow_run_id", "ordinal", "payload"],
+      "group": "tasks",
+      "required": true
+    },
+    {
+      "id": "transfer_attempts",
+      "table": "transfer_attempts",
+      "columns": ["id", "workflow_run_id", "ordinal", "candidate_id", "payload"],
+      "group": "tasks",
+      "required": true
+    },
+    {
+      "id": "notifications",
+      "table": "notifications",
+      "columns": ["id", "workflow_run_id", "ordinal", "payload"],
+      "group": "tasks",
+      "required": true
+    },
+    {
+      "id": "dead_links",
+      "table": "dead_links",
+      "columns": ["key", "kind", "reason", "permanent", "expires_at", "recorded_at"],
+      "group": "tasks",
+      "required": true
+    },
+    {
+      "id": "user_messages",
+      "table": "user_messages",
+      "columns": ["id", "account_id", "drive", "title_key", "body", "episode_tags", "status", "urgent", "run_id", "reply", "created_at", "updated_at", "processed_at"],
+      "group": "tasks",
+      "required": true
+    },
+    {
+      "id": "pending_replacements",
+      "table": "pending_replacements",
+      "columns": ["account_id", "drive", "title_key", "episode", "message_id", "requested_at"],
+      "group": "tasks",
+      "required": true
+    },
+    {
+      "id": "rejected_resources",
+      "table": "rejected_resources",
+      "columns": ["id", "account_id", "title_key", "episode", "link_key", "label", "size_bytes", "reason", "message_id", "created_at"],
+      "group": "tasks",
+      "required": true
+    },
+    {
+      "id": "episode_sources",
+      "table": "episode_sources",
+      "columns": ["account_id", "drive", "title_key", "episode", "link_key", "label", "size_bytes", "run_id", "recorded_at"],
+      "group": "tasks",
+      "required": true
+    },
+    {
+      "id": "app_settings",
+      "table": "app_settings",
+      "columns": ["key", "value"],
+      "group": "settings",
+      "required": true
+    },
+    {
+      "id": "account_settings",
+      "table": "account_settings",
+      "columns": ["account_id", "key", "value"],
+      "group": "settings",
+      "required": true
+    },
+    {
+      "id": "agent_memories",
+      "table": "agent_memories",
+      "columns": ["id", "account_id", "scope", "title_key", "name", "description", "kind", "body", "provider", "created_at", "updated_at", "last_used_at", "source_run_id"],
+      "group": "settings",
+      "required": true
+    },
+    {
+      "id": "accounts",
+      "table": "accounts",
+      "columns": ["id", "username", "password_hash", "group_id", "is_owner", "created_at"],
+      "group": "connections",
+      "required": true
+    },
+    {
+      "id": "connected_storages",
+      "table": "connected_storages",
+      "columns": ["id", "account_id", "provider", "provider_uid", "label", "payload", "root_cid", "movies_cid", "tv_cid", "anime_cid", "created_at"],
+      "group": "connections",
+      "required": true
+    },
+    {
+      "id": "library_directory_bindings",
+      "table": "library_directory_bindings",
+      "columns": ["account_id", "connected_storage_id", "directory_id", "parent_directory_id", "media_title_id", "tracked_season_id", "media_type", "tmdb_id", "season_number", "exclusive", "bound_at"],
+      "group": "library",
+      "required": false
+    },
+    {
+      "id": "library_file_bindings",
+      "table": "library_file_bindings",
+      "columns": ["account_id", "connected_storage_id", "file_id", "parent_directory_id", "media_title_id", "tracked_season_id", "media_type", "tmdb_id", "episode_codes", "size_bytes", "quality", "bound_at"],
+      "group": "library",
+      "required": false
+    },
+    {
+      "id": "library_scan_configs",
+      "table": "library_scan_configs",
+      "columns": ["account_id", "connected_storage_id", "config_id", "configuration", "updated_at"],
+      "group": "library",
+      "required": false
+    },
+    {
+      "id": "library_scan_tasks",
+      "table": "library_scan_tasks",
+      "columns": ["account_id", "connected_storage_id", "task_id", "config_id", "status", "lease_id", "lease_expires_at", "directories_done", "files_discovered", "directories_discovered", "created_at", "updated_at"],
+      "group": "library",
+      "required": false
+    },
+    {
+      "id": "library_scan_directories",
+      "table": "library_scan_directories",
+      "columns": ["account_id", "connected_storage_id", "task_id", "directory_id", "parent_directory_id", "path", "next_page", "status"],
+      "group": "library",
+      "required": false
+    },
+    {
+      "id": "library_scan_files",
+      "table": "library_scan_files",
+      "columns": ["account_id", "connected_storage_id", "file_id", "parent_directory_id", "name", "is_directory", "size_bytes", "path", "modified_at"],
+      "group": "library",
+      "required": false
+    },
+    {
+      "id": "library_scan_task_files",
+      "table": "library_scan_task_files",
+      "columns": ["account_id", "connected_storage_id", "task_id", "file_id", "parent_directory_id", "name", "is_directory", "size_bytes", "path", "modified_at"],
+      "group": "library",
+      "required": false
+    },
+    {
+      "id": "library_scan_failures",
+      "table": "library_scan_failures",
+      "columns": ["account_id", "connected_storage_id", "task_id", "sequence", "directory_id", "page", "message", "created_at", "resolved_at"],
+      "group": "library",
+      "required": false
+    },
+    {
+      "id": "library_identification_jobs",
+      "table": "library_identification_jobs",
+      "columns": ["account_id", "connected_storage_id", "task_id", "status", "lease_id", "lease_expires_at", "after_file_id", "attempts", "last_error", "created_at", "updated_at"],
+      "group": "library",
+      "required": false
+    },
+    {
+      "id": "library_scan_identifications",
+      "table": "library_scan_identifications",
+      "columns": ["account_id", "connected_storage_id", "task_id", "file_id", "status", "reason", "evidence", "candidates", "media_type", "tmdb_id", "season_number", "episode_codes", "import_status", "manual", "updated_at"],
+      "group": "library",
+      "required": false
+    },
+    {
+      "id": "library_organization_plans",
+      "table": "library_organization_plans",
+      "columns": ["account_id", "connected_storage_id", "task_id", "operation_key", "source_root_ids", "target_root_ids", "target_roots_by_media_type", "status", "skipped_files", "lease_id", "lease_expires_at", "execute_requested", "created_at", "updated_at"],
+      "group": "library",
+      "required": false
+    },
+    {
+      "id": "library_organization_operations",
+      "table": "library_organization_operations",
+      "columns": ["account_id", "connected_storage_id", "task_id", "operation_key", "operation_id", "file_id", "original_parent_id", "original_name", "target_root_id", "target_relative_path", "target_parent_id", "target_name", "identity", "paired_file_id", "paired_video_target_path", "status", "error", "updated_at"],
+      "group": "library",
+      "required": false
+    },
+    {
+      "id": "library_preparation_jobs",
+      "table": "library_preparation_jobs",
+      "columns": ["account_id", "connected_storage_id", "workflow_run_id", "media_type", "tmdb_id", "descriptor", "search_config_fingerprint", "status", "attempts", "lease_id", "lease_expires_at", "created_at", "updated_at", "expires_at", "result", "error_code"],
+      "group": "library",
+      "required": false
+    },
+    {
+      "id": "library_auto_organization_tasks",
+      "table": "library_auto_organization_tasks",
+      "columns": ["account_id", "connected_storage_id", "task_id", "config_id", "status", "batch_id", "operation_key", "file_ids", "attempts", "last_error", "next_attempt_at", "lease_id", "lease_expires_at", "last_checked_at", "created_at", "updated_at"],
+      "group": "library",
+      "required": false
+    },
+    {
+      "id": "library_auto_organization_items",
+      "table": "library_auto_organization_items",
+      "columns": ["account_id", "connected_storage_id", "task_id", "file_id", "batch_id", "status", "updated_at"],
+      "group": "library",
+      "required": false
+    },
+    {
+      "id": "library_acquisition_naming_directories",
+      "table": "library_acquisition_naming_directories",
+      "columns": ["account_id", "connected_storage_id", "media_type", "tmdb_id", "directory_key", "root_directory_id", "relative_path", "directory_id", "status", "updated_at"],
+      "group": "library",
+      "required": false
+    },
+    {
+      "id": "library_acquisition_naming_files",
+      "table": "library_acquisition_naming_files",
+      "columns": ["account_id", "connected_storage_id", "media_type", "tmdb_id", "workflow_run_id", "file_id", "attempt_id", "kind", "original_directory_id", "original_name", "target_directory_id", "target_name", "episode_codes", "status", "reason", "updated_at"],
+      "group": "library",
+      "required": false
+    }
+  ],
+  "gate": {
+    "advisoryLockKey": 4011989150,
+    "applicationNamePrefix": "fork-migration",
+    "maxForeignConnections": 0
+  },
+  "backup": {
+    "dumpFormat": "custom",
+    "dumpArgs": ["--format=custom", "--no-owner", "--no-acl", "--compress=6"],
+    "restoreArgs": ["--clean", "--if-exists", "--no-owner", "--no-acl", "--single-transaction"]
+  },
+  "plan": {
+    "composeFile": "docker-compose.fork.yml",
+    "imagePlaceholder": "qicket/mediary-scout:<RELEASE_TAG>",
+    "backupPathPlaceholder": "<BACKUP_PATH>"
+  }
+}

@@ -1,0 +1,210 @@
+name: Fork image release
+
+# Only date tags matching the release-version parser reach this workflow. One buildx
+# build is loaded locally first, boot-checked with fake adapters and no worker, then
+# the SAME image is tagged/pushed as version, commit SHA and latest, the remote digests
+# are compared, and only then is the GitHub release created. A tag alone never
+# advertises an update: the app reads published releases, not bare tags.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  # Every Fork release shares one group: two tags must never race over latest/digest.
+  group: fork-image-release
+  cancel-in-progress: false
+
+env:
+  IMAGE: qicket/mediary-scout
+  CANDIDATE: xunying-release-candidate
+
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: mediatrack
+          POSTGRES_PASSWORD: mediatrack
+          POSTGRES_DB: media_track
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mediatrack"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --ignore-scripts
+
+      # Read-only GitHub gate. The CLI uses the public app parsers and comparison
+      # helpers: invalid calendar dates fail, an older rerun cannot move latest
+      # backwards, and an existing tag must keep the same commit. A tag-specific 404
+      # is a first release only after the releases list was readable; all other
+      # HTTP/network failures fail closed.
+      - name: Read-only release preflight
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          OUT="$RUNNER_TEMP/release-preflight"
+          rm -rf "$OUT"
+          npx tsc apps/web/lib/release-preflight-cli.ts \
+            --outDir "$OUT" \
+            --target ES2022 \
+            --module NodeNext \
+            --moduleResolution NodeNext \
+            --strict \
+            --noUncheckedIndexedAccess \
+            --exactOptionalPropertyTypes \
+            --skipLibCheck \
+            --esModuleInterop
+          printf '{"type":"module"}\n' > "$OUT/package.json"
+          node "$OUT/release-preflight-cli.js" "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$GITHUB_SHA"
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Build ONCE and load it locally. Nothing is pushed yet: a failed boot check
+      # must not leave a new latest pointing at an unverified image.
+      - name: Build the linux/amd64 candidate locally
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          docker buildx build \
+            --platform linux/amd64 \
+            --load \
+            --build-arg GIT_SHA="${GITHUB_SHA}" \
+            --build-arg VERSION="${TAG}" \
+            --label "org.opencontainers.image.title=巡影" \
+            --label "org.opencontainers.image.source=https://github.com/pickarm/mediary-scout" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.version=${TAG}" \
+            --tag "${CANDIDATE}:${GITHUB_SHA}" \
+            .
+          test "$(docker image inspect "${CANDIDATE}:${GITHUB_SHA}" --format '{{.Os}}/{{.Architecture}}')" = "linux/amd64"
+
+      # Release-grade boot check on the exact local candidate: isolated PG, fake adapters,
+      # no worker, no real 网盘.
+      - name: Boot the local candidate with fake adapters and workers disabled
+        shell: bash
+        run: |
+          docker run -d --name xunying-release-smoke --network host \
+            -e MEDIA_TRACK_POSTGRES_URL=postgresql://mediatrack:mediatrack@127.0.0.1:5432/media_track \
+            -e MEDIA_TRACK_REHEARSAL=1 \
+            -e MEDIA_TRACK_INPROCESS_WORKER=0 \
+            -e MEDIA_TRACK_DISTRIBUTION=fork-image \
+            -e MEDIA_TRACK_WORKFLOW_ADAPTER=fake \
+            -e MEDIA_TRACK_AGENT_ADAPTER=fake \
+            -e MEDIA_TRACK_STORAGE_ADAPTER=fake \
+            -e MEDIA_TRACK_SEARCH_PROVIDER=demo \
+            -e MEDIA_TRACK_DEMO_SEED=0 \
+            "${CANDIDATE}:${GITHUB_SHA}"
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3000/api/health >/dev/null; then
+              echo "release candidate health OK"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "release candidate did not become healthy" >&2
+          docker logs xunying-release-smoke >&2
+          exit 1
+
+      - name: Remove the smoke container
+        if: always()
+        shell: bash
+        run: docker rm -f xunying-release-smoke || true
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Same local image ID, three remote tags: no rebuild between smoke and publish.
+      - name: Tag and push the verified image (version + sha + latest)
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          CANDIDATE_ID="$(docker image inspect "${CANDIDATE}:${GITHUB_SHA}" --format '{{.Id}}')"
+          docker tag "${CANDIDATE}:${GITHUB_SHA}" "${IMAGE}:${TAG}"
+          docker tag "${CANDIDATE}:${GITHUB_SHA}" "${IMAGE}:sha-${GITHUB_SHA}"
+          docker tag "${CANDIDATE}:${GITHUB_SHA}" "${IMAGE}:latest"
+          test "$(docker image inspect "${IMAGE}:${TAG}" --format '{{.Id}}')" = "$CANDIDATE_ID"
+          test "$(docker image inspect "${IMAGE}:sha-${GITHUB_SHA}" --format '{{.Id}}')" = "$CANDIDATE_ID"
+          test "$(docker image inspect "${IMAGE}:latest" --format '{{.Id}}')" = "$CANDIDATE_ID"
+          docker push "${IMAGE}:${TAG}"
+          docker push "${IMAGE}:sha-${GITHUB_SHA}"
+          docker push "${IMAGE}:latest"
+
+      - name: Verify the three remote tags point at the same digest
+        id: verify-digests
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          digest() {
+            docker buildx imagetools inspect "$1" | awk '/^Digest:/{print $2; exit}'
+          }
+          VERSION_DIGEST="$(digest "${IMAGE}:${TAG}")"
+          SHA_DIGEST="$(digest "${IMAGE}:sha-${GITHUB_SHA}")"
+          LATEST_DIGEST="$(digest "${IMAGE}:latest")"
+          echo "version=$VERSION_DIGEST"
+          echo "sha=$SHA_DIGEST"
+          echo "latest=$LATEST_DIGEST"
+          test -n "$VERSION_DIGEST"
+          test "$VERSION_DIGEST" = "$SHA_DIGEST"
+          test "$SHA_DIGEST" = "$LATEST_DIGEST"
+          echo "digest=${VERSION_DIGEST}" >> "$GITHUB_OUTPUT"
+
+      # The GitHub release is the update source. It is created only after the image
+      # exists, all three tags match, and the image booted.
+      - name: Publish the Fork release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          DIGEST: ${{ steps.verify-digests.outputs.digest }}
+        run: |
+          if [ -f "release-notes/${TAG}.md" ]; then
+            cp "release-notes/${TAG}.md" /tmp/release-notes.md
+          else
+            printf '# 巡影 %s\n\n' "$TAG" > /tmp/release-notes.md
+          fi
+          cat >> /tmp/release-notes.md <<EOF
+
+          ---
+
+          镜像：\`${IMAGE}:${TAG}\` · \`${IMAGE}:sha-${SHA}\` · \`${IMAGE}:latest\`
+          提交：\`${SHA}\`
+          摘要：\`${DIGEST}\`（三个标签相同）
+
+          更新：
+
+          \`\`\`
+          docker compose -f docker-compose.fork.yml pull web
+          docker compose -f docker-compose.fork.yml up -d --force-recreate web
+          \`\`\`
+          EOF
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "巡影 ${TAG}" --notes-file /tmp/release-notes.md --latest
+          else
+            gh release create "$TAG" --title "巡影 ${TAG}" --notes-file /tmp/release-notes.md --latest
+          fi

@@ -62,6 +62,11 @@ export interface OrganizationPlanCreate {
   operationKey: string;
 }
 
+/** F08f passes this only for automatic dispatch. Manual API calls keep the old four-argument behavior. */
+export interface OrganizationExecutionRequestOptions {
+  autoOrganization?: { batchId: string; leaseId: string };
+}
+
 export interface OrganizationStore {
   ensureSchema(): Promise<void>;
   /** Replace caller-supplied authorization facts with verified task/config/import facts. */
@@ -74,11 +79,11 @@ export interface OrganizationStore {
   renew(scope: OrganizationScope, taskId: string, operationKey: string, leaseId: string, now: string, expiresAt: string): Promise<boolean>;
   updateOperation(scope: OrganizationScope, taskId: string, operationKey: string, leaseId: string, operation: OrganizationOperation, now: string): Promise<boolean>;
   finish(scope: OrganizationScope, taskId: string, operationKey: string, leaseId: string, status: OrganizationTaskStatus, now: string): Promise<boolean>;
-  requestExecution(scope: OrganizationScope, taskId: string, operationKey: string, now: string): Promise<boolean>;
+  requestExecution(scope: OrganizationScope, taskId: string, operationKey: string, now: string, options?: OrganizationExecutionRequestOptions): Promise<boolean>;
   pause(scope: OrganizationScope, taskId: string, operationKey: string, now: string): Promise<boolean>;
   listRequested(scope: OrganizationScope, limit: number): Promise<Array<{ taskId: string; operationKey: string }>>;
-  listPlans(scope: OrganizationScope, taskId: string, input: { limit: number; afterOperationKey?: string }): Promise<Array<{ operationKey: string; status: OrganizationTaskStatus; createdAt: string; updatedAt: string; skippedFiles: Array<{fileId:string;reason:string}>; operationCount: number }>>;
-  getPlanSummary(scope: OrganizationScope, taskId: string, operationKey: string): Promise<{ operationKey: string; status: OrganizationTaskStatus; createdAt: string; updatedAt: string; skippedFiles: Array<{fileId:string;reason:string}>; operationCount: number } | null>;
+  listPlans(scope: OrganizationScope, taskId: string, input: { limit: number; afterOperationKey?: string }): Promise<Array<{ operationKey: string; status: OrganizationTaskStatus; executeRequested: boolean; createdAt: string; updatedAt: string; skippedFiles: Array<{fileId:string;reason:string}>; operationCount: number }>>;
+  getPlanSummary(scope: OrganizationScope, taskId: string, operationKey: string): Promise<{ operationKey: string; status: OrganizationTaskStatus; executeRequested: boolean; createdAt: string; updatedAt: string; skippedFiles: Array<{fileId:string;reason:string}>; operationCount: number } | null>;
   listVerifiedLocationsToSync(scope: OrganizationScope, taskId: string, operationKey: string, limit: number): Promise<Array<{ fileId:string; parentId:string; name:string; targetRootId:string; relativePath:string }>>;
   listVerifiedLocationPlanKeys(scope: OrganizationScope, limit: number): Promise<Array<{taskId:string;operationKey:string}>>;
   listOperations(scope: OrganizationScope, taskId: string, operationKey: string, input: { limit: number; afterOperationId?: string }): Promise<OrganizationOperation[]>;
@@ -324,10 +329,44 @@ export class PostgresOrganizationStore implements OrganizationStore {
     return result.rowCount === 1;
   }
 
-  async requestExecution(scope: OrganizationScope, taskId: string, operationKey: string, now: string): Promise<boolean> {
+  async requestExecution(scope: OrganizationScope, taskId: string, operationKey: string, now: string, options: OrganizationExecutionRequestOptions = {}): Promise<boolean> {
     await this.ensureSchema();
-    const result = await this.pool.query(`UPDATE library_organization_plans SET execute_requested=true,status=CASE WHEN status IN ('completed','running') THEN status ELSE 'planned' END,updated_at=$5 WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND operation_key=$4 AND status <> 'completed'`,[scope.accountId,scope.connectedStorageId,taskId,operationKey,now]);
-    return result.rowCount === 1;
+    return this.transaction(async (client) => {
+      const plan = await client.query<{ status: OrganizationTaskStatus; execute_requested: boolean }>(
+        `SELECT status,execute_requested FROM library_organization_plans
+          WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND operation_key=$4 FOR UPDATE`,
+        [scope.accountId, scope.connectedStorageId, taskId, operationKey],
+      );
+      const current = plan.rows[0];
+      if (!current) return false;
+      if (options.autoOrganization) {
+        // Automatic dispatch may only request a plan that is still waiting for its first execution
+        // intent. Manual requests retain their existing paused/failed resume semantics.
+        if (current.status !== "planned" || current.execute_requested) return false;
+        const checkpoint = await client.query<{ batch_id: string | null; operation_key: string | null; lease_id: string | null; status: string; lease_active: boolean }>(
+          `SELECT batch_id,operation_key,lease_id,status,
+                  (lease_expires_at IS NOT NULL AND lease_expires_at > $4::timestamptz) AS lease_active
+             FROM library_auto_organization_tasks
+            WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 FOR UPDATE`,
+          [scope.accountId, scope.connectedStorageId, taskId, now],
+        );
+        const auto = checkpoint.rows[0];
+        if (!auto || auto.status !== "planning" || auto.batch_id !== options.autoOrganization.batchId ||
+            auto.operation_key !== operationKey || auto.lease_id !== options.autoOrganization.leaseId || !auto.lease_active) return false;
+        const eligibility = await client.query(
+          `SELECT 1 FROM library_scan_tasks t
+             JOIN library_scan_configs c ON c.account_id=t.account_id AND c.connected_storage_id=t.connected_storage_id AND c.config_id=t.config_id
+             JOIN connected_storages s ON s.id=t.connected_storage_id AND s.account_id=t.account_id
+            WHERE t.account_id=$1 AND t.connected_storage_id=$2 AND t.task_id=$3 AND t.status IN ('completed','partial')
+              AND s.provider='guangya' AND s.status='active' AND c.configuration->>'autoOrganize'='true'
+            FOR UPDATE OF t,c,s`,
+          [scope.accountId, scope.connectedStorageId, taskId],
+        );
+        if (eligibility.rowCount !== 1) return false;
+      }
+      const result = await client.query(`UPDATE library_organization_plans SET execute_requested=true,status=CASE WHEN status IN ('completed','running') THEN status ELSE 'planned' END,updated_at=$5 WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND operation_key=$4 AND status <> 'completed'`,[scope.accountId,scope.connectedStorageId,taskId,operationKey,now]);
+      return result.rowCount === 1;
+    });
   }
 
   async pause(scope: OrganizationScope, taskId: string, operationKey: string, now: string): Promise<boolean> {
@@ -343,18 +382,18 @@ export class PostgresOrganizationStore implements OrganizationStore {
     return result.rows.map((row) => ({ taskId:row.task_id,operationKey:row.operation_key }));
   }
 
-  async listPlans(scope: OrganizationScope, taskId: string, input: { limit: number; afterOperationKey?: string }): Promise<Array<{ operationKey: string; status: OrganizationTaskStatus; createdAt: string; updatedAt: string; skippedFiles: Array<{fileId:string;reason:string}>; operationCount: number }>> {
+  async listPlans(scope: OrganizationScope, taskId: string, input: { limit: number; afterOperationKey?: string }): Promise<Array<{ operationKey: string; status: OrganizationTaskStatus; executeRequested: boolean; createdAt: string; updatedAt: string; skippedFiles: Array<{fileId:string;reason:string}>; operationCount: number }>> {
     await this.ensureSchema();
     if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 201) throw new RangeError("organization plan page must be 1..201");
     const result = await this.pool.query<PlanRow & { operation_count:string }>(`SELECT p.*,COUNT(o.operation_id)::text AS operation_count FROM library_organization_plans p LEFT JOIN library_organization_operations o USING(account_id,connected_storage_id,task_id,operation_key) WHERE p.account_id=$1 AND p.connected_storage_id=$2 AND p.task_id=$3 AND ($4::text IS NULL OR p.operation_key > $4) GROUP BY p.account_id,p.connected_storage_id,p.task_id,p.operation_key ORDER BY p.operation_key LIMIT $5`,[scope.accountId,scope.connectedStorageId,taskId,input.afterOperationKey ?? null,input.limit]);
-    return result.rows.map((row) => ({operationKey:row.operation_key,status:row.status,createdAt:row.created_at.toISOString(),updatedAt:row.updated_at.toISOString(),skippedFiles:row.skipped_files ?? [],operationCount:Number(row.operation_count)}));
+    return result.rows.map((row) => ({operationKey:row.operation_key,status:row.status,executeRequested:row.execute_requested,createdAt:row.created_at.toISOString(),updatedAt:row.updated_at.toISOString(),skippedFiles:row.skipped_files ?? [],operationCount:Number(row.operation_count)}));
   }
 
-  async getPlanSummary(scope: OrganizationScope, taskId: string, operationKey: string): Promise<{ operationKey: string; status: OrganizationTaskStatus; createdAt: string; updatedAt: string; skippedFiles: Array<{fileId:string;reason:string}>; operationCount: number } | null> {
+  async getPlanSummary(scope: OrganizationScope, taskId: string, operationKey: string): Promise<{ operationKey: string; status: OrganizationTaskStatus; executeRequested: boolean; createdAt: string; updatedAt: string; skippedFiles: Array<{fileId:string;reason:string}>; operationCount: number } | null> {
     await this.ensureSchema();
     const result = await this.pool.query<PlanRow & { operation_count:string }>(`SELECT p.*,COUNT(o.operation_id)::text AS operation_count FROM library_organization_plans p LEFT JOIN library_organization_operations o USING(account_id,connected_storage_id,task_id,operation_key) WHERE p.account_id=$1 AND p.connected_storage_id=$2 AND p.task_id=$3 AND p.operation_key=$4 GROUP BY p.account_id,p.connected_storage_id,p.task_id,p.operation_key`,[scope.accountId,scope.connectedStorageId,taskId,operationKey]);
     const row=result.rows[0];
-    return row?{operationKey:row.operation_key,status:row.status,createdAt:row.created_at.toISOString(),updatedAt:row.updated_at.toISOString(),skippedFiles:row.skipped_files??[],operationCount:Number(row.operation_count)}:null;
+    return row?{operationKey:row.operation_key,status:row.status,executeRequested:row.execute_requested,createdAt:row.created_at.toISOString(),updatedAt:row.updated_at.toISOString(),skippedFiles:row.skipped_files??[],operationCount:Number(row.operation_count)}:null;
   }
 
   async listVerifiedLocationsToSync(scope: OrganizationScope, taskId: string, operationKey: string, limit: number): Promise<Array<{ fileId:string; parentId:string; name:string; targetRootId:string; relativePath:string }>> {

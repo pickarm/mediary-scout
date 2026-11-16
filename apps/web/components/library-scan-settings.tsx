@@ -4,7 +4,9 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronLeft, ChevronRight, CircleAlert, Folder, LoaderCircle, Pause, Play, Plus, RefreshCw, Save, Square, X } from "lucide-react";
 import type { NamingTemplateKind } from "@media-track/workflow/library";
+import { validateNamingTemplate } from "@media-track/workflow/naming";
 import styles from "./library-scan-settings.module.css";
+import { LibraryNamingTemplates } from "./library-naming-templates";
 import {
   controlLibraryScan,
   loadAllScanConfigurations,
@@ -23,7 +25,8 @@ import {
 type TemplateSet = Readonly<Record<NamingTemplateKind, string>>;
 type PickedRoot = LibraryScanRoot & { selectionToken?: string };
 type PickerKind = "sources" | "movie" | "tv";
-type SelectionChange = { storageId: string | null; configId: string | null; taskId: string | null };
+type SelectionChange = { storageId: string | null; configId: string | null; taskId: string | null; dirty: boolean };
+const TEMPLATE_KINDS = ["movieDirectory", "movieFile", "tvDirectory", "seasonDirectory", "episodeFile"] as const;
 
 export function LibraryScanSettings({
   storages,
@@ -50,6 +53,7 @@ export function LibraryScanSettings({
   const [tvTarget, setTvTarget] = useState<PickedRoot | null>(null);
   const [mediaKind, setMediaKind] = useState<"movie" | "tv" | "mixed">("mixed");
   const [dailyEnabled, setDailyEnabled] = useState(false);
+  const [autoOrganize, setAutoOrganize] = useState(false);
   const [dailyTime, setDailyTime] = useState("03:00");
   const [templates, setTemplates] = useState<TemplateSet>(defaultTemplates);
   const [loading, setLoading] = useState(false);
@@ -67,17 +71,44 @@ export function LibraryScanSettings({
   const pickerGeneration = useRef(0);
   const pickerController = useRef<AbortController | null>(null);
   const mainController = useRef<AbortController | null>(null);
+  const selectionVersion = useRef(0);
+  const draftSignatureRef = useRef("");
   const isCurrentScope = useCallback((id: string, scopeGeneration: number, signal: AbortSignal): boolean =>
     generation.current === scopeGeneration && storageId === id && !signal.aborted, [storageId]);
   const activeTaskId = tasks.find((task) => task.status === "running" || task.status === "queued" || task.status === "cancelling")?.taskId ?? null;
 
-  const notifySelection = useCallback((nextStorageId: string | null, nextConfigId: string | null, nextTaskId: string | null) => {
-    onSelectionChange?.({ storageId: nextStorageId, configId: nextConfigId, taskId: nextTaskId });
+  const selectedConfiguration = configurations.find((item) => item.configId === selectedConfigId) ?? null;
+  const draftShape = {
+    sourceRoots: sourceRoots.map((root) => root.directoryId),
+    movieTarget: movieTarget?.directoryId ?? null,
+    tvTarget: tvTarget?.directoryId ?? null,
+    mediaKind,
+    dailyEnabled,
+    autoOrganize,
+    dailyTime: dailyEnabled ? dailyTime : null,
+  };
+  const savedShape = selectedConfiguration ? {
+    sourceRoots: selectedConfiguration.sourceRoots.map((root) => root.directoryId),
+    movieTarget: selectedConfiguration.movieTargetDirectoryId,
+    tvTarget: selectedConfiguration.tvTargetDirectoryId,
+    mediaKind: selectedConfiguration.mediaKind,
+    dailyEnabled: selectedConfiguration.dailyScheduleEnabled,
+    autoOrganize: selectedConfiguration.autoOrganize,
+    dailyTime: selectedConfiguration.dailyScheduleEnabled ? selectedConfiguration.dailyScheduleTime : null,
+  } : { sourceRoots: [], movieTarget: null, tvTarget: null, mediaKind: "mixed", dailyEnabled: false, autoOrganize: false, dailyTime: null };
+  const savedTemplates = normalizeTemplates(selectedConfiguration?.templates, defaultTemplates);
+  const dirty = JSON.stringify(draftShape) !== JSON.stringify(savedShape) || !templatesEqual(templates, savedTemplates);
+  const templatesInvalid = Object.values(templates).some((template) => validateNamingTemplate(template).length > 0);
+  const draftSignature = JSON.stringify({ ...draftShape, templates: TEMPLATE_KINDS.map((kind) => templates[kind]) });
+  const formDisabled = storage?.status !== "active" || saving || starting;
+  useEffect(() => { draftSignatureRef.current = draftSignature; }, [draftSignature]);
+  const notifySelection = useCallback((nextStorageId: string | null, nextConfigId: string | null, nextTaskId: string | null, nextDirty: boolean) => {
+    onSelectionChange?.({ storageId: nextStorageId, configId: nextConfigId, taskId: nextTaskId, dirty: nextDirty });
   }, [onSelectionChange]);
 
   useEffect(() => {
-    notifySelection(storageId, selectedConfigId, selectedTaskId);
-  }, [notifySelection, storageId, selectedConfigId, selectedTaskId]);
+    notifySelection(storageId, selectedConfigId, selectedTaskId, dirty);
+  }, [notifySelection, storageId, selectedConfigId, selectedTaskId, dirty]);
 
   const applyConfiguration = useCallback((configuration: LibraryScanConfiguration | null) => {
     setSelectedConfigId(configuration?.configId ?? null);
@@ -86,8 +117,9 @@ export function LibraryScanSettings({
     setTvTarget(configuration?.tvTargetDirectoryId ? { directoryId: configuration.tvTargetDirectoryId, name: configuration.tvTargetDirectoryName || "已保存剧集目标目录" } : null);
     setMediaKind(configuration?.mediaKind ?? "mixed");
     setDailyEnabled(configuration?.dailyScheduleEnabled ?? false);
+    setAutoOrganize(configuration?.autoOrganize ?? false);
     setDailyTime(configuration?.dailyScheduleTime ?? "03:00");
-    setTemplates((configuration?.templates as TemplateSet | undefined) ?? defaultTemplates);
+    setTemplates(normalizeTemplates(configuration?.templates, defaultTemplates));
   }, [defaultTemplates]);
 
   const loadStorageData = useCallback(async (id: string, signal: AbortSignal, currentGeneration: number) => {
@@ -163,23 +195,34 @@ export function LibraryScanSettings({
     return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", onVisibility); controller.abort(); };
   }, [storageId, activeTaskId, tasks, isCurrentScope]);
 
-  const selectedConfiguration = configurations.find((item) => item.configId === selectedConfigId) ?? null;
   const canEdit = storage?.status === "active";
   const sourceRootIds = useMemo(() => new Set(sourceRoots.map((root) => root.directoryId)), [sourceRoots]);
 
+  const changeStorage = (id: string) => {
+    selectionVersion.current += 1;
+    setStorageId(id);
+    applyConfiguration(null);
+    setSelectedConfigId(null);
+    setSelectedTaskId(null);
+    notifySelection(id, null, null, false);
+  };
+
   const selectConfiguration = (id: string) => {
+    selectionVersion.current += 1;
     const configuration = configurations.find((item) => item.configId === id) ?? null;
     applyConfiguration(configuration);
     if (selectedTaskId && tasks.find((task) => task.taskId === selectedTaskId)?.configId !== id) setSelectedTaskId(null);
   };
 
   const beginNewConfiguration = () => {
+    selectionVersion.current += 1;
     applyConfiguration(null);
     setSelectedConfigId(null);
     setSelectedTaskId(null);
   };
 
   const selectTask = (task: LibraryScanTask, knownConfiguration?: LibraryScanConfiguration) => {
+    selectionVersion.current += 1;
     setSelectedTaskId(task.taskId);
     const configuration = knownConfiguration ?? configurations.find((item) => item.configId === task.configId) ?? null;
     applyConfiguration(configuration);
@@ -252,22 +295,28 @@ export function LibraryScanSettings({
     ...(tvTarget?.selectionToken ? { tvTargetSelectionToken: tvTarget.selectionToken } : {}),
     mediaKind,
     dailyScheduleEnabled: dailyEnabled,
+    autoOrganize,
     dailyScheduleTime: dailyEnabled ? dailyTime : null,
-    templates: selectedConfiguration?.templates ?? templates,
+    templates,
   });
 
   const persistConfiguration = async (id: string, scopeGeneration: number, signal: AbortSignal): Promise<LibraryScanConfiguration> => {
     if (!isCurrentScope(id, scopeGeneration, signal)) throw new DOMException("Aborted", "AbortError");
+    const draftAtSave = draftSignatureRef.current;
+    const selectionAtSave = selectionVersion.current;
     const saved = await saveScanConfiguration(buildPayload(id), signal);
     if (!isCurrentScope(id, scopeGeneration, signal)) throw new DOMException("Aborted", "AbortError");
     setConfigurations((current) => isCurrentScope(id, scopeGeneration, signal)
       ? [saved, ...current.filter((item) => item.configId !== saved.configId)] : current);
-    applyConfiguration(saved);
+    if (selectionVersion.current === selectionAtSave) {
+      if (draftSignatureRef.current === draftAtSave) applyConfiguration(saved);
+      else setSelectedConfigId(saved.configId);
+    }
     return saved;
   };
 
   const save = async () => {
-    if (!storageId || !canEdit) return;
+    if (!storageId || !canEdit || templatesInvalid || saving || starting) return;
     const id = storageId; const scopeGeneration = generation.current; const signal = mainController.current?.signal;
     if (!signal) return;
     setSaving(true); setPageError(null);
@@ -277,7 +326,8 @@ export function LibraryScanSettings({
   };
 
   const start = async () => {
-    if (!storageId || !canEdit || sourceRoots.length < 1) return;
+    if (!storageId || !canEdit || templatesInvalid || sourceRoots.length < 1 || saving || starting) return;
+    const selectionAtStart = selectionVersion.current;
     const id = storageId; const scopeGeneration = generation.current; const signal = mainController.current?.signal;
     if (!signal) return;
     setStarting(true); setPageError(null);
@@ -288,7 +338,7 @@ export function LibraryScanSettings({
       if (!isCurrentScope(id, scopeGeneration, signal)) return;
       setTasks((current) => isCurrentScope(id, scopeGeneration, signal)
         ? [task, ...current.filter((item) => item.taskId !== task.taskId)] : current);
-      selectTask(task, saved);
+      if (selectionVersion.current === selectionAtStart) selectTask(task, saved);
     } catch (error) { if (isCurrentScope(id, scopeGeneration, signal)) setPageError(error instanceof Error ? error.message : "开始扫描失败。"); }
     finally { if (isCurrentScope(id, scopeGeneration, signal)) setStarting(false); }
   };
@@ -340,10 +390,10 @@ export function LibraryScanSettings({
       </section> : <>
         <section className={`panel ${styles.panel}`}>
           <div className={styles.panelHeader}>
-            <div><h2>扫描配置</h2><p>扫描只读取已选目录，不会自动补缺或整理文件。</p></div>
+            <div><h2>扫描配置</h2><p>扫描读取已选目录。自动整理需单独启用，导入新作品默认关闭自动补缺。</p></div>
             <label className={styles.storageField}>
               <span>当前网盘</span>
-              <select value={storageId ?? ""} onChange={(event) => setStorageId(event.target.value)} aria-label="当前网盘">
+              <select value={storageId ?? ""} onChange={(event) => changeStorage(event.target.value)} aria-label="当前网盘">
                 {storages.map((item) => <option key={item.id} value={item.id}>{item.label}{item.status === "frozen" ? "（已冻结）" : ""}</option>)}
               </select>
             </label>
@@ -354,12 +404,12 @@ export function LibraryScanSettings({
           <div className={styles.configSelectRow}>
             <label className={styles.storageField}>
               <span>已保存配置</span>
-              <select value={selectedConfigId ?? ""} onChange={(event) => selectConfiguration(event.target.value)} disabled={!configurations.length}>
+              <select value={selectedConfigId ?? ""} onChange={(event) => selectConfiguration(event.target.value)} disabled={!configurations.length || formDisabled}>
                 {!configurations.length && <option value="">尚无保存配置</option>}
                 {configurations.map((item, index) => <option key={item.configId} value={item.configId}>扫描配置 {configurations.length - index}</option>)}
               </select>
             </label>
-            <button className="secondary-button" type="button" onClick={beginNewConfiguration} disabled={!canEdit}><Plus size={15} />新建配置</button>
+            <button className="secondary-button" type="button" onClick={beginNewConfiguration} disabled={formDisabled}><Plus size={15} />新建配置</button>
           </div>
 
           <div className={styles.formGrid}>
@@ -368,39 +418,51 @@ export function LibraryScanSettings({
               <div className={styles.sourceList}>
                 {sourceRoots.map((root) => <div className={styles.directoryChip} key={root.directoryId}>
                   <Folder size={15} /><span title={root.directoryId}>{root.name}</span>
-                  <button type="button" aria-label={`移除${root.name}`} onClick={() => setSourceRoots((current) => current.filter((entry) => entry.directoryId !== root.directoryId))} disabled={!canEdit}><X size={14} /></button>
+                  <button type="button" aria-label={`移除${root.name}`} onClick={() => setSourceRoots((current) => current.filter((entry) => entry.directoryId !== root.directoryId))} disabled={formDisabled}><X size={14} /></button>
                 </div>)}
                 {sourceRoots.length === 0 && <p className={styles.hint}>从光鸭目录中选择一个或多个来源。</p>}
               </div>
-              <button className="secondary-button" type="button" onClick={() => openPicker("sources")} disabled={!canEdit || sourceRoots.length >= 20}><Folder size={15} />选择来源目录</button>
+              <button className="secondary-button" type="button" onClick={() => openPicker("sources")} disabled={formDisabled || sourceRoots.length >= 20}><Folder size={15} />选择来源目录</button>
             </fieldset>
 
             <fieldset className={styles.fieldset}>
               <legend>媒体类型</legend>
               <div className={styles.radioRow}>
-                {([ ["movie", "电影"], ["tv", "剧集"], ["mixed", "电影与剧集"] ] as const).map(([value, label]) => <label key={value}><input type="radio" name="media-kind" value={value} checked={mediaKind === value} onChange={() => setMediaKind(value)} disabled={!canEdit} />{label}</label>)}
+                {([ ["movie", "电影"], ["tv", "剧集"], ["mixed", "电影与剧集"] ] as const).map(([value, label]) => <label key={value}><input type="radio" name="media-kind" value={value} checked={mediaKind === value} onChange={() => setMediaKind(value)} disabled={formDisabled} />{label}</label>)}
               </div>
             </fieldset>
 
             <fieldset className={styles.fieldset}>
               <legend>整理目标目录 <span>可留空</span></legend>
-              <TargetRow label="电影目标" value={movieTarget} onChoose={() => openPicker("movie")} onClear={() => setMovieTarget(null)} disabled={!canEdit} />
-              <TargetRow label="剧集目标" value={tvTarget} onChoose={() => openPicker("tv")} onClear={() => setTvTarget(null)} disabled={!canEdit} />
+              <TargetRow label="电影目标" value={movieTarget} onChoose={() => openPicker("movie")} onClear={() => setMovieTarget(null)} disabled={formDisabled} />
+              <TargetRow label="剧集目标" value={tvTarget} onChoose={() => openPicker("tv")} onClear={() => setTvTarget(null)} disabled={formDisabled} />
             </fieldset>
 
             <fieldset className={styles.fieldset}>
               <legend>每日扫描</legend>
               <div className={styles.scheduleRow}>
-                <label><input type="checkbox" checked={dailyEnabled} onChange={(event) => setDailyEnabled(event.target.checked)} disabled={!canEdit} />启用定时扫描</label>
-                <label className={styles.timeField}>时间（上海）<input type="time" value={dailyTime} onChange={(event) => setDailyTime(event.target.value)} disabled={!canEdit || !dailyEnabled} /></label>
+                <label><input type="checkbox" checked={dailyEnabled} onChange={(event) => setDailyEnabled(event.target.checked)} disabled={formDisabled} />启用定时扫描</label>
+                <label className={styles.timeField}>时间（上海）<input type="time" value={dailyTime} onChange={(event) => setDailyTime(event.target.value)} disabled={formDisabled || !dailyEnabled} /></label>
               </div>
               <p className={styles.hint}>时区：Asia/Shanghai。启用定时扫描后由服务端按此时间运行。</p>
             </fieldset>
+
+            <fieldset className={styles.fieldset}>
+              <legend>自动整理</legend>
+              <label><input type="checkbox" checked={autoOrganize} onChange={(event) => setAutoOrganize(event.target.checked)} disabled={formDisabled} />启用自动整理</label>
+              <p className={styles.hint}>保存启用后，按模板分批整理已确认并导入的文件，保留已有版本。关闭后不再提交新批次；已提交清单可在下方暂停。</p>
+            </fieldset>
           </div>
 
+          <div className={styles.templateEditor}>
+            <LibraryNamingTemplates value={templates} savedValue={savedTemplates} onChange={setTemplates} disabled={formDisabled} />
+          </div>
+
+          {dirty && <div className={styles.notice} role="status">有未保存的配置或模板修改；整理预览只使用已保存的配置。</div>}
+
           <div className={styles.actions}>
-            <button className="secondary-button" type="button" onClick={() => void save()} disabled={!canEdit || saving || starting || sourceRoots.length === 0}><Save size={15} />{saving ? "保存中…" : "保存配置"}</button>
-            <button className="primary-button" type="button" onClick={() => void start()} disabled={!canEdit || saving || starting || sourceRoots.length === 0}><Play size={15} />{starting ? "开始中…" : "保存并开始扫描"}</button>
+            <button className="secondary-button" type="button" onClick={() => void save()} disabled={formDisabled || templatesInvalid || sourceRoots.length === 0}><Save size={15} />{saving ? "保存中…" : "保存配置"}</button>
+            <button className="primary-button" type="button" onClick={() => void start()} disabled={formDisabled || templatesInvalid || sourceRoots.length === 0}><Play size={15} />{starting ? "开始中…" : "保存并开始扫描"}</button>
           </div>
         </section>
 
@@ -464,4 +526,18 @@ function statusLabel(status: LibraryScanTask["status"]): string {
 function formatDate(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("zh-CN", { dateStyle: "short", timeStyle: "short" }).format(date);
+}
+
+function templatesEqual(left: Readonly<Record<string, string>>, right: Readonly<Record<string, string>>): boolean {
+  return TEMPLATE_KINDS.every((kind) => left[kind] === right[kind]);
+}
+
+function normalizeTemplates(source: Readonly<Record<string, string>> | undefined, fallback: TemplateSet): TemplateSet {
+  return {
+    movieDirectory: source?.movieDirectory ?? fallback.movieDirectory,
+    movieFile: source?.movieFile ?? fallback.movieFile,
+    tvDirectory: source?.tvDirectory ?? fallback.tvDirectory,
+    seasonDirectory: source?.seasonDirectory ?? fallback.seasonDirectory,
+    episodeFile: source?.episodeFile ?? fallback.episodeFile,
+  };
 }

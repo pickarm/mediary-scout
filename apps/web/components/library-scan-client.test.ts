@@ -115,6 +115,16 @@ describe("library scan browser API", () => {
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
   });
 
+  it("retains the HTTP status and server message on a rejected request", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response({ error: "整理清单状态冲突。" }, 409));
+    globalThis.fetch = fetchMock;
+    await expect(requestJson("/api/library/scans/task/organization", { method: "POST" })).rejects.toMatchObject({
+      name: "ApiRequestError",
+      status: 409,
+      message: "整理清单状态冲突。",
+    });
+  });
+
   it("supports pause, resume and cancel without starting another task", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(response({ item: { ...task, status: "paused" } }, 202))

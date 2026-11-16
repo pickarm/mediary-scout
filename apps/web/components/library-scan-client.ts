@@ -60,18 +60,29 @@ export interface LibraryScanConfigPayload {
   templates: Readonly<Record<string, string>>;
 }
 
+export class ApiRequestError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+  }
+}
+
 export async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(url, { ...init, headers: { ...(init.body ? { "content-type": "application/json" } : {}), ...init.headers } });
   let body: unknown;
   try { body = await response.json() as unknown; }
   catch {
     if (init.signal?.aborted) throw new DOMException("Aborted", "AbortError");
-    throw new Error("服务器返回了无法读取的响应，请重试。");
+    const message = "服务器返回了无法读取的响应，请重试。";
+    throw response.ok ? new Error(message) : new ApiRequestError(message, response.status);
   }
   if (init.signal?.aborted) throw new DOMException("Aborted", "AbortError");
   if (!response.ok) {
     const message = body && typeof body === "object" && "error" in body && typeof body.error === "string" ? body.error : "请求失败，请稍后重试。";
-    throw new Error(message);
+    throw new ApiRequestError(message, response.status);
   }
   return body as T;
 }

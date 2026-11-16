@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UpdaterStatus } from "./updater-client";
 
 vi.mock("./deployment-update-server", () => ({ readBuildCommit: vi.fn() }));
@@ -51,6 +51,10 @@ describe("loadUpdateView", () => {
     vi.mocked(fetchCommitRelation).mockResolvedValue(null);
     vi.mocked(fetchLatestDesktopRelease).mockResolvedValue(null);
     vi.mocked(getUpdaterStatus).mockResolvedValue(idle);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it("does not ask the updater on desktop, and still offers the published installer", async () => {
@@ -138,5 +142,27 @@ describe("loadUpdateView", () => {
       expect(view.current.label).toBe("未知版本");
       expect(view.current.tag).toBeNull();
     }
+  });
+
+  it("uses the prebuilt-image path without consulting the old updater", async () => {
+    vi.stubEnv("MEDIA_TRACK_DISTRIBUTION", "fork-image");
+    vi.mocked(isUpdaterInstalled).mockResolvedValue(true);
+    const view = await loadUpdateView();
+    expect(getUpdaterStatus).not.toHaveBeenCalled();
+    expect(isUpdaterInstalled).not.toHaveBeenCalled();
+    expect(fetchLatestDesktopRelease).not.toHaveBeenCalled();
+    expect(view.distribution).toBe("fork-image");
+    expect(view.updater).toBeNull();
+    expect(view.updaterInstalled).toBe(false);
+    expect(view.available?.tag).toBe("v2026.10.02");
+  });
+
+  it("keeps the image version independent of a stale updater deploy-folder commit", async () => {
+    vi.stubEnv("MEDIA_TRACK_DISTRIBUTION", "fork-image");
+    vi.mocked(readBuildCommit).mockResolvedValue(null);
+    vi.mocked(getUpdaterStatus).mockResolvedValue({ ...idle, repoCommit: "d".repeat(40) });
+    const view = await loadUpdateView();
+    expect(view.current).toEqual({ label: "未知版本", tag: null });
+    expect(fetchCommitRelation).not.toHaveBeenCalled();
   });
 });

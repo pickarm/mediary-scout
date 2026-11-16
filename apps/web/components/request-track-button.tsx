@@ -16,6 +16,7 @@ import { AcquireProgressBadge } from "./acquire-progress-badge";
 import { isDemoModeClient } from "../lib/demo-mode";
 import { DemoAcquirePlayback } from "./demo-acquire-playback";
 import type { DemoAcquisitionEntry } from "../lib/demo-session";
+import type { LibraryProgressMediaType } from "../lib/library-progress-client";
 import { useDemoAcquiredTmdbIds } from "../lib/use-demo-session";
 
 /**
@@ -36,6 +37,7 @@ export function RequestTrackButton({
   label = "获取",
   disabled = false,
   storageId,
+  mediaType,
   demoEntry,
 }: {
   candidateId?: string;
@@ -47,6 +49,9 @@ export function RequestTrackButton({
   disabled?: boolean;
   /** Tree model: the active workspace drive — acquisition lands HERE, not the primary. */
   storageId?: string | undefined;
+  /** Media identity for the inline progress match — pass the candidate's type so a
+   *  same-numbered title of another type can never borrow this card's progress. */
+  mediaType?: LibraryProgressMediaType | undefined;
   /** Demo only: the candidate's display fields, recorded to the session library
    *  when the scripted playback finishes so the visitor sees it "land". */
   demoEntry?: DemoAcquisitionEntry;
@@ -98,7 +103,13 @@ export function RequestTrackButton({
     // actually running (falls back to the static 已请求 pill when queued/finished);
     // without one (legacy callers), keep the static pill.
     return tmdbId != null ? (
-      <AcquireProgressBadge tmdbId={tmdbId} seasonNumber={null} storageId={storageId} title={result?.message} />
+      <AcquireProgressBadge
+        tmdbId={tmdbId}
+        seasonNumber={null}
+        storageId={storageId}
+        mediaType={mediaType}
+        title={result?.message}
+      />
     ) : (
       <RequestedBadge title={result?.message} storageId={storageId} />
     );

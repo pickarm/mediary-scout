@@ -23,12 +23,12 @@ function request(path:string,method="GET",body?:unknown):NextRequest {
 describe("organization plan execution API",()=>{
   beforeEach(()=>{vi.clearAllMocks();});
   it("returns a bounded operation page instead of a full plan graph",async()=>{
-    mocks.store.getPlanSummary.mockResolvedValue({operationKey:"key",status:"planned",createdAt:"a",updatedAt:"a",skippedFiles:[],operationCount:2});
+    mocks.store.getPlanSummary.mockResolvedValue({operationKey:"key",status:"paused",executeRequested:true,createdAt:"a",updatedAt:"a",skippedFiles:[],operationCount:2});
     mocks.store.listOperations.mockResolvedValue([{operationId:"op1",fileId:"f1",status:"planned"},{operationId:"op2",fileId:"f2",status:"planned"}]);
     const response=await GET(request("/api/library/scans/task/organization/key?storageId=storage-a&limit=1"),{params:Promise.resolve({taskId:"task",operationKey:"key"})});
     expect(response.status).toBe(200);
     expect(mocks.store.listOperations).toHaveBeenCalledWith({accountId:"account-a",connectedStorageId:"storage-a"},"task","key",{limit:2});
-    expect(await response.json()).toMatchObject({operations:[{operationId:"op1"}],nextCursor:expect.any(String),plan:{operationCount:2}});
+    expect(await response.json()).toMatchObject({operations:[{operationId:"op1"}],nextCursor:expect.any(String),plan:{operationCount:2,status:"paused",executeRequested:true}});
   });
   it("persists explicit execute/pause intent without awaiting cloud work in the request",async()=>{
     mocks.store.requestExecution.mockResolvedValue(true); mocks.store.pause.mockResolvedValue(true);

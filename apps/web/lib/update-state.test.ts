@@ -17,6 +17,11 @@ describe("buildUpdateView", () => {
       ["v2026.09.28", true],
     ]);
     expect(view.download).toBeNull();
+    expect(view.distribution).toBe("local-source");
+  });
+  it("carries the prebuilt-image marker through to the view", () => {
+    const view = buildUpdateView({ ...base, currentCommit: "b".repeat(40), distribution: "fork-image" });
+    expect(view.distribution).toBe("fork-image");
   });
   it("is up to date on the newest release", () => {
     const view = buildUpdateView({ ...base, currentCommit: "c".repeat(40) });

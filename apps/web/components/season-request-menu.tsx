@@ -14,6 +14,7 @@ import { AcquireProgressBadge } from "./acquire-progress-badge";
 import { isDemoModeClient } from "../lib/demo-mode";
 import { DemoAcquirePlayback } from "./demo-acquire-playback";
 import type { DemoAcquisitionEntry } from "../lib/demo-session";
+import type { LibraryProgressMediaType } from "../lib/library-progress-client";
 import { useDemoAcquiredTmdbIds } from "../lib/use-demo-session";
 
 /**
@@ -29,6 +30,7 @@ export function SeasonRequestMenu({
   totalSeasonCount,
   allLabel = "获取所有季",
   storageId,
+  mediaType,
   demoEntry,
 }: {
   tmdbId: number;
@@ -43,6 +45,8 @@ export function SeasonRequestMenu({
   /** Tree model: the active workspace drive — acquisition lands HERE. REQUIRED
    *  (value may be undefined = primary) so the workspace is always threaded. */
   storageId: string | undefined;
+  /** 「剧集」或「动漫」——内联进度按 (类型, TMDB ID) 匹配；缺省时不猜冲突对象。 */
+  mediaType?: LibraryProgressMediaType | undefined;
   /** Demo only: recorded to the session library when the scripted playback ends. */
   demoEntry?: DemoAcquisitionEntry | undefined;
 }) {
@@ -84,6 +88,7 @@ export function SeasonRequestMenu({
         tmdbId={tmdbId}
         seasonNumber={requestedSeason === "all" ? null : requestedSeason}
         storageId={storageId}
+        mediaType={mediaType}
         title={result?.message}
       />
     );

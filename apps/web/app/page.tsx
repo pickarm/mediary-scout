@@ -1,12 +1,12 @@
 import Link from "next/link";
 import { Suspense } from "react";
-import { Library, TriangleAlert } from "lucide-react";
+import { TriangleAlert } from "lucide-react";
 import { AcquiringPoller } from "../components/acquiring-poller";
 import { AppSidebar } from "../components/app-sidebar";
 import { RequestTrackButton } from "../components/request-track-button";
 import { AcquireProgressBadge } from "../components/acquire-progress-badge";
 import { DemoSessionLibrary } from "../components/demo-session-library";
-import { LibraryQuickFind } from "../components/library-quick-find";
+import { LibraryPagedWall, type LibraryCategoryPreview } from "../components/library-paged-wall";
 import { RememberQuery } from "../components/search-memory";
 import { SearchForm } from "../components/search-form";
 import { SeasonRequestMenu } from "../components/season-request-menu";
@@ -15,12 +15,14 @@ import { ConnectNoticeBanner } from "../components/connect-notice-banner";
 import { GitHubNameplate } from "../components/github-nameplate";
 import type { TrendingKind } from "../lib/trending";
 import { getSearchView } from "../lib/search-page";
-import { getInProgressTitles, getLibraryWall } from "../lib/title-hub";
+import { getInProgressTitles } from "../lib/title-hub";
+import { getLibraryMediaPage } from "../lib/library-media-runtime";
 import {
   ensureDemoSeeded,
   getActiveWorkspaceScope,
   getRegisteredDriveCount,
   getWorkflowRepository,
+  getCurrentAccountId,
 } from "../lib/workflow-runtime";
 import { resolveConnectNoticeConditions } from "../lib/connect-notice-server";
 import { shouldShowConnectNotice } from "../lib/connect-notice";
@@ -188,7 +190,7 @@ async function SearchResults({
 
   return (
     <>
-      {inProgress.length > 0 ? <AcquiringPoller /> : null}
+      {inProgress.length > 0 ? <AcquiringPoller storageId={storageId} /> : null}
       {searchView.state === "empty" ? (
         <TrendingRow activeKind={activeTrending} basePath={basePath} />
       ) : searchView.state === "provider_error" ? (
@@ -389,12 +391,14 @@ function CandidateCard({
                 tmdbId={candidate.tmdbId}
                 seasonNumber={null}
                 storageId={storageId}
+                mediaType={candidate.mediaType}
                 title="后台正在获取——点查看进度（活动）"
               />
             ) : null}
             {!acquiring && isTv && untrackedSeasons.length > 0 ? (
               <SeasonRequestMenu
                 tmdbId={candidate.tmdbId}
+                mediaType={candidate.mediaType}
                 seasonNumbers={untrackedSeasons}
                 totalSeasonCount={candidate.seasonNumbers.length}
                 allLabel={
@@ -422,6 +426,7 @@ function CandidateCard({
               <RequestTrackButton
                 candidateId={candidate.id}
                 tmdbId={candidate.tmdbId}
+                mediaType={candidate.mediaType}
                 actionState={candidate.action.state}
                 disabled={candidate.action.disabled}
                 label={candidate.action.label}
@@ -454,39 +459,35 @@ function CandidateCard({
 }
 
 async function LibrarySurface({ mediaType, filter, storageId }: { mediaType: string; filter: string; storageId?: string | undefined }) {
-  const [rawWall, inProgress] = await Promise.all([getLibraryWall(storageId), getInProgressTitles(storageId)]);
-  const inProgressIds = new Set(inProgress.map((title) => title.tmdbId));
-  // A title still being fetched shows as a 获取中 placeholder, not (yet) a card.
-  const wall = rawWall.filter((entry) => !inProgressIds.has(entry.tmdbId));
-
-  if (wall.length === 0 && inProgress.length === 0) {
-    return (
-      <section className="library-surface">
-        <div className="quiet-state">
-          <Library size={24} aria-hidden />
-          <strong>媒体库还是空的</strong>
-          <span>去搜索页发起第一次获取吧。</span>
-        </div>
-      </section>
-    );
-  }
-
-  // The type param is always one of the three (every link generates it that way);
-  // anything else falls back to the rows overview.
   const category = mediaType === "movie" || mediaType === "tv" || mediaType === "anime" ? mediaType : null;
-  return (
-    <section className="library-surface">
-      {inProgress.length > 0 ? <AcquiringPoller /> : null}
-      <LibraryQuickFind
-        wallEntries={wall}
-        inProgressTitles={inProgress}
-        storageId={storageId}
-        mode={category ? "category" : "home"}
-        mediaType={category ?? undefined}
-        filter={filter === "complete" || filter === "tracking" || filter === "partial" ? filter : "all"}
-      />
-    </section>
-  );
+  const normalizedFilter = filter === "complete" || filter === "tracking" || filter === "partial" ? filter : "all";
+  const accountId = await getCurrentAccountId();
+  if (storageId !== undefined) {
+    const owned = await getWorkflowRepository().listConnectedStorages(accountId);
+    if (!owned.some((storage) => storage.id === storageId && storage.accountId === accountId)) {
+      return <section className="library-surface"><div className="quiet-state"><strong>找不到该账号的网盘连接。</strong></div></section>;
+    }
+  }
+  const connectedStorageId = storageId ?? null;
+  const load = (type: "movie" | "tv" | "anime", pageSize: number) => getLibraryMediaPage({
+    accountId,
+    connectedStorageId,
+    type,
+    pageSize,
+    page: 1,
+    sort: "title",
+    direction: "asc",
+    ...(category === type && normalizedFilter !== "all" ? { state: normalizedFilter } : {}),
+  });
+  const types = category ? [category] as const : ["movie", "tv", "anime"] as const;
+  const pages = await Promise.all(types.map((type) => load(type, category ? 48 : 12)));
+  const previews: LibraryCategoryPreview[] = types.map((type, index) => ({ type, page: pages[index]! }));
+  // Observe the shared scope even when an active title falls outside this preview.
+  const acquiring = pages.some((page) => page.items.some((entry) => entry.acquiring));
+  return <section className="library-surface">
+    <AcquiringPoller storageId={storageId} initiallyAcquiring={acquiring} />
+    <LibraryPagedWall previews={previews} storageId={storageId} mediaType={category} filter={normalizedFilter} />
+  </section>;
 }
 
 function SearchResultsSkeleton() {

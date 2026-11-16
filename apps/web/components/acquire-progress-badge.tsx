@@ -6,6 +6,7 @@ import { LoaderCircle } from "lucide-react";
 import { RequestedBadge } from "./request-state";
 import { useActiveRun } from "../lib/use-active-run";
 import { advanceTrickle, initialTrickleState, inlineProgressView } from "../lib/inline-progress";
+import type { LibraryProgressMediaType } from "../lib/library-progress-client";
 
 /**
  * Smoothly trickle the displayed bar forward between server updates. Server progress
@@ -33,23 +34,26 @@ function useTrickledPercent(serverPercent: number, running: boolean, runKey: str
 
 /**
  * Production inline acquire progress. While THIS card's run is actively running,
- * show a live progress bar + step (real /api/activity data, reusing the demo's
- * elegant inline visual), still clickable through to 活动. Queued / not-yet-matched
- * / finished → the existing static 已请求 pill (AcquiringPoller's router.refresh
- * flips it to 已获取 on finish).
+ * show a live progress bar + step (the page-wide shared progress snapshot, reusing
+ * the demo's elegant inline visual), still clickable through to 活动. Queued /
+ * not-yet-matched / finished → the existing static 已请求 pill (AcquiringPoller
+ * flips it to 已获取 once the shared snapshot reports no active run).
  */
 export function AcquireProgressBadge({
   tmdbId,
   seasonNumber = null,
   storageId,
+  mediaType,
   title,
 }: {
   tmdbId: number;
   seasonNumber?: number | null;
   storageId?: string | undefined;
+  /** Media identity is (type, TMDB id): pass it so a movie never matches a show. */
+  mediaType?: LibraryProgressMediaType | null | undefined;
   title?: string | undefined;
 }) {
-  const run = useActiveRun(tmdbId, seasonNumber, storageId);
+  const run = useActiveRun(tmdbId, seasonNumber, storageId, mediaType ?? null);
   const view = inlineProgressView(run);
   // Hooks must run unconditionally — compute the trickled width before any early return.
   const displayPercent = useTrickledPercent(view.percent, view.running, run?.runId ?? "none");

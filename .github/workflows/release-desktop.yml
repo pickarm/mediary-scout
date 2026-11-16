@@ -29,6 +29,7 @@ jobs:
   # Seconds, before the 30-minute builds: the tag must be a release tag and its
   # release notes must exist. Resolves which commit every job builds.
   preflight:
+    if: github.repository == 'fancydirty/mediary-scout'
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
@@ -408,6 +409,7 @@ jobs:
   # state where a fresh DMG sits next to a stale EXE because one
   # platform's gate failed after the other had already uploaded.
   release:
+    if: github.repository == 'fancydirty/mediary-scout'
     needs: [preflight, build-macos, build-windows]
     runs-on: ubuntu-latest
     permissions:

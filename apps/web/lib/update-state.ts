@@ -1,6 +1,7 @@
 import type { CommitRelation, DesktopRelease, ReleaseEntry } from "./release-feed-server";
 import { compareReleaseTags } from "./release-version";
 import type { UpdaterPhase, UpdaterStatus } from "./updater-client";
+import type { UpdateDistribution } from "./fork-release";
 
 /** Phases during which an update is in progress (the tab polls; the scheduler must not start another). */
 export const ACTIVE_UPDATER_PHASES: ReadonlySet<UpdaterPhase> = new Set<UpdaterPhase>([
@@ -36,6 +37,8 @@ export interface UpdateView {
   updaterInstalled: boolean;
   /** Desktop only, and only while a newer release is offered. */
   download: DesktopDownload | null;
+  /** Prebuilt image (pull/recreate) or a local source checkout (legacy updater). */
+  distribution: UpdateDistribution;
 }
 
 export function buildUpdateView(input: {
@@ -44,6 +47,7 @@ export function buildUpdateView(input: {
   updater: UpdaterStatus | null;
   /** Where the running commit stands relative to the newest release (only used when it is untagged). */
   relation: CommitRelation | null;
+  distribution?: UpdateDistribution;
 }): UpdateView {
   const currentRelease = input.feed.find((release) => release.commit === input.currentCommit) ?? null;
   const newest = input.feed[0] ?? null;
@@ -79,6 +83,7 @@ export function buildUpdateView(input: {
     updater: input.updater,
     updaterInstalled: input.updater !== null,
     download: null,
+    distribution: input.distribution ?? "local-source",
   };
 }
 

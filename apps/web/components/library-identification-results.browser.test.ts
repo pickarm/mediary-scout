@@ -53,6 +53,9 @@ browserDescribe("library identification results browser", () => {
       if (url.pathname.endsWith("/scans") && request.method() === "GET") { currentStorage = storageId; return route.fulfill({ json: { items: [task(`task-${storageId}`, `task-config-${storageId}`)], nextCursor: null, hasMore: false } }); }
       if (/\/scans\/[^/]+$/.test(url.pathname) && request.method() === "GET") return route.fulfill({ json: { item: task(taskId, `config-${storageId}`) } });
       if (url.pathname.includes("/identifications") && request.method() === "GET") {
+        // Organizer reads its own confirmed-only page; it must not advance the
+        // identification view's mocked polling or pagination state.
+        if (url.searchParams.get("status") === "confirmed" && url.searchParams.get("limit") === "20") return route.fulfill({ json: { summary: null, counts: { total: 0, pending: 0, confirmed: 0, failed: 0, ignored: 0, imported: 0 }, items: [], nextCursor: null, hasMore: false } });
         if (storageId === slowStorage || storageId !== currentStorage) {
           releaseOld = () => { void route.fulfill({ json: { summary: null, counts: { total: 1, pending: 1, confirmed: 0, failed: 0, ignored: 0, imported: 0 }, items: [identity("old-file", "OLD_SCOPE_ONLY.mkv")], nextCursor: null, hasMore: false } }).catch(() => undefined); };
           oldIdentification.resolve(); return;
@@ -113,6 +116,7 @@ browserDescribe("library identification results browser", () => {
       if (url.pathname.endsWith("/scans") && request.method() === "GET") return route.fulfill({ json: { items: [{ ...task(`task-${storageId}`, `config-${storageId}`), status: "running" }], nextCursor: null, hasMore: false } });
       if (/\/scans\/[^/]+$/.test(url.pathname) && request.method() === "GET") return route.fulfill({ json: { item: { ...task(taskId, `config-${storageId}`), status: "running" } } });
       if (url.pathname.includes("/identifications") && request.method() === "GET") {
+        if (url.searchParams.get("status") === "confirmed" && url.searchParams.get("limit") === "20") return route.fulfill({ json: { summary: null, counts: { total: 0, pending: 0, confirmed: 0, failed: 0, ignored: 0, imported: 0 }, items: [], nextCursor: null, hasMore: false } });
         const cursor = url.searchParams.get("cursor");
         if (cursor) cursors.push(cursor); else firstPageReads += 1;
         const items = cursor === "cursor-a" ? [identity("tail-one", "TAIL_ONE.mkv")] : cursor === "cursor-b" ? [identity("tail-two", "TAIL_TWO.mkv")] : [identity(firstPageReads > 1 ? "polled-head" : "head", firstPageReads > 1 ? "POLLED_HEAD.mkv" : "HEAD.mkv")];
@@ -160,6 +164,7 @@ browserDescribe("library identification results browser", () => {
       if (url.pathname.endsWith("/scans") && request.method() === "GET") return route.fulfill({ json: { items: [{ ...task(`task-${storageId}`, `config-${storageId}`), status: "running" }], nextCursor: null, hasMore: false } });
       if (/\/scans\/[^/]+$/.test(url.pathname) && request.method() === "GET") return route.fulfill({ json: { item: { ...task(taskId, `config-${storageId}`), status: "running" } } });
       if (url.pathname.includes("/identifications") && request.method() === "GET") {
+        if (url.searchParams.get("status") === "confirmed" && url.searchParams.get("limit") === "20") return route.fulfill({ json: { summary: null, counts: { total: 0, pending: 0, confirmed: 0, failed: 0, ignored: 0, imported: 0 }, items: [], nextCursor: null, hasMore: false } });
         firstPageReads += 1;
         const confirmed = firstPageReads > 1;
         const item = identity("new-confirmed", "NEWLY_CONFIRMED.mkv", "confirmed");
@@ -189,6 +194,7 @@ browserDescribe("library identification results browser", () => {
       if (url.pathname.endsWith("/scans") && request.method() === "GET") return route.fulfill({ json: { items: [{ ...task(`task-${storageId}`, `config-${storageId}`), status: "running" }], nextCursor: null, hasMore: false } });
       if (/\/scans\/[^/]+$/.test(url.pathname) && request.method() === "GET") return route.fulfill({ json: { item: { ...task(taskId, `config-${storageId}`), status: "running" } } });
       if (url.pathname.includes("/identifications") && request.method() === "GET") {
+        if (url.searchParams.get("status") === "confirmed" && url.searchParams.get("limit") === "20") return route.fulfill({ json: { summary: null, counts: { total: 0, pending: 0, confirmed: 0, failed: 0, ignored: 0, imported: 0 }, items: [], nextCursor: null, hasMore: false } });
         firstPageReads += 1;
         const confirmed = firstPageReads > 1;
         const item = identity("same-file", confirmed ? "NOW_CONFIRMED.mkv" : "STILL_PENDING.mkv", confirmed ? "confirmed" : "pending");
@@ -224,6 +230,7 @@ browserDescribe("library identification results browser", () => {
       if (url.pathname.endsWith("/scans") && request.method() === "GET") return route.fulfill({ json: { items: [task(`task-${scope}`, `config-${scope}`)], nextCursor: null, hasMore: false } });
       if (/\/scans\/[^/]+$/.test(url.pathname) && request.method() === "GET") return route.fulfill({ json: { item: task(taskId, `config-${scope}`) } });
       if (url.pathname.includes("/identifications") && request.method() === "GET") {
+        if (url.searchParams.get("status") === "confirmed" && url.searchParams.get("limit") === "20") return route.fulfill({ json: { summary: null, counts: { total: 0, pending: 0, confirmed: 0, failed: 0, ignored: 0, imported: 0 }, items: [], nextCursor: null, hasMore: false } });
         const cursor = url.searchParams.get("cursor");
         if (holdOldPage && scope === storageA && cursor) {
           oldPageRequestedResolve();
@@ -280,6 +287,7 @@ browserDescribe("library identification results browser", () => {
         return route.fulfill({ status: 202, json: { item: { ...task("newly-started-task", startedConfigId), status: "completed" } } });
       }
       if (url.pathname.includes("/identifications") && request.method() === "GET") {
+        if (url.searchParams.get("status") === "confirmed" && url.searchParams.get("limit") === "20") return route.fulfill({ json: { summary: null, counts: { total: 0, pending: 0, confirmed: 0, failed: 0, ignored: 0, imported: 0 }, items: [], nextCursor: null, hasMore: false } });
         identificationTaskIds.push(taskId);
         return route.fulfill({ json: { summary: null, counts: { total: 0, pending: 0, confirmed: 0, failed: 0, ignored: 0, imported: 0 }, items: [], nextCursor: null, hasMore: false } });
       }

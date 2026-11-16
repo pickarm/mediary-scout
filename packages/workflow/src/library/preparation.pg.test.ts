@@ -151,33 +151,37 @@ integration("durable preparation queue", () => {
     const queuedId = `lane_cancelled_${suffix}`;
     await addRun(firstId); await store.register(descriptor(firstId), new Date(Date.now() - 60_000));
     await addRun(queuedId); await store.register(descriptor(queuedId), new Date());
-    let firstStarted!: () => void;
+    let firstSearchStarted = false;
     let releaseFirst!: () => void;
-    const firstWait = new Promise<void>((resolve) => { firstStarted = resolve; });
     const blocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
     const searched: string[] = [];
     const service = new PreparationService({ store, panSouConcurrency: 1, context: { async refresh(job) { return {
       target: { title: job.title, aliases: job.aliases, ...(job.year === undefined ? {} : { year: job.year }), searchConfigFingerprint: job.searchConfigFingerprint },
       searchServiceKey: "queued-cancel-test", searchLane: "pansou", resourceProvider: { async search({ workflowRunId }) {
         searched.push(workflowRunId ?? "");
-        if (workflowRunId === firstId) { firstStarted(); await blocked; }
+        if (workflowRunId === firstId) { firstSearchStarted = true; await blocked; }
         return { id: `snapshot_${workflowRunId}`, provider: "pansou", keyword: "Film", candidates: [], createdAt: new Date().toISOString() };
       } },
     }; } } });
-    const tick = service.tick(2, { accountId, connectedStorageId: storageId, workflowRunIds: [firstId, queuedId] });
-    await firstWait;
+    const firstTick = service.tick(1, { accountId, connectedStorageId: storageId, workflowRunIds: [firstId] });
+    let queuedTick: Promise<number> | undefined;
     const laneSymbol = Symbol.for("media-track.library-preparation.limit-registry");
     type TestLane = { queue: Array<() => void> };
     type TestLaneMap = Map<string, TestLane>;
     const registry = globalThis as typeof globalThis & { [key: symbol]: TestLaneMap | undefined };
-    const lanes = registry[laneSymbol];
-    if (!lanes) throw new Error("preparation lane registry was not initialized");
     try {
+      await waitUntil(() => firstSearchStarted);
+      const lanes = registry[laneSymbol];
+      if (!lanes) throw new Error("preparation lane registry was not initialized");
+      queuedTick = service.tick(1, { accountId, connectedStorageId: storageId, workflowRunIds: [queuedId] });
       await waitUntil(() => (lanes.get("pansou:queued-cancel-test")?.queue.length ?? 0) > 0);
       await store.cancel({ accountId, connectedStorageId: storageId }, queuedId);
     } finally {
       releaseFirst();
-      await tick;
+      const ticks = queuedTick ? [firstTick, queuedTick] : [firstTick];
+      const settled = await Promise.allSettled(ticks);
+      const failedTick = settled.find((result) => result.status === "rejected");
+      if (failedTick?.status === "rejected") throw failedTick.reason;
     }
     expect(searched).toEqual([firstId]);
     expect((await store.get({ accountId, connectedStorageId: storageId }, queuedId))?.status).toBe("cancelled");

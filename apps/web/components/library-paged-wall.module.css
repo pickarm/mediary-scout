@@ -1,0 +1,22 @@
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin: 24px 0 8px;
+}
+
+.pagination span {
+  color: var(--text-muted, #9a9a9a);
+  font-size: 13px;
+}
+
+@media (max-width: 480px) {
+  .pagination {
+    gap: 8px;
+  }
+
+  .pagination span {
+    font-size: 12px;
+  }
+}

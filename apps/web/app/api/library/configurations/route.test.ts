@@ -33,7 +33,7 @@ function post(body: unknown): NextRequest {
 
 describe("configuration source directory authorization", () => {
   const saved: unknown[] = [];
-  let previous: { sourceRoots: Array<{ directoryId: string; name: string }>; movieTargetDirectoryId: string | null; movieTargetDirectoryName?: string | null; tvTargetDirectoryId: string | null; tvTargetDirectoryName?: string | null } | null = null;
+  let previous: { sourceRoots: Array<{ directoryId: string; name: string }>; movieTargetDirectoryId: string | null; movieTargetDirectoryName?: string | null; tvTargetDirectoryId: string | null; tvTargetDirectoryName?: string | null; autoOrganize?: boolean } | null = null;
   const listing = vi.fn(async (parentId: string, page: number, pageSize?: number) => {
     expect(pageSize).toBe(200);
     if (parentId === "parent-deep" && page === 17) return { items: [{ fileId: "dir-deep", parentId, fileName: "Season 2", fileSize: 0, resType: 2 }], hasMore: false };
@@ -156,5 +156,38 @@ describe("configuration source directory authorization", () => {
       movieTargetDirectoryName: "伪造名称", mediaKind: "mixed", templates: templateSet,
     }));
     expect(response.status).toBe(400);
+  });
+
+  it("keeps an explicitly enabled automatic organization flag when legacy clients omit it", async () => {
+    const ticket = issueDirectorySelectionTicket({
+      ...scope, directoryId: "dir-deep", parentId: "parent-deep", name: "Season 2", page: 17,
+    });
+    const body = {
+      storageId: "storage-a", sourceRoots: [{ directoryId: "dir-deep", selectionToken: ticket }],
+      mediaKind: "mixed", templates: templateSet,
+    };
+
+    const first = await POST(post(body));
+    expect(first.status).toBe(201);
+    expect(saved[0]).toMatchObject({ autoOrganize: false });
+
+    previous = {
+      sourceRoots: [{ directoryId: "dir-deep", name: "Season 2" }],
+      movieTargetDirectoryId: null, tvTargetDirectoryId: null, autoOrganize: true,
+    };
+    const legacy = await POST(post({ ...body, sourceRoots: [{ directoryId: "dir-deep" }] }));
+    expect(legacy.status).toBe(201);
+    expect(saved.at(-1)).toMatchObject({ autoOrganize: true });
+
+    const disabled = await POST(post({ ...body, sourceRoots: [{ directoryId: "dir-deep" }], autoOrganize: false }));
+    expect(disabled.status).toBe(201);
+    expect(saved.at(-1)).toMatchObject({ autoOrganize: false });
+
+    const enabled = await POST(post({ ...body, sourceRoots: [{ directoryId: "dir-deep" }], autoOrganize: true }));
+    expect(enabled.status).toBe(201);
+    expect(saved.at(-1)).toMatchObject({ autoOrganize: true });
+
+    const invalid = await POST(post({ ...body, sourceRoots: [{ directoryId: "dir-deep" }], autoOrganize: "true" }));
+    expect(invalid.status).toBe(400);
   });
 });

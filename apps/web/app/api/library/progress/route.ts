@@ -7,8 +7,6 @@ import { apiErrorResponse, LibraryApiError, libraryAccount } from "../../../../l
 import { subscribeLibrarySummaryWake } from "../../../../lib/library-summary-cache";
 import { getWorkflowRepository } from "../../../../lib/workflow-runtime";
 
-export const runtime = "nodejs";
-
 export async function GET(request: NextRequest): Promise<Response> {
   try {
     const accountId = await libraryAccount(request);

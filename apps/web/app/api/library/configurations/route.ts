@@ -3,7 +3,7 @@ import { DEFAULT_NAMING_TEMPLATES, parseNamingTemplate, SCAN_SCHEDULE_TIME_ZONE,
 import { apiErrorResponse, decodeCursor, encodeCursor, libraryAccount, readJson, requireString, parseLimit, LibraryApiError } from "../../../../lib/library-api";
 import { getLibraryReadServices, getLibraryServices, verifyDirectorySelectionTicket } from "../../../../lib/library-runtime";
 
-const allowed = new Set(["storageId", "configId", "sourceRoots", "movieTargetDirectoryId", "movieTargetSelectionToken", "tvTargetDirectoryId", "tvTargetSelectionToken", "mediaKind", "dailyScheduleEnabled", "dailyScheduleTime", "templates"]);
+const allowed = new Set(["storageId", "configId", "sourceRoots", "movieTargetDirectoryId", "movieTargetSelectionToken", "tvTargetDirectoryId", "tvTargetSelectionToken", "mediaKind", "dailyScheduleEnabled", "dailyScheduleTime", "autoOrganize", "templates"]);
 const kinds = new Set<ScanMediaKind>(["movie", "tv", "mixed"]);
 const templateKeys = Object.keys(DEFAULT_NAMING_TEMPLATES);
 
@@ -75,6 +75,10 @@ export async function POST(request: NextRequest): Promise<Response> {
     } else if (body.dailyScheduleTime !== undefined && body.dailyScheduleTime !== null && body.dailyScheduleTime !== "") {
       throw new LibraryApiError(400, "未启用每日扫描时不能设置时间。");
     }
+    if (body.autoOrganize !== undefined && typeof body.autoOrganize !== "boolean") throw new LibraryApiError(400, "自动整理开关无效。");
+    // Old clients omit the field entirely. Keep an explicitly enabled value instead of silently
+    // disabling automatic organization on their next save; a brand-new configuration stays off.
+    const autoOrganize = body.autoOrganize === undefined ? (previous?.autoOrganize ?? false) : body.autoOrganize;
     const rawTemplates = body.templates === undefined ? DEFAULT_NAMING_TEMPLATES : body.templates;
     if (!rawTemplates || typeof rawTemplates !== "object" || Array.isArray(rawTemplates) || Object.keys(rawTemplates).length !== templateKeys.length || Object.keys(rawTemplates).some((key) => !templateKeys.includes(key))) throw new LibraryApiError(400, "命名模板必须恰好包含五种模板。");
     const templates = {} as Record<(typeof templateKeys)[number], string>;
@@ -87,7 +91,7 @@ export async function POST(request: NextRequest): Promise<Response> {
       configId, scope, sourceRoots: roots, movieTargetDirectoryId: movieTarget.directoryId, movieTargetDirectoryName: movieTarget.name,
       tvTargetDirectoryId: tvTarget.directoryId, tvTargetDirectoryName: tvTarget.name,
       mediaKind: mediaKind as ScanMediaKind, dailyScheduleEnabled, dailyScheduleTime,
-      dailyScheduleTimezone: SCAN_SCHEDULE_TIME_ZONE, autoOrganize: false, autoAcquire: false, templates,
+      dailyScheduleTimezone: SCAN_SCHEDULE_TIME_ZONE, autoOrganize, autoAcquire: false, templates,
     };
     await scanStore.saveConfiguration(configuration);
     return Response.json({ item: configuration }, { status: 201 });

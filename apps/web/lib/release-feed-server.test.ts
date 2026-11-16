@@ -14,17 +14,23 @@ function fakeFetch(routes: Record<string, { status: number; body: string }>) {
   }) as unknown as typeof fetch;
 }
 
-const TAGS = "https://api.github.com/repos/fancydirty/mediary-scout/git/matching-refs/tags/v";
+const TAGS = "https://api.github.com/repos/pickarm/mediary-scout/git/matching-refs/tags/v";
+const releasesUrl = (page: number) =>
+  `https://api.github.com/repos/pickarm/mediary-scout/releases?per_page=100&page=${page}`;
 const ref = (tag: string, sha: string, type = "commit") => ({ ref: `refs/tags/${tag}`, object: { sha, type } });
-const notes = (tag: string) =>
-  `https://api.github.com/repos/fancydirty/mediary-scout/contents/release-notes/${tag}.md?ref=${tag}`;
-const compare = (base: string, head: string) =>
-  `https://api.github.com/repos/fancydirty/mediary-scout/compare/${base}...${head}`;
+const release = (tag: string, body = "", extra: Record<string, unknown> = {}) => ({
+  tag_name: tag,
+  body,
+  draft: false,
+  prerelease: false,
+  target_commitish: "main",
+  ...extra,
+});
 
 describe("fetchReleaseFeed", () => {
   beforeEach(() => invalidateReleaseFeedCache());
 
-  it("keeps only valid release tags, newest first, with their notes", async () => {
+  it("keeps only published date releases, newest first, with notes from the release body", async () => {
     const fetchImpl = fakeFetch({
       [TAGS]: {
         status: 200,
@@ -35,10 +41,20 @@ describe("fetchReleaseFeed", () => {
           ref("v3000.01.01", "e".repeat(40)),
           ref("v2026.09.28", "b".repeat(40)),
           ref("v2026.10.02", "c".repeat(40)),
+          // A bare tag with no release must never be advertised.
+          ref("v2026.10.03", "f".repeat(40)),
         ]),
       },
-      [notes("v2026.10.02")]: { status: 200, body: "- 新增 一键更新" },
-      [notes("v2026.09.28")]: { status: 404, body: "" },
+      [releasesUrl(1)]: {
+        status: 200,
+        body: JSON.stringify([
+          release("v1.4.1", "- 新增 旧版本"),
+          release("v2099.12.31", "- 新增 未来版本"),
+          release("v3000.01.01", "- 新增 非法版本"),
+          release("v2026.10.02", "- 新增 一键更新"),
+          release("v2026.09.28"),
+        ]),
+      },
     });
     const feed = await fetchReleaseFeed(fetchImpl);
     expect(feed.map((r) => r.tag)).toEqual(["v2099.12.31", "v2026.10.02", "v2026.09.28"]);
@@ -46,57 +62,100 @@ describe("fetchReleaseFeed", () => {
     expect(feed[2]!.notes).toEqual([]);
   });
 
-  it("keeps every release, not just a first page, and fetches notes for the newest 10 only", async () => {
-    const tags = Array.from({ length: 45 }, (_, index) => {
-      const day = new Date(Date.UTC(2026, 9, 1) + index * 86_400_000).toISOString().slice(0, 10);
+  it("never offers a draft, a prerelease, or a tag whose image release is not published", async () => {
+    const fetchImpl = fakeFetch({
+      [TAGS]: {
+        status: 200,
+        body: JSON.stringify([ref("v2026.10.02", "c".repeat(40)), ref("v2026.10.03", "d".repeat(40))]),
+      },
+      [releasesUrl(1)]: {
+        status: 200,
+        body: JSON.stringify([
+          release("v2026.10.02", "- 修复 已发布", { draft: true }),
+          release("v2026.10.03", "- 修复 预发布", { prerelease: true }),
+        ]),
+      },
+    });
+    expect(await fetchReleaseFeed(fetchImpl)).toEqual([]);
+  });
+
+  it("keeps every published release, not just a first page", async () => {
+    const tags = Array.from({ length: 150 }, (_, index) => {
+      const day = new Date(Date.UTC(2026, 0, 1) + index * 86_400_000).toISOString().slice(0, 10);
       return ref(`v${day.replaceAll("-", ".")}`, index.toString(16).padStart(40, "0"));
     });
-    const fetchImpl = fakeFetch({ [TAGS]: { status: 200, body: JSON.stringify(tags) } });
+    const releases = tags.map((item) => release(item.ref.replace("refs/tags/", "")));
+    const fetchImpl = fakeFetch({
+      [TAGS]: { status: 200, body: JSON.stringify(tags) },
+      [releasesUrl(1)]: { status: 200, body: JSON.stringify(releases.slice(0, 100)) },
+      [releasesUrl(2)]: { status: 200, body: JSON.stringify(releases.slice(100)) },
+    });
     const feed = await fetchReleaseFeed(fetchImpl);
-    expect(feed).toHaveLength(45);
-    expect(feed.at(-1)?.tag).toBe("v2026.10.01");
-    const noteCalls = vi.mocked(fetchImpl).mock.calls.filter(([url]) => String(url).includes("/contents/"));
-    expect(noteCalls).toHaveLength(10);
+    expect(feed).toHaveLength(150);
+    expect(feed.at(-1)?.tag).toBe("v2026.01.01");
+    expect(vi.mocked(fetchImpl).mock.calls.filter(([url]) => String(url).includes("/releases?"))).toHaveLength(2);
   });
 
   it("skips annotated tags (their sha is a tag object, not a commit)", async () => {
     const fetchImpl = fakeFetch({
-      [TAGS]: { status: 200, body: JSON.stringify([ref("v2026.10.02", "c".repeat(40), "tag"), ref("v2026.09.28", "b".repeat(40))]) },
+      [TAGS]: {
+        status: 200,
+        body: JSON.stringify([ref("v2026.10.02", "c".repeat(40), "tag"), ref("v2026.09.28", "b".repeat(40))]),
+      },
+      [releasesUrl(1)]: {
+        status: 200,
+        body: JSON.stringify([release("v2026.10.02"), release("v2026.09.28")]),
+      },
     });
     expect((await fetchReleaseFeed(fetchImpl)).map((r) => r.tag)).toEqual(["v2026.09.28"]);
+  });
+
+  it("falls back to the SHA stamped in the release body when the tag is annotated", async () => {
+    const commit = "c".repeat(40);
+    const fetchImpl = fakeFetch({
+      [TAGS]: { status: 200, body: JSON.stringify([ref("v2026.10.02", "d".repeat(40), "tag")]) },
+      [releasesUrl(1)]: {
+        status: 200,
+        body: JSON.stringify([release("v2026.10.02", `- 新增 镜像发布\n提交：\`${commit}\``)]),
+      },
+    });
+    expect(await fetchReleaseFeed(fetchImpl)).toMatchObject([{ tag: "v2026.10.02", commit }]);
   });
 
   it("callers that arrive while a cold fetch is running share it (one burst of requests, not one per caller)", async () => {
     const fetchImpl = fakeFetch({
       [TAGS]: { status: 200, body: JSON.stringify([ref("v2026.10.02", "c".repeat(40))]) },
-      [notes("v2026.10.02")]: { status: 200, body: "- 新增 一键更新" },
+      [releasesUrl(1)]: { status: 200, body: JSON.stringify([release("v2026.10.02", "- 新增 一键更新")]) },
     });
     const [first, second, third] = await Promise.all([
       fetchReleaseFeed(fetchImpl),
       fetchReleaseFeed(fetchImpl),
       fetchReleaseFeed(fetchImpl),
     ]);
-    expect(fetchImpl).toHaveBeenCalledTimes(2); // tags + one notes file
+    expect(fetchImpl).toHaveBeenCalledTimes(2); // tags + release page
     expect(second).toEqual(first);
     expect(third).toEqual(first);
   });
 
   it("a fetch that started before 「检查更新」 does not refill the cache after it", async () => {
-    let release!: () => void;
+    let releaseGate!: () => void;
     const gate = new Promise<void>((resolve) => {
-      release = resolve;
+      releaseGate = resolve;
     });
     const stale = vi.fn(async (url: string) => {
       await gate;
       return url === TAGS
         ? new Response(JSON.stringify([ref("v2026.10.01", "b".repeat(40))]), { status: 200 })
-        : new Response("", { status: 404 });
+        : new Response(JSON.stringify([release("v2026.10.01")]), { status: 200 });
     }) as unknown as typeof fetch;
     const pending = fetchReleaseFeed(stale);
     invalidateReleaseFeedCache();
-    const fresh = fakeFetch({ [TAGS]: { status: 200, body: JSON.stringify([ref("v2026.10.02", "c".repeat(40))]) } });
+    const fresh = fakeFetch({
+      [TAGS]: { status: 200, body: JSON.stringify([ref("v2026.10.02", "c".repeat(40))]) },
+      [releasesUrl(1)]: { status: 200, body: JSON.stringify([release("v2026.10.02")]) },
+    });
     expect((await fetchReleaseFeed(fresh))[0]?.tag).toBe("v2026.10.02");
-    release();
+    releaseGate();
     await pending;
     expect((await fetchReleaseFeed(fresh))[0]?.tag).toBe("v2026.10.02");
   });
@@ -107,12 +166,17 @@ describe("fetchReleaseFeed", () => {
     }) as unknown as typeof fetch;
     expect(await fetchReleaseFeed(fetchImpl)).toEqual([]);
     expect(await fetchReleaseFeed(fetchImpl)).toEqual([]);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    // The cold fetch starts the tag and release requests together; the cached
+    // failure prevents a second burst.
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 });
 
 describe("fetchCommitRelation", () => {
   beforeEach(() => invalidateReleaseFeedCache());
+
+  const compare = (base: string, head: string) =>
+    `https://api.github.com/repos/pickarm/mediary-scout/compare/${base}...${head}`;
 
   it("returns where head stands relative to base", async () => {
     const base = "b".repeat(40);
@@ -142,9 +206,9 @@ describe("fetchCommitRelation", () => {
   it("a comparison that started before 「检查更新」 does not overwrite the fresh answer", async () => {
     const base = "b".repeat(40);
     const head = "d".repeat(40);
-    let release!: () => void;
+    let releaseGate!: () => void;
     const gate = new Promise<void>((resolve) => {
-      release = resolve;
+      releaseGate = resolve;
     });
     // The old request fails (a cached null would hide the update for five minutes).
     const stale = vi.fn(async () => {
@@ -155,16 +219,16 @@ describe("fetchCommitRelation", () => {
     invalidateReleaseFeedCache();
     const fresh = fakeFetch({ [compare(base, head)]: { status: 200, body: JSON.stringify({ status: "behind" }) } });
     expect(await fetchCommitRelation(base, head, fresh)).toBe("behind");
-    release();
+    releaseGate();
     await pending;
     expect(await fetchCommitRelation(base, head, fakeFetch({}))).toBe("behind");
   });
 });
 
-const LATEST = "https://api.github.com/repos/fancydirty/mediary-scout/releases/latest";
+const LATEST = "https://api.github.com/repos/pickarm/mediary-scout/releases/latest";
 const asset = (name: string) => ({
   name,
-  browser_download_url: `https://github.com/fancydirty/mediary-scout/releases/download/v2026.10.02/${name}`,
+  browser_download_url: `https://github.com/pickarm/mediary-scout/releases/download/v2026.10.02/${name}`,
 });
 
 describe("fetchLatestDesktopRelease", () => {
@@ -182,7 +246,7 @@ describe("fetchLatestDesktopRelease", () => {
     });
     expect(await fetchLatestDesktopRelease(fetchImpl)).toEqual({
       tag: "v2026.10.02",
-      pageUrl: "https://github.com/fancydirty/mediary-scout/releases/tag/v2026.10.02",
+      pageUrl: "https://github.com/pickarm/mediary-scout/releases/tag/v2026.10.02",
       dmgUrl: asset("Mediary.Scout-2026.1002.0-arm64.dmg").browser_download_url,
       exeUrl: asset("Mediary.Scout.Setup.2026.1002.0.exe").browser_download_url,
     });
@@ -259,7 +323,7 @@ describe("fetchLatestDesktopRelease", () => {
       vi.setSystemTime(new Date(start.getTime() + failTtl));
       expect(await fetchLatestDesktopRelease(fetchImpl)).toEqual({
         tag: "v2026.10.02",
-        pageUrl: "https://github.com/fancydirty/mediary-scout/releases/tag/v2026.10.02",
+        pageUrl: "https://github.com/pickarm/mediary-scout/releases/tag/v2026.10.02",
         dmgUrl: asset("Mediary.Scout-2026.1002.0-arm64.dmg").browser_download_url,
         exeUrl: asset("Mediary.Scout.Setup.2026.1002.0.exe").browser_download_url,
       });

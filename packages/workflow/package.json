@@ -40,6 +40,10 @@
     "./summary-cache": {
       "types": "./dist/library/summary-cache.d.ts",
       "default": "./dist/library/summary-cache.js"
+    },
+    "./naming": {
+      "types": "./dist/library/naming.d.ts",
+      "default": "./dist/library/naming.js"
     }
   },
   "dependencies": {

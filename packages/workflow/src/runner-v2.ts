@@ -28,6 +28,18 @@ import { formatReportPushText, stampReplaceNotification } from "./notification-r
 import { shortDriveLabel } from "./storage-brands.js";
 import { episodeCodeFromFileName } from "./episode-code.js";
 import { withStorageWriteTask } from "./library/guangya-write-coordinator.js";
+import {
+  AcquisitionBindingSafetyError,
+  acquisitionLibraryStoreOf,
+  protectExistingFromPlan,
+  resolveAcquisitionBindingPlan,
+  withBoundAcquisitionDirectories,
+  type ProtectExistingEpisodes,
+} from "./library/acquisition-bindings.js";
+import {
+  AcquisitionNamingError,
+  prepareAcquisitionNaming,
+} from "./library/acquisition-naming.js";
 
 /**
  * Phase 7d — production persist wrappers on the V2 engine. These mirror the old
@@ -129,6 +141,185 @@ function memoryOption(input: {
   return { memory: { store: input.repository, accountId: input.accountId ?? DEFAULT_ACCOUNT_ID, ...(drive ? { drive } : {}) } };
 }
 
+interface PreparedAcquisitionBindings {
+  storage: StorageExecutor;
+  drives?: AcquisitionDriveContext[];
+  protectExisting?: ProtectExistingEpisodes;
+}
+
+function categoryParentForTitle(
+  title: MediaTitle,
+  parents: AcquisitionDriveContext["parents"],
+): string {
+  if (title.type === "movie") return parents.movies;
+  if (title.type === "anime") return parents.anime;
+  return parents.tv;
+}
+
+function mergeProtectExisting(
+  ...values: Array<ProtectExistingEpisodes | undefined>
+): ProtectExistingEpisodes | undefined {
+  const defined = values.filter((value): value is ProtectExistingEpisodes => value !== undefined);
+  if (defined.length === 0) return undefined;
+  if (defined.some((value) => value.episodes === "unknown")) return { episodes: "unknown" };
+  return {
+    episodes: [...new Set(defined.flatMap((value) => (value.episodes === "unknown" ? [] : value.episodes)))],
+  };
+}
+
+/**
+ * F14a: prepare the original acquisition executor from F02 bindings. The store is
+ * attached by the web runtime to the same StorageExecutor the worker already
+ * passes here, so no worker/signature change is needed. A missing/unsafe binding
+ * either keeps today's name-based path (no binding found) or fails closed with a
+ * stable safety code (binding found but outside/shared/ambiguous).
+ */
+async function prepareAcquisitionBindings(
+  input: {
+    title: MediaTitle;
+    storage: StorageExecutor;
+    accountId?: string;
+    connectedStorageId?: string | null;
+    categoryParentId: string;
+    drives?: AcquisitionDriveContext[];
+    workflowRun: WorkflowRunMetadata;
+  },
+  seasons: readonly number[],
+): Promise<PreparedAcquisitionBindings> {
+  const fallback: PreparedAcquisitionBindings = {
+    storage: input.storage,
+    ...(input.drives === undefined ? {} : { drives: input.drives }),
+  };
+  const requestedSeasons = [...new Set(seasons)].filter(
+    (season) => Number.isSafeInteger(season) && season >= 0,
+  );
+  if (requestedSeasons.length === 0) return fallback;
+  const accountId = input.accountId ?? DEFAULT_ACCOUNT_ID;
+
+  try {
+    if (input.drives && input.drives.length > 0) {
+      const decoratedDrives = [...input.drives];
+      const protections: ProtectExistingEpisodes[] = [];
+      for (let index = 0; index < decoratedDrives.length; index += 1) {
+        const drive = decoratedDrives[index]!;
+        const library = acquisitionLibraryStoreOf(drive.storage);
+        const categoryParentId = categoryParentForTitle(input.title, drive.parents);
+        const plan = library
+          ? await resolveAcquisitionBindingPlan({
+              storage: drive.storage,
+              library,
+              accountId,
+              connectedStorageId: drive.storageId,
+              title: input.title,
+              categoryParentId,
+              seasons: requestedSeasons,
+            })
+          : null;
+        const boundStorage = plan
+          ? withBoundAcquisitionDirectories({
+              storage: drive.storage,
+              categoryParentId,
+              plan,
+            })
+          : drive.storage;
+        let namedStorage: StorageExecutor;
+        try {
+          namedStorage = await prepareAcquisitionNaming({
+            storage: boundStorage,
+            scope: {
+              accountId,
+              connectedStorageId: drive.storageId,
+            },
+            title: input.title,
+            categoryParentId,
+            seasons: requestedSeasons,
+            workflowRunId: input.workflowRun.id,
+            bindingPlan: plan,
+          });
+        } catch (error) {
+          if (error instanceof AcquisitionNamingError) throw error;
+          throw new AcquisitionNamingError(
+            "ACQUISITION_NAMING_DATABASE_UNAVAILABLE",
+            `无法读取 ${input.title.id} 在网盘 ${drive.storageId} 上的命名配置或恢复状态，已停止获取`,
+            { cause: error },
+          );
+        }
+        decoratedDrives[index] = {
+          ...drive,
+          storage: namedStorage,
+        };
+        const protection = plan ? protectExistingFromPlan(plan) : null;
+        if (protection) protections.push(protection);
+      }
+      const protectExisting = mergeProtectExisting(...protections);
+      return {
+        storage: input.storage,
+        drives: decoratedDrives,
+        ...(protectExisting === undefined ? {} : { protectExisting }),
+      };
+    }
+
+    if (!input.connectedStorageId?.trim()) return fallback;
+    const library = acquisitionLibraryStoreOf(input.storage);
+    const plan = library
+      ? await resolveAcquisitionBindingPlan({
+          storage: input.storage,
+          library,
+          accountId,
+          connectedStorageId: input.connectedStorageId,
+          title: input.title,
+          categoryParentId: input.categoryParentId,
+          seasons: requestedSeasons,
+        })
+      : null;
+    const boundStorage = plan
+      ? withBoundAcquisitionDirectories({
+          storage: input.storage,
+          categoryParentId: input.categoryParentId,
+          plan,
+        })
+      : input.storage;
+    let namedStorage: StorageExecutor;
+    try {
+      namedStorage = await prepareAcquisitionNaming({
+        storage: boundStorage,
+        scope: {
+          accountId,
+          connectedStorageId: input.connectedStorageId,
+        },
+        title: input.title,
+        categoryParentId: input.categoryParentId,
+        seasons: requestedSeasons,
+        workflowRunId: input.workflowRun.id,
+        bindingPlan: plan,
+      });
+    } catch (error) {
+      if (error instanceof AcquisitionNamingError) throw error;
+      throw new AcquisitionNamingError(
+        "ACQUISITION_NAMING_DATABASE_UNAVAILABLE",
+        `无法读取 ${input.title.id} 的命名配置或恢复状态，已停止获取`,
+        { cause: error },
+      );
+    }
+    const protectExisting = plan ? protectExistingFromPlan(plan) : null;
+    return {
+      storage: namedStorage,
+      ...(protectExisting == null ? {} : { protectExisting }),
+    };
+  } catch (error) {
+    if (error instanceof AcquisitionBindingSafetyError) throw error;
+    if (error instanceof AcquisitionNamingError) throw error;
+    // A store was attached (production PG configured), so an unreadable binding
+    // must fail closed: falling back to the name path could create a duplicate
+    // directory beside the user's imported one. Do not log the raw error — it may
+    // contain connection/provider details.
+    throw new AcquisitionBindingSafetyError(
+      "ACQUISITION_BINDING_UNVERIFIED",
+      `无法核实 ${input.title.id} 的已导入目录，已停止获取以避免重复目录`,
+    );
+  }
+}
+
 /** Episodes of this work (on this drive) that hold an old + replacement copy on
  *  purpose — every run of it protects its existing files and says so to the agent,
  *  so a later keep-larger dedup cannot undo a replacement. A failed read fails
@@ -139,14 +330,18 @@ async function protectExistingOption(input: {
   accountId?: string;
   connectedStorageId?: string | null;
   title: MediaTitle;
-}): Promise<{ protectExisting?: NonNullable<RunTvAcquisitionV2Request["protectExisting"]> }> {
+}, imported?: ProtectExistingEpisodes): Promise<{ protectExisting?: NonNullable<RunTvAcquisitionV2Request["protectExisting"]> }> {
   try {
     const sources = await input.repository.listEpisodeSources({
       accountId: input.accountId ?? DEFAULT_ACCOUNT_ID,
       drive: userMessageDrive(input.connectedStorageId),
       titleKey: input.title.id,
     });
-    return sources.length > 0 ? { protectExisting: { episodes: sources.map((s) => s.episode) } } : {};
+    const protectExisting = mergeProtectExisting(
+      imported,
+      sources.length > 0 ? { episodes: sources.map((s) => s.episode) } : undefined,
+    );
+    return protectExisting === undefined ? {} : { protectExisting };
   } catch (error) {
     console.error(`[user-message] could not read episode sources of ${input.title.id}: ${String(error).slice(0, 300)}`);
     return { protectExisting: { episodes: "unknown" } };
@@ -771,6 +966,7 @@ async function runType2InitializationV2AndPersistUncoordinated(
   input: TvV2Common & { season: TrackedSeason },
 ): Promise<BridgedV2Result> {
   const now = resolveNow(input);
+  const prepared = await prepareAcquisitionBindings(input, [input.season.seasonNumber]);
   const bridged = await runTvAcquisitionV2({
     title: input.title,
     mode: "type2",
@@ -785,7 +981,7 @@ async function runType2InitializationV2AndPersistUncoordinated(
     ],
     categoryParentId: input.categoryParentId,
     resourceProvider: input.resourceProvider,
-    storage: input.storage,
+    storage: prepared.storage,
     deadLinkStore: input.repository,
     model: input.model,
     workflowRunId: input.workflowRun.id,
@@ -794,10 +990,10 @@ async function runType2InitializationV2AndPersistUncoordinated(
       repository: input.repository,
       workflowRunId: input.workflowRun.id,
       neededHint: Math.min(input.season.latestAiredEpisode, input.season.totalEpisodes),
-      storage: input.storage,
+      storage: prepared.storage,
     }),
-    ...passthrough(input),
-    ...(await protectExistingOption(input)),
+    ...passthrough({ ...input, ...(prepared.drives === undefined ? {} : { drives: prepared.drives }) }),
+    ...(await protectExistingOption(input, prepared.protectExisting)),
     ...rejectedLookupOption(input),
     ...linkHistoryOption({ ...input, workflowRunId: input.workflowRun.id, now }),
   });
@@ -827,6 +1023,7 @@ async function runType3MonitoringV2AndPersistUncoordinated(
   },
 ): Promise<BridgedV2Result> {
   const now = resolveNow(input);
+  const prepared = await prepareAcquisitionBindings(input, [input.season.seasonNumber]);
   const localObtained = new Set(input.episodes.filter((episode) => episode.obtained).map((episode) => episode.episodeCode));
   const obtainedAnywhere = new Set([...localObtained, ...(input.crossDriveObtained ?? [])]);
   const bridged = await runTvAcquisitionV2({
@@ -843,7 +1040,7 @@ async function runType3MonitoringV2AndPersistUncoordinated(
     ],
     categoryParentId: input.categoryParentId,
     resourceProvider: input.resourceProvider,
-    storage: input.storage,
+    storage: prepared.storage,
     deadLinkStore: input.repository,
     model: input.model,
     workflowRunId: input.workflowRun.id,
@@ -854,10 +1051,10 @@ async function runType3MonitoringV2AndPersistUncoordinated(
       repository: input.repository,
       workflowRunId: input.workflowRun.id,
       neededHint: input.episodes.filter((episode) => episode.airStatus === "aired" && !obtainedAnywhere.has(episode.episodeCode)).length,
-      storage: input.storage,
+      storage: prepared.storage,
     }),
-    ...passthrough(input),
-    ...(await protectExistingOption(input)),
+    ...passthrough({ ...input, ...(prepared.drives === undefined ? {} : { drives: prepared.drives }) }),
+    ...(await protectExistingOption(input, prepared.protectExisting)),
     ...rejectedLookupOption(input),
     ...linkHistoryOption({ ...input, workflowRunId: input.workflowRun.id, now }),
   });
@@ -917,6 +1114,10 @@ async function runSeriesInitializationV2AndPersistUncoordinated(
 ): Promise<BridgedV2Result> {
   const quality = input.seasonQualityRecord ?? "4K";
   const now = resolveNow(input);
+  const prepared = await prepareAcquisitionBindings(
+    input,
+    input.seasons.map((season) => season.seasonNumber),
+  );
   const bridged = await runTvAcquisitionV2({
     title: input.title,
     mode: "series",
@@ -928,7 +1129,7 @@ async function runSeriesInitializationV2AndPersistUncoordinated(
     })),
     categoryParentId: input.categoryParentId,
     resourceProvider: input.resourceProvider,
-    storage: input.storage,
+    storage: prepared.storage,
     deadLinkStore: input.repository,
     model: input.model,
     workflowRunId: input.workflowRun.id,
@@ -940,10 +1141,10 @@ async function runSeriesInitializationV2AndPersistUncoordinated(
         (sum, season) => sum + Math.min(season.latestAiredEpisode, season.totalEpisodes),
         0,
       ),
-      storage: input.storage,
+      storage: prepared.storage,
     }),
-    ...passthrough(input),
-    ...(await protectExistingOption(input)),
+    ...passthrough({ ...input, ...(prepared.drives === undefined ? {} : { drives: prepared.drives }) }),
+    ...(await protectExistingOption(input, prepared.protectExisting)),
     ...rejectedLookupOption(input),
     ...linkHistoryOption({ ...input, workflowRunId: input.workflowRun.id, now }),
   });
@@ -1058,6 +1259,10 @@ async function runReplaceRequestV2AndPersistUncoordinated(
   },
 ): Promise<BridgedV2Result & Partial<HeldLockRun>> {
   const now = resolveNow(input);
+  const prepared = await prepareAcquisitionBindings(
+    input,
+    input.seasons.map((entry) => entry.season.seasonNumber),
+  );
   const priorObtained = input.seasons.flatMap((entry) =>
     entry.episodes.filter((episode) => episode.obtained).map((episode) => episode.episodeCode),
   );
@@ -1077,7 +1282,7 @@ async function runReplaceRequestV2AndPersistUncoordinated(
     })),
     categoryParentId: input.categoryParentId,
     resourceProvider: input.resourceProvider,
-    storage: input.storage,
+    storage: prepared.storage,
     deadLinkStore: input.repository,
     model: input.model,
     workflowRunId: input.workflowRun.id,
@@ -1088,10 +1293,10 @@ async function runReplaceRequestV2AndPersistUncoordinated(
       repository: input.repository,
       workflowRunId: input.workflowRun.id,
       neededHint: Math.max(1, missing + input.userRequest.requestedEpisodes.length),
-      storage: input.storage,
+      storage: prepared.storage,
     }),
-    ...passthrough(input),
-    ...(await protectExistingOption(input)),
+    ...passthrough({ ...input, ...(prepared.drives === undefined ? {} : { drives: prepared.drives }) }),
+    ...(await protectExistingOption(input, prepared.protectExisting)),
     ...rejectedLookupOption(input),
     ...linkHistoryOption({ ...input, workflowRunId: input.workflowRun.id, now }),
   });
@@ -1243,6 +1448,10 @@ async function runStagingRecoveryV2AndPersistUncoordinated(
   },
 ): Promise<BridgedV2Result> {
   const now = resolveNow(input);
+  const prepared = await prepareAcquisitionBindings(
+    input,
+    input.seasons.map((entry) => entry.season.seasonNumber),
+  );
   const priorObtained = input.seasons.flatMap((entry) =>
     entry.episodes.filter((episode) => episode.obtained).map((episode) => episode.episodeCode),
   );
@@ -1258,7 +1467,7 @@ async function runStagingRecoveryV2AndPersistUncoordinated(
     })),
     categoryParentId: input.categoryParentId,
     resourceProvider: input.resourceProvider,
-    storage: input.storage,
+    storage: prepared.storage,
     deadLinkStore: input.repository,
     model: input.model,
     workflowRunId: input.workflowRun.id,
@@ -1269,9 +1478,9 @@ async function runStagingRecoveryV2AndPersistUncoordinated(
       repository: input.repository,
       workflowRunId: input.workflowRun.id,
       neededHint: Math.max(1, input.seasons.reduce((sum, entry) => sum + entry.season.totalEpisodes, 0)),
-      storage: input.storage,
+      storage: prepared.storage,
     }),
-    ...passthrough(input),
+    ...passthrough({ ...input, ...(prepared.drives === undefined ? {} : { drives: prepared.drives }) }),
   });
 
   const lock = bridged.seasons.find((entry) => entry.season.seasonNumber === input.lockSeasonNumber);
@@ -1471,10 +1680,11 @@ async function runMovieAcquisitionV2AndPersistUncoordinated(input: {
   now?: () => string;
 }): Promise<MovieAcquisitionV2Result & Partial<HeldLockRun>> {
   const now = resolveNow(input);
+  const prepared = await prepareAcquisitionBindings(input, [1]);
   const result = await runMovieAcquisitionV2({
     title: input.title,
     resourceProvider: input.resourceProvider,
-    storage: input.storage,
+    storage: prepared.storage,
     model: input.model,
     workflowRunId: input.workflowRun.id,
     moviesParentDirectoryId: input.categoryParentId,
@@ -1484,7 +1694,7 @@ async function runMovieAcquisitionV2AndPersistUncoordinated(input: {
       repository: input.repository,
       workflowRunId: input.workflowRun.id,
       neededHint: 1,
-      storage: input.storage,
+      storage: prepared.storage,
     }),
     ...(input.searchBudget === undefined ? {} : { searchBudget: input.searchBudget }),
     ...(input.maxSteps === undefined ? {} : { maxSteps: input.maxSteps }),
@@ -1495,12 +1705,12 @@ async function runMovieAcquisitionV2AndPersistUncoordinated(input: {
     ...(input.jevJudge === undefined ? {} : { jevJudge: input.jevJudge }),
     ...(input.userRequest === undefined ? {} : { userRequest: input.userRequest }),
     ...(input.priorObtained === undefined ? {} : { priorObtained: input.priorObtained }),
-    ...(await protectExistingOption(input)),
+    ...(await protectExistingOption(input, prepared.protectExisting)),
     ...rejectedLookupOption(input),
     ...linkHistoryOption({ ...input, workflowRunId: input.workflowRun.id, now }),
     ...memoryOption(input),
     ...(input.titleResearch === undefined ? {} : { titleResearch: input.titleResearch }),
-    ...(input.drives === undefined ? {} : { drives: input.drives }),
+    ...(prepared.drives === undefined ? {} : { drives: prepared.drives }),
   });
 
   const accountId = input.accountId ?? DEFAULT_ACCOUNT_ID;

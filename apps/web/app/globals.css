@@ -638,6 +638,11 @@ p {
   font-size: 28px;
 }
 
+.library-management-stack {
+  display: grid;
+  gap: 18px;
+}
+
 .overview-grid {
   display: grid;
   grid-template-columns: 1fr;

@@ -32,10 +32,10 @@ describe("organization plan API",()=>{
   });
 
   it("reads only a bounded plan page",async()=>{
-    mocks.service.store.listPlans.mockResolvedValue([{operationKey:"k1",status:"planned",createdAt:"a",updatedAt:"a",skippedFiles:[],operationCount:4},{operationKey:"k2",status:"planned",createdAt:"b",updatedAt:"b",skippedFiles:[],operationCount:3}]);
+    mocks.service.store.listPlans.mockResolvedValue([{operationKey:"k1",status:"planned",executeRequested:true,createdAt:"a",updatedAt:"a",skippedFiles:[],operationCount:4},{operationKey:"k2",status:"planned",executeRequested:false,createdAt:"b",updatedAt:"b",skippedFiles:[],operationCount:3}]);
     const response=await GET(request("/api/library/scans/task/organization?storageId=storage-a&limit=1"),{params:Promise.resolve({taskId:"task"})});
     expect(response.status).toBe(200);
     expect(mocks.service.store.listPlans).toHaveBeenCalledWith({accountId:"account-a",connectedStorageId:"storage-a"},"task",{limit:2});
-    expect(await response.json()).toMatchObject({plans:[{operationKey:"k1"}],nextCursor:expect.any(String)});
+    expect(await response.json()).toMatchObject({plans:[{operationKey:"k1",executeRequested:true}],nextCursor:expect.any(String)});
   });
 });

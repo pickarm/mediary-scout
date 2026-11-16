@@ -5,9 +5,11 @@ import { ACTIVE_UPDATER_PHASES, type UpdateView } from "../../lib/update-state";
 import { loadUpdateView } from "../../lib/update-view-server";
 import { resolveCurrentIsOwner } from "../../lib/settings-attention-server";
 import type { UpdaterPhase } from "../../lib/updater-client";
+import { FORK_RELEASES_URL, FORK_REPO_URL, imageUpdateCommand } from "../../lib/fork-release";
 import { AutoUpdateSwitch, CheckUpdatesButton, CopyCommandButton, UpdateNowButton } from "./update-actions";
 
 const MIGRATE_COMMAND = "./scripts/deploy.sh";
+const IMAGE_UPDATE_COMMAND = imageUpdateCommand();
 
 const KIND_LABEL = { add: "新增", improve: "改进", fix: "修复" } as const;
 
@@ -65,11 +67,27 @@ function DesktopUpdateHint({ view }: { view: UpdateView }) {
   return (
     <p className="update-muted">
       桌面版在{" "}
-      <a href="https://github.com/fancydirty/mediary-scout/releases/latest" target="_blank" rel="noopener noreferrer">
+      <a href={`${FORK_RELEASES_URL}/latest`} target="_blank" rel="noopener noreferrer">
         发布页
       </a>{" "}
       下载新版本安装包。
     </p>
+  );
+}
+
+/** NAS deployments pull the published image; they never build this checkout. */
+function ImageUpdateHint({ view }: { view: UpdateView }) {
+  return (
+    <div className="update-migrate">
+      <p className="update-muted">
+        {view.available ? `新版本 ${view.available.tag} 已发布。` : "更新时"}在部署目录拉取并重建应用：
+      </p>
+      <pre className="update-cmd">{IMAGE_UPDATE_COMMAND}</pre>
+      <CopyCommandButton command={IMAGE_UPDATE_COMMAND} />
+      <p className="update-muted">
+        默认使用 latest；固定版本时在 .env 设置 MEDIA_TRACK_IMAGE_TAG，例如 {view.available?.tag ?? "vYYYY.MM.DD"}。
+      </p>
+    </div>
   );
 }
 
@@ -102,6 +120,7 @@ export function UpdateTab({
   desktop: boolean;
   autoUpdate: { enabled: boolean; time: string };
 }) {
+  const forkImage = view.distribution === "fork-image";
   const updating = Boolean(view.updater && ACTIVE_UPDATER_PHASES.has(view.updater.phase));
   const failed = Boolean(view.updater && (view.updater.phase === "rolled_back" || view.updater.phase === "failed"));
   return (
@@ -126,20 +145,21 @@ export function UpdateTab({
           </div>
         </div>
         {desktop ? <DesktopUpdateHint view={view} /> : null}
-        {!desktop && view.updater && (updating || (view.available && !view.updater.needsManualRecovery && !view.updater.servingUnknown)) ? (
+        {!desktop && forkImage ? <ImageUpdateHint view={view} /> : null}
+        {!desktop && !forkImage && view.updater && (updating || (view.available && !view.updater.needsManualRecovery && !view.updater.servingUnknown)) ? (
           <UpdateNowButton tag={updating ? null : (view.available?.tag ?? null)} initial={view.updater} />
         ) : null}
-        {!desktop && !updating && view.available && !view.updater && view.updaterInstalled ? (
+        {!desktop && !forkImage && !updating && view.available && !view.updater && view.updaterInstalled ? (
           <p className="update-muted">更新助手暂时没有回应，稍后刷新再试。</p>
         ) : null}
-        {!desktop && !updating && view.available && !view.updater && !view.updaterInstalled ? (
+        {!desktop && !forkImage && !updating && view.available && !view.updater && !view.updaterInstalled ? (
           <div className="update-migrate">
             <p className="update-muted">一键更新需要先完成一次手动升级。在部署目录运行：</p>
             <pre className="update-cmd">{MIGRATE_COMMAND}</pre>
             <CopyCommandButton command={MIGRATE_COMMAND} />
           </div>
         ) : null}
-        {!desktop && failed && view.updater ? (
+        {!desktop && !forkImage && failed && view.updater ? (
           <div className="update-failure">
             <p className="update-warn">{view.updater.message}</p>
             <details>
@@ -148,13 +168,13 @@ export function UpdateTab({
             </details>
           </div>
         ) : null}
-        {!desktop && view.updater?.finishedAt ? (
+        {!desktop && !forkImage && view.updater?.finishedAt ? (
           <p className="update-muted">
             上次更新：{formatUpdateFinishedAt(view.updater.finishedAt)} · {outcomeLabel(view.updater.phase)}
           </p>
         ) : null}
       </section>
-      {!desktop && view.updaterInstalled ? (
+      {!desktop && !forkImage && view.updaterInstalled ? (
         <section className="panel update-auto">
           <AutoUpdateSwitch initial={autoUpdate} />
           <p className="update-muted">
@@ -177,7 +197,7 @@ export function UpdateTab({
             {view.releases.length > 10 ? (
               <p className="update-muted">
                 这里只列最近 10 个版本，更早的见{" "}
-                <a href="https://github.com/fancydirty/mediary-scout/tree/main/release-notes" target="_blank" rel="noopener noreferrer">
+                <a href={`${FORK_REPO_URL}/tree/main/release-notes`} target="_blank" rel="noopener noreferrer">
                   全部发布说明
                 </a>
                 。

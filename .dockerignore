@@ -3,8 +3,16 @@ node_modules
 .next
 **/.next
 **/dist
+dist
 .git
 .github
+.worktrees
+.claude
+.codex
+references
+site
+skills
+coverage
 .env
 .env.*
 !.env.example
@@ -12,7 +20,16 @@ node_modules
 .media-track-*
 .DS_Store
 docs
+release-notes
+tests
 *.log
+*.patch
+*.diff
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
 # Database dumps from ./scripts/pg-backup.sh and the updater. Never ship them into an image.
 backups
 .update.lock

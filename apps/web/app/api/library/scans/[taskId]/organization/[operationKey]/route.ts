@@ -20,7 +20,7 @@ export async function GET(request: NextRequest, context: Context): Promise<Respo
     const matching=summary;
     if (!matching) throw new LibraryApiError(404,"整理清单不存在。");
     const hasMore=rows.length>limit; const operations=rows.slice(0,limit);
-    return Response.json({plan:{operationKey,status:matching.status,createdAt:matching.createdAt,updatedAt:matching.updatedAt,operationCount:matching.operationCount,skippedFiles:matching.skippedFiles},operations,nextCursor:hasMore?encodeCursor(operations.at(-1)?.operationId??null):null});
+    return Response.json({plan:{operationKey,status:matching.status,executeRequested:matching.executeRequested,createdAt:matching.createdAt,updatedAt:matching.updatedAt,operationCount:matching.operationCount,skippedFiles:matching.skippedFiles},operations,nextCursor:hasMore?encodeCursor(operations.at(-1)?.operationId??null):null});
   } catch(error) { return organizationError(error); }
 }
 

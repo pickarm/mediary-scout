@@ -1,7 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { QueueClaimOptions } from "@media-track/workflow";
 import { clearUpdateHold, inFlightCount, setUpdateHold } from "./update-hold";
+
+vi.mock("./workflow-runtime", () => ({
+  runNextQueuedWorkflow: vi.fn(),
+  runScheduledType3: vi.fn(),
+  runAutoUpdateIfDue: vi.fn(),
+  recoverOrphanedRuns: vi.fn(),
+  workerHasConfiguredDrive: vi.fn(),
+  getWorkerConcurrency: vi.fn(),
+}));
+
 import {
+  defaultRuntime,
   drainQueueOnce,
   startBackgroundWorker,
   __resetBackgroundWorkerForTests,
@@ -275,6 +286,39 @@ describe("startBackgroundWorker — the in-process worker loop (auto-drive)", ()
     await vi.advanceTimersByTimeAsync(1000);
     expect(runtime.runNext).toHaveBeenCalled();
     expect(runtime.runScheduled).toHaveBeenCalled();
+  });
+});
+
+describe("defaultRuntime — the legacy auto-update entry", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("arms the legacy updater only for a local source deployment", async () => {
+    const runtime = await defaultRuntime();
+    expect(runtime.autoUpdate).toBeTypeOf("function");
+  });
+
+  it("does not arm it for the prebuilt image, so a Fork NAS never calls the old source updater", async () => {
+    vi.stubEnv("MEDIA_TRACK_DISTRIBUTION", "fork-image");
+    const runtime = await defaultRuntime();
+    expect(runtime.autoUpdate).toBeUndefined();
+  });
+
+  it("the production loop never invokes runAutoUpdateIfDue in image mode", async () => {
+    vi.stubEnv("MEDIA_TRACK_DISTRIBUTION", "fork-image");
+    vi.useFakeTimers();
+    __resetBackgroundWorkerForTests();
+    try {
+      const { runAutoUpdateIfDue } = await import("./workflow-runtime");
+      vi.mocked(runAutoUpdateIfDue).mockClear();
+      startBackgroundWorker({ pollMs: 1000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(runAutoUpdateIfDue).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      __resetBackgroundWorkerForTests();
+    }
   });
 });
 

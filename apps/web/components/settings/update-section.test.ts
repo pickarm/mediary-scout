@@ -39,6 +39,7 @@ const view = (overrides: Partial<UpdateView>): UpdateView => ({
   updater: null,
   updaterInstalled: false,
   download: null,
+  distribution: "local-source",
   ...overrides,
 });
 const newer = { tag: "v2026.10.02", date: "2026-10-02", commit: "c".repeat(40), notes: [] };
@@ -157,6 +158,29 @@ describe("UpdateTab one-click update", () => {
     expect(html).toContain("复制");
     expect(html).not.toContain("git pull");
     expect(html).not.toContain(UPDATE_BUTTON);
+  });
+
+  it("shows a NAS how to pull and recreate the Fork image, never how to build source", () => {
+    const html = render({
+      desktop: false,
+      view: view({ available: newer, status: "available", distribution: "fork-image" }),
+    });
+    expect(html).toContain("新版本 v2026.10.02 已发布");
+    expect(html).toContain("docker compose -f docker-compose.fork.yml pull web");
+    expect(html).toContain("docker compose -f docker-compose.fork.yml up -d --force-recreate web");
+    expect(html).toContain("MEDIA_TRACK_IMAGE_TAG");
+    expect(html).not.toContain("./scripts/deploy.sh");
+    expect(html).not.toContain("git pull");
+    expect(html).not.toContain(UPDATE_BUTTON);
+    expect(html).not.toContain("每天自动更新");
+  });
+
+  it("keeps the pull command visible when the image is already current", () => {
+    const html = render({ desktop: false, view: view({ distribution: "fork-image" }) });
+    expect(html).toContain("已是最新");
+    expect(html).toContain("docker compose -f docker-compose.fork.yml pull web");
+    expect(html).not.toContain("./scripts/deploy.sh");
+    expect(html).toContain("检查更新");
   });
 
   it("does not offer 立即更新 after a failed rollback, only the recovery message", () => {

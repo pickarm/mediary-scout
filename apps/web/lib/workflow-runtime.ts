@@ -118,6 +118,12 @@ import {
   type WorkflowRepository,
 } from "@media-track/workflow";
 import { createPreparationConsumer } from "@media-track/workflow/preparation-consumer";
+import {
+  PostgresLibraryStore,
+  attachAcquisitionLibraryStore,
+  attachAcquisitionNamingDatabase,
+} from "@media-track/workflow/library";
+import { getLibraryDatabasePool } from "./library-database";
 import { validatePreparationDescriptor } from "@media-track/workflow/library";
 import type { PreparationDescriptor, ResolvedPreparationContext } from "@media-track/workflow/library";
 import {
@@ -3373,7 +3379,32 @@ function createUnconfiguredStorageExecutor(): StorageExecutor {
   };
 }
 
-async function getWorkerStorageExecutor(
+/**
+ * F14a: hand the read-only F02 store to the acquisition runner on the SAME
+ * StorageExecutor object the worker already passes through. The public attach
+ * helper comes from @media-track/workflow/library (one symbol definition shared
+ * by both sides).
+ */
+let acquisitionLibraryStore: PostgresLibraryStore | null = null;
+
+export function attachConfiguredAcquisitionLibraryStore(storage: StorageExecutor): StorageExecutor {
+  if (!process.env.MEDIA_TRACK_POSTGRES_URL?.trim()) return storage;
+  try {
+    const pool = getLibraryDatabasePool();
+    acquisitionLibraryStore ??= new PostgresLibraryStore(pool);
+    const withLibrary = attachAcquisitionLibraryStore(storage, acquisitionLibraryStore);
+    return attachAcquisitionNamingDatabase(withLibrary, pool);
+  } catch (error) {
+    // The production PG configuration exists, so silently falling back to the
+    // name-based path would bypass the already-imported directory protection.
+    // Fail closed with a safe error name (never log/attach the raw error, which
+    // may contain connection parameters).
+    const name = error instanceof Error ? error.name : "UnknownError";
+    throw new Error(`ACQUISITION_LIBRARY_STORE_UNAVAILABLE: ${name}`);
+  }
+}
+
+export async function getWorkerStorageExecutor(
   accountId: string = DEFAULT_ACCOUNT_ID,
   connectedStorageId?: string | null,
 ): Promise<StorageExecutor> {
@@ -3397,23 +3428,27 @@ async function getWorkerStorageExecutor(
         const guangYaAuth = creds.provider === "guangya"
           ? makeGuangYaAuthHooks(accountId, creds.id, creds.providerUid, creds.credential, creds.connectionMarker)
           : null;
-        return createExecutorForBrand({
+        return attachConfiguredAcquisitionLibraryStore(
+          createExecutorForBrand({
+            provider: creds.provider,
+            credential: guangYaAuth?.credentials ?? creds.credential ?? {},
+            providerUid: creds.providerUid,
+            scopeCids,
+            env: process.env,
+            onCredentialRefresh: makeTokenPersister(accountId, creds.id, creds.provider),
+            ...(guangYaAuth ? { persistGuangYaTokens: guangYaAuth.onTokensRefreshed } : {}),
+            ...(guangYaAuth ? { loadGuangYaCredentials: guangYaAuth.loadCurrentCredentials } : {}),
+          }),
+        );
+      }
+      return attachConfiguredAcquisitionLibraryStore(
+        createExecutorForBrand({
           provider: creds.provider,
-          credential: guangYaAuth?.credentials ?? creds.credential ?? {},
-          providerUid: creds.providerUid,
+          cookie: creds.cookie,
           scopeCids,
           env: process.env,
-          onCredentialRefresh: makeTokenPersister(accountId, creds.id, creds.provider),
-          ...(guangYaAuth ? { persistGuangYaTokens: guangYaAuth.onTokensRefreshed } : {}),
-          ...(guangYaAuth ? { loadGuangYaCredentials: guangYaAuth.loadCurrentCredentials } : {}),
-        });
-      }
-      return createExecutorForBrand({
-        provider: creds.provider,
-        cookie: creds.cookie,
-        scopeCids,
-        env: process.env,
-      });
+        }),
+      );
     }
     // Legacy env-cookie 115 bootstrap when PAN115_COOKIE AND explicit 115 write
     // scope CIDs are configured in env; otherwise return a lazy brand-agnostic
@@ -3425,7 +3460,9 @@ async function getWorkerStorageExecutor(
       (process.env.MEDIA_TRACK_115_TEST_ROOT_CID ?? "").trim().length > 0 ||
       (process.env.MEDIA_TRACK_115_WRITE_SCOPE_CIDS ?? "").trim().length > 0;
     if (hasEnv115Cookie && hasEnv115WriteScope) {
-      return createProtectedPan115CookieStorageExecutorFromEnv({ env: process.env });
+      return attachConfiguredAcquisitionLibraryStore(
+        createProtectedPan115CookieStorageExecutorFromEnv({ env: process.env }),
+      );
     }
     return createUnconfiguredStorageExecutor();
   }
@@ -3435,7 +3472,10 @@ async function getWorkerStorageExecutor(
   fakeStorageExecutor ??= new FakeStorageExecutor({
     transferOutcomes: fakeTransferOutcomes(),
   });
-  return fakeStorageExecutor;
+  // With PG configured, even the fake adapter must consult the real F02 bindings:
+  // otherwise the name-based fallback could create a twin beside an imported
+  // directory. Only the no-PG legacy fake-test path stays unattached.
+  return attachConfiguredAcquisitionLibraryStore(fakeStorageExecutor);
 }
 
 /**

@@ -3,6 +3,7 @@ import { chromium, type Browser, type Route } from "playwright";
 
 const browserTestsEnabled = process.env.RUN_LIBRARY_SCAN_BROWSER === "1";
 const browserDescribe = browserTestsEnabled ? describe : describe.skip;
+const baseUrl = process.env.LIBRARY_BROWSER_BASE_URL ?? "http://127.0.0.1:4326";
 
 type TaskDto = {
   taskId: string; configId: string; status: "completed"; directoriesDone: number;
@@ -32,6 +33,7 @@ browserDescribe("library scan settings browser scope races", () => {
     });
     const context = await browser.newContext();
     const page = await context.newPage();
+    page.setDefaultTimeout(8_000);
     // Model a transport that finishes successfully despite cancellation; scope generation must still reject stale UI results.
     await page.addInitScript(() => { AbortController.prototype.abort = function abortIgnoredByTransport() {}; });
     const oldPage = deferred<void>();
@@ -41,10 +43,12 @@ browserDescribe("library scan settings browser scope races", () => {
     let oldStartRequests = 0;
     let storageA = "";
     let storageB = "";
+    const requestedUrls: string[] = [];
 
     await page.route("**/api/library/**", async (route: Route) => {
       const request = route.request();
       const url = new URL(request.url());
+      requestedUrls.push(`${url.pathname}${url.search}`);
       const storageId = url.searchParams.get("storageId") ?? (() => {
         try { return (JSON.parse(request.postData() ?? "{}") as { storageId?: string }).storageId ?? ""; }
         catch { return ""; }
@@ -95,9 +99,11 @@ browserDescribe("library scan settings browser scope races", () => {
       await route.fulfill({ status: 200, json: { items: [], nextPage: null } });
     });
 
-    await page.goto("http://localhost:4316/library/manage");
+    await page.goto(`${baseUrl}/library/manage`);
     const storageSelect = page.getByRole("combobox", { name: "当前网盘" });
     await storageSelect.waitFor();
+    const stackLayout = await page.locator(".library-management-stack").evaluate((element) => ({ display: getComputedStyle(element).display, gap: getComputedStyle(element).rowGap }));
+    expect(stackLayout).toEqual({ display: "grid", gap: "18px" });
     const options = await storageSelect.locator("option").evaluateAll((items) => items.map((item) => (item as HTMLOptionElement).value).filter(Boolean));
     storageA = options[0] ?? "";
     storageB = options[1] ?? "";
@@ -109,8 +115,12 @@ browserDescribe("library scan settings browser scope races", () => {
     await storageSelect.selectOption(storageB);
     await page.getByText(`目标 ${storageB}`).waitFor();
     finishOldPage?.();
-    await page.waitForTimeout(150);
-    await expect.poll(() => page.locator("article").count()).toBe(1);
+    await page.waitForTimeout(250);
+    const tasksPanel = page.locator("section.panel").filter({ has: page.getByRole("heading", { name: "扫描任务" }) });
+    expect(await tasksPanel.locator("article").count()).toBe(1);
+    expect(await tasksPanel.getByRole("button", { name: /task-old-a/ }).count()).toBe(0);
+    expect(requestedUrls.filter((entry) => entry.includes(`task-${storageA}`) && entry.includes(`storageId=${storageB}`))).toEqual([]);
+    expect(requestedUrls.filter((entry) => entry.includes(`task-${storageB}`) && entry.includes(`storageId=${storageA}`))).toEqual([]);
 
     await storageSelect.selectOption(storageA);
     await page.getByText(`目标 ${storageA}`).waitFor();
@@ -120,9 +130,9 @@ browserDescribe("library scan settings browser scope races", () => {
     await storageSelect.selectOption(storageB);
     await page.getByText(`目标 ${storageB}`).waitFor();
     finishOldSave?.();
-    await page.waitForTimeout(150);
+    await page.waitForTimeout(250);
     expect(oldStartRequests).toBe(0);
     expect(await page.getByText(`目标 ${storageB}`).isVisible()).toBe(true);
     await context.close();
-  });
+  }, 45_000);
 });

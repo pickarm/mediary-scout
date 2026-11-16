@@ -190,7 +190,7 @@ function TvHub({
   return (
     <AcquisitionLockProvider>
     <SwapKeepProvider key={`tv:${view.tmdbId}:${storageId ?? ""}`}>
-    {view.acquiring ? <AcquiringPoller /> : null}
+    {view.acquiring ? <AcquiringPoller storageId={storageId} /> : null}
     <section className="title-hub title-hub-immersive">
       {/* Backdrop clipped to hub-hero only — seasons stay on plain page bg. */}
       <div className="hub-hero">
@@ -344,7 +344,7 @@ function MovieHub({
   return (
     <AcquisitionLockProvider>
     <SwapKeepProvider key={`movie:${view.tmdbId}:${storageId ?? ""}`}>
-      {view.acquiring ? <AcquiringPoller /> : null}
+      {view.acquiring ? <AcquiringPoller storageId={storageId} /> : null}
       <section className="title-hub title-hub-immersive">
         {/* Backdrop lives inside hub-hero only — must NOT cover synopsis body. */}
         <div className="hub-hero">
@@ -381,6 +381,7 @@ function MovieHub({
                   <RequestTrackButton
                     candidateId={movieCandidateId}
                     tmdbId={view.tmdbId}
+                    mediaType="movie"
                     actionState={unreleased ? "can_reserve" : "can_request"}
                     label={unreleased ? "预定" : "获取"}
                     storageId={storageId}

@@ -428,7 +428,8 @@ export class PostgresLibraryStore implements LibraryStore {
 
   constructor(private readonly pool: Pool) {}
 
-  private ensureSchema(): Promise<void> {
+  /** Prepare the native import/binding tables before dependent library services start. */
+  ensureSchema(): Promise<void> {
     if (!this.schemaReady) {
       this.schemaReady = this.initializeSchema().catch((error: unknown) => {
         this.schemaReady = undefined;

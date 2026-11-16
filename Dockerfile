@@ -62,7 +62,10 @@ RUN npm config set registry "$NPM_REGISTRY" && npm ci
 # unreliable. Passed per commit by scripts/deploy.sh (build.args → ${GIT_SHA}); an
 # unset value defaults to "unknown".
 ARG GIT_SHA=unknown
-RUN echo "media-track build commit: ${GIT_SHA}" && echo "${GIT_SHA}" > /app/BUILD_COMMIT
+ARG VERSION=dev
+RUN echo "media-track build commit: ${GIT_SHA}" \
+ && echo "${GIT_SHA}" > /app/BUILD_COMMIT \
+ && echo "${VERSION}" > /app/BUILD_VERSION
 COPY . .
 # build:web = build:workflow (tsc) + next build apps/web (output: standalone).
 # allowedOrigins is baked here — change it ⇒ rebuild (docker compose up -d --build).
@@ -76,6 +79,13 @@ ARG DOCKER_MIRROR
 ARG NODE_IMAGE=node:22-slim
 FROM ${DOCKER_MIRROR:+${DOCKER_MIRROR}/library/}${NODE_IMAGE} AS runner
 WORKDIR /app
+ARG GIT_SHA=unknown
+ARG VERSION=dev
+LABEL org.opencontainers.image.title="巡影" \
+      org.opencontainers.image.description="media-track Fork: Next.js web + in-process worker, linux/amd64" \
+      org.opencontainers.image.source="https://github.com/pickarm/mediary-scout" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.version="${VERSION}"
 ENV NODE_ENV=production
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
@@ -96,5 +106,6 @@ COPY --from=builder /app/scripts/reset-password.mjs ./scripts/reset-password.mjs
 # `git rev-parse HEAD` does NOT (a stale image can outlive a pulled HEAD). scripts/deploy.sh
 # compares the two and fails loudly on mismatch, so a silent rollback can't slip through.
 COPY --from=builder /app/BUILD_COMMIT ./BUILD_COMMIT
+COPY --from=builder /app/BUILD_VERSION ./BUILD_VERSION
 EXPOSE 3000
 CMD ["node", "apps/web/server.js"]
