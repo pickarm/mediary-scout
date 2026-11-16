@@ -31,6 +31,7 @@
 - F14b独立审核补出P1：原生光鸭failed尝试可能带已落盘的部分ID，recordMaterialized未检查status仍会命名并记verified；隔离探针已复现。退原作者加入口成功状态guard及一项行为回归，前述全仓绿仅代表修复前候选，不能代替此边界的通过证据。旧专审23专项通过且确认锁内/原sandbox/多盘scope；新上下文接续最小复核，避免长历史扩散。
 - F14b最小修复交付：入口增加`attempt.status !== "succeeded"`短路，新增failed+partial IDs保持原名、无journal且原结果返回的回归；只改实现与已有测试两文件。修后作者24专项、完整根/Web类型和lint通过；主代理Linux复核命名24+F14a runtime5共29项、workflow构建真实exit0。独立最终复审待完成，全量基线与这次增量证据分开记录。
 - F14b最终独立审核通过：修复probe1、24专项、F14a runtime5、完整根/Web类型及全仓lint通过，源码hash前后相同；接续旧专审F07b写锁/多盘scope/PG恢复静态证据。没有遗留可复现P0/P1/P2；真实盘与真实网络超时不在本轮范围。至此本轮功能代码均经独立审核，进入审核提交的镜像归档验收。
+- 镜像最终隔离验收通过：仅从审核提交f3e8a54的git archive构建`xunying-fork:local-20261116`，实际linux/amd64，构建内workflow/Web及65路由完成；BUILD_COMMIT/OCI revision一致。独立随机PG库、rehearsal1/worker0/fake三适配启动，health/光鸭SVG/管理页/媒体分页/活动摘要5项HTTP检查全部200，摘要为空集合符合隔离数据。容器与专用数据库已清理，镜像本地保留；未push/发布/真实盘操作。npm ci沿既有lock报告25审计项，未自动升级，记录为正式发行前核查项。
 
 ## 已提交功能
 | 功能 | 审查发现 | 处理与证据 |
