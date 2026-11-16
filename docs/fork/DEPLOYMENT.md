@@ -1,6 +1,6 @@
 # Fork 镜像部署与验证
 
-状态：代码及本地amd64镜像隔离验收完成，尚未发布DockerHub。NAS部署需等待完成发布门槛的正式版本。此次本地镜像来自审核提交`f3e8a54`，详情见[交付记录](DELIVERY-20261116.md)。
+状态：代码及amd64镜像隔离验收完成。用户于2026-11-16另行要求发布当前镜像，现已发布[Docker Hub](https://hub.docker.com/r/qicket/mediary-scout/tags)的`v2026.11.16`、提交SHA标签和`latest`，均来自审核提交`f3e8a54`且摘要一致。真实网盘验证仍未完成，发布不代表生产验收；详情见[交付记录](DELIVERY-20261116.md)。
 
 ## 运行形态
 
@@ -45,4 +45,4 @@ docker compose -f docker-compose.fork.yml exec -T web cat BUILD_COMMIT
 
 发行必须包含完整类型检查（含 Web 源码与测试）、lint、workflow/Web 构建、原有回归、全部位置的 PG/Redis 集成，以及隔离镜像启动检查。镜像启动通过后才推送版本/SHA/latest 标签，三者应指向同一镜像，最后创建 Fork 正式 release。
 
-发布凭证仅在 CI Secrets 中使用。开发代理只准备配置和测试，不执行推送、发布、生产迁移或真实网盘操作。
+自动发行凭证保存在 CI Secrets。本次用户授权的本地发布由主代理将凭证通过标准输入交给Docker，使用临时Docker配置并在结束后清理。开发代理不执行发布、生产迁移或真实网盘操作。

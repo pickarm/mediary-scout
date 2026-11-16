@@ -1,5 +1,11 @@
 # 功能审查与验证记录
 
+## 2026-11-16 Docker Hub发布
+- 用户在代码与隔离验收完成后另行要求发布Docker镜像。主代理发布同一已验收镜像，没有重建或操作生产实例；真实网盘验证仍后置。
+- 公开仓库`qicket/mediary-scout`的`v2026.11.16`、`sha-f3e8a54f87a62b6d34344bab238d2b2a7c5d6edf`、`latest`均为`sha256:3f6f883e79bd9206276af53c6acdea808a30f8fae1baec317f01181d04d9d599`，包含linux/amd64。
+- 三标签匿名registry读取验证通过；空Docker配置实际拉取版本标签成功，摘要与本地验收镜像相同。临时Docker凭证配置已清理，密钥未进入Git或输出。
+- GitHub推送干运行因本机缺少认证而失败，没有改变远端分支或创建GitHub Release；这不影响本次Docker Hub拉取。
+
 ## 2026-11-16 接续验证（工作区尚在开发）
 - 用户将开发/审核模型更新为DeepSeek v4.1 Flash，high；保留单功能新上下文、文件所有权和独立审核。当前工具同时最多6个代理，超过部分排队。
 - 主代理恢复本机隔离PostgreSQL18.6、Redis和仅假数据UI预览；不访问真实生产实例或真实网盘写入。

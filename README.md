@@ -1,4 +1,4 @@
-> **pickarm Fork（开发验证中）**：首版加入光鸭已有库扫描、模板整理和性能优化。NAS 镜像部署说明见 [Fork 部署文档](docs/fork/DEPLOYMENT.md)，使用 `docker-compose.fork.yml`；下方保留的上游源码构建与桌面发行说明不作为本 Fork 的 NAS 部署入口。正式镜像尚须通过最终验收。
+> **pickarm Fork**：首版加入光鸭已有库扫描、模板整理和性能优化。Docker Hub 镜像 `qicket/mediary-scout:v2026.11.16` 已发布（linux/amd64）；真实网盘验证仍后置。NAS 部署见 [Fork 部署文档](docs/fork/DEPLOYMENT.md)，使用 `docker-compose.fork.yml`；下方保留的上游源码构建与桌面发行说明不作为本 Fork 的 NAS 部署入口。
 
 <p align="center">
   <img src="docs/images/hero.svg" alt="巡影 · Mediary Scout" width="600">
