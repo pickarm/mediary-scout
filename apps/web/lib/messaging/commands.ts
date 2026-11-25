@@ -854,7 +854,7 @@ function formatTaskSummary(task: MessagingTaskSummary): string {
     task.result && typeof task.result.text === "string" ? task.result.text.trim() : null;
   return [
     `${task.title}（${task.id}）`,
-    `状态：${status}${activity ? ` · ${activity}` : ""}`,
+    `状态：${status}${activity && activity !== status ? ` · ${activity}` : ""}`,
     task.source === "direct_transfer" ? "来源：链接直转" : "来源：搜片获取",
     ...(resultText ? [`结果：${resultText}`] : []),
     ...(error ? [`错误：${error}`] : []),

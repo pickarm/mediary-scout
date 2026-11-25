@@ -639,6 +639,7 @@ describe("MessagingCommandProcessor", () => {
     );
     expect(queryReply.text).toContain("待转存作品");
     expect(queryReply.text).toContain("状态：待转存");
+    expect(queryReply.text).not.toContain("待转存 · 待转存");
 
     const reply = await commands.handle(
       job({ id: "stop-direct-pending", text: "停止 run-direct-pending" }),

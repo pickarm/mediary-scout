@@ -133,6 +133,72 @@ describe("GuangYaStorageExecutor.transfer", () => {
     await expect(executor.getTransferStatus(attempt.receipt!)).resolves.toBe("completed");
   });
 
+  it("keeps receipt.state=running when offline magnet polling times out at status=1 (never lies completed)", async () => {
+    const client = fakeClient({
+      listTask: vi.fn(async () => [{ taskId: "task-1", status: 1, progress: 10, fileId: "" }]),
+    });
+    const executor = new GuangYaStorageExecutor({
+      client,
+      writeScopeDirectoryIds: [SCOPE],
+      taskPollMaxPolls: 2,
+      taskPollIntervalMs: 0,
+    });
+    const attempt = await executor.transfer({
+      workflowRunId: "run-1",
+      directoryId: SCOPE,
+      candidate: candidate(),
+      wholePackage: true,
+      onSubmitted: async () => {},
+    });
+    expect(attempt.status).toBe("no_target_change");
+    expect(attempt.receipt).toMatchObject({ kind: "guangya_offline", state: "running", providerTaskId: "task-1" });
+  });
+
+  it("marks receipt.state=failed and status=failed when offline magnet polling returns status=3", async () => {
+    const client = fakeClient({
+      listTask: vi.fn(async () => [{ taskId: "task-1", status: 3, progress: 0, fileId: "" }]),
+    });
+    const executor = new GuangYaStorageExecutor({
+      client,
+      writeScopeDirectoryIds: [SCOPE],
+      taskPollMaxPolls: 2,
+      taskPollIntervalMs: 0,
+    });
+    const attempt = await executor.transfer({
+      workflowRunId: "run-1",
+      directoryId: SCOPE,
+      candidate: candidate(),
+      wholePackage: true,
+      onSubmitted: async () => {},
+    });
+    expect(attempt.status).toBe("failed");
+    expect(attempt.providerMessage).toMatch(/GUANGYA_OFFLINE_FAILED/);
+    expect(attempt.receipt).toMatchObject({ kind: "guangya_offline", state: "failed", providerTaskId: "task-1" });
+  });
+
+  it("marks receipt.state=unknown (not failed/completed) when offline polling throws transiently after submit", async () => {
+    const client = fakeClient({
+      listTask: vi.fn(async () => {
+        throw new Error("ECONNRESET");
+      }),
+    });
+    const executor = new GuangYaStorageExecutor({
+      client,
+      writeScopeDirectoryIds: [SCOPE],
+      taskPollMaxPolls: 2,
+      taskPollIntervalMs: 0,
+    });
+    const attempt = await executor.transfer({
+      workflowRunId: "run-1",
+      directoryId: SCOPE,
+      candidate: candidate(),
+      wholePackage: true,
+      onSubmitted: async () => {},
+    });
+    expect(attempt.status).toBe("failed");
+    expect(attempt.receipt).toMatchObject({ kind: "guangya_offline", state: "unknown", providerTaskId: "task-1" });
+  });
+
   it("offline-downloads a magnet, requests only video subfile indexes, reports succeeded", async () => {
     const listFiles = vi
       .fn<GuangYaStorageClient["listFiles"]>()

@@ -147,6 +147,42 @@ describe("TianyiStorageExecutor.transfer", () => {
     expect(client.getBatchTaskStatus).toHaveBeenCalledWith("task-42");
   });
 
+  it("keeps receipt.state=running on poll timeout and unknown on transient error after submit", async () => {
+    const saveTimeout = vi.fn<TianyiClient["saveShare"]>(async (input) => {
+      await input.onSubmitted?.("task-timeout");
+      return { ok: false, failed: 0, timedOut: true, message: "SHARE_SAVE 轮询超时(任务未完成)" };
+    });
+    const timeoutAttempt = await makeExecutor(fakeClient({ saveShare: saveTimeout })).transfer({
+      workflowRunId: "run-to",
+      directoryId: SCOPE,
+      candidate: candidate(),
+      wholePackage: true,
+      onSubmitted: async () => {},
+    });
+    expect(timeoutAttempt.receipt).toMatchObject({
+      kind: "tianyi_share",
+      state: "running",
+      providerTaskId: "task-timeout",
+    });
+
+    const saveThrow = vi.fn<TianyiClient["saveShare"]>(async (input) => {
+      await input.onSubmitted?.("task-err");
+      throw new Error("network timeout");
+    });
+    const errAttempt = await makeExecutor(fakeClient({ saveShare: saveThrow })).transfer({
+      workflowRunId: "run-err",
+      directoryId: SCOPE,
+      candidate: candidate(),
+      wholePackage: true,
+      onSubmitted: async () => {},
+    });
+    expect(errAttempt.receipt).toMatchObject({
+      kind: "tianyi_share",
+      state: "unknown",
+      providerTaskId: "task-err",
+    });
+  });
+
   it("saves a share into the scope dir via SHARE_SAVE and diffs landed videos (succeeded)", async () => {
     let landed = false;
     const listFiles = vi.fn<TianyiClient["listFiles"]>(async () =>

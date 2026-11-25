@@ -119,11 +119,12 @@ export interface TianyiBatchEntry {
   isFolder: boolean;
 }
 
-/** SHARE_SAVE 的结果:ok=真正落盘且无文件被拦;failed=被和谐/失败文件数。 */
+/** SHARE_SAVE 的结果:ok=真正落盘且无文件被拦;failed=被和谐/失败文件数;timedOut=轮询窗结束仍未完成。 */
 export interface TianyiSaveResult {
   ok: boolean;
   failed: number;
   message: string;
+  timedOut?: boolean;
 }
 
 export interface TianyiClientOptions {
@@ -536,7 +537,7 @@ export class TianyiClient {
       }
       await this.sleepFn(intervalMs);
     }
-    return { ok: false, failed: 0, message: "SHARE_SAVE 轮询超时(任务未完成)" };
+    return { ok: false, failed: 0, timedOut: true, message: "SHARE_SAVE 轮询超时(任务未完成)" };
   }
 
   /** 冲突裁决:getConflictTaskInfo → manageBatchTask{dealWay:1(忽略)}。序列 lift 自

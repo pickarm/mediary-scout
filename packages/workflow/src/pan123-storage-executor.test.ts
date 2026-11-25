@@ -196,6 +196,52 @@ describe("Pan123StorageExecutor.transfer", () => {
     await expect(executor.getTransferStatus(attempt.receipt!)).resolves.toBe("completed");
   });
 
+  it("keeps receipt.state=unknown on transient poll error after submit and failed only on PAN123_OFFLINE_FAILED", async () => {
+    const errExecutor = makeExecutor(
+      fakeClient({
+        getOfflineTask: vi.fn<Pan123Client["getOfflineTask"]>(async () => {
+          throw new Error("temporary network error");
+        }),
+      }),
+    );
+    const errAttempt = await errExecutor.transfer({
+      workflowRunId: "run-err",
+      directoryId: SCOPE,
+      candidate: candidate({ type: "magnet" as ResourceType, providerPayload: { url: "magnet:?xt=urn:btih:1" } }),
+      wholePackage: true,
+      onSubmitted: async () => {},
+    });
+    expect(errAttempt.receipt).toMatchObject({
+      kind: "pan123_offline",
+      state: "unknown",
+      providerTaskId: "9007199254740993003",
+    });
+
+    const failedExecutor = makeExecutor(
+      fakeClient({
+        getOfflineTask: vi.fn<Pan123Client["getOfflineTask"]>(async (taskId) => ({
+          taskId,
+          name: "dead",
+          status: 1,
+          progress: 20,
+          size: 0,
+        })),
+      }),
+    );
+    const failedAttempt = await failedExecutor.transfer({
+      workflowRunId: "run-fail",
+      directoryId: SCOPE,
+      candidate: candidate({ type: "magnet" as ResourceType, providerPayload: { url: "magnet:?xt=urn:btih:2" } }),
+      wholePackage: true,
+      onSubmitted: async () => {},
+    });
+    expect(failedAttempt.receipt).toMatchObject({
+      kind: "pan123_offline",
+      state: "failed",
+      providerTaskId: "9007199254740993003",
+    });
+  });
+
   it("saves a share into the scope dir and diffs landed videos (succeeded)", async () => {
     let landed = false;
     const listFiles = vi.fn<Pan123Client["listFiles"]>(async () =>

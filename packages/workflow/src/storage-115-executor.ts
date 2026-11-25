@@ -694,15 +694,16 @@ export class Storage115Executor implements StorageExecutor {
       let remaining = this.offlineMaterializeAttempts;
       let extendedForCompletion = false;
       while (remaining > 0) {
-        if (await this.stagingTreeHasVideo(safeDirectoryId)) {
-          break; // file landed → 秒传 confirmed by the dir
-        }
+        const hasVideo = await this.stagingTreeHasVideo(safeDirectoryId);
         if (offlineInfoHash) {
           const task = await this.findOfflineTask(offlineInfoHash);
           if (task) {
             if (!offlineTaskComplete && (/成功|完成/.test(task.statusText) || task.percentDone >= 100)) offlineTaskComplete = true;
             if (task.name.trim().toLowerCase() === offlineInfoHash) nameIsInfohash = true;
           }
+        }
+        if (hasVideo) {
+          break; // file landed → 秒传 confirmed by the dir
         }
         if (offlineTaskComplete && !extendedForCompletion) {
           // One-time grace extension for a confirmed 秒传 whose listing is slow;
@@ -748,7 +749,7 @@ export class Storage115Executor implements StorageExecutor {
     const providerMessage = transferMessage(input.candidate, action, status, offlineTaskComplete, nameIsInfohash);
     const receiptState: "running" | "completed" | "failed" | "unknown" = status === "failed"
       ? "failed"
-      : providerKind === "115_share" || status === "succeeded" || offlineTaskComplete
+      : providerKind === "115_share" || offlineTaskComplete || (input.onSubmitted === undefined && status === "succeeded")
         ? "completed"
         : input.onSubmitted === undefined
           ? "unknown"

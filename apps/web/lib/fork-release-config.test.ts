@@ -72,6 +72,7 @@ describe("CI workflow", () => {
     expect(pgStep).toBeDefined();
     const run = text(pgStep?.run);
     expect(run).toContain("git ls-files '*.pg.test.ts'");
+    expect(run).toContain("'*.postgres.test.ts'");
     expect(run).toContain("--no-file-parallelism");
   });
 

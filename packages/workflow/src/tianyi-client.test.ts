@@ -407,6 +407,24 @@ describe("TianyiClient SHARE_SAVE chain", () => {
     expect(seq).toEqual(["conflict", "manage"]);
   });
 
+  it("marks timedOut=true when SHARE_SAVE polling exhausts attempts at running status", async () => {
+    const raw = (text: string) => ({ status: 200, text });
+    const fetchImpl = vi.fn<TianyiFetch>(async (url) => {
+      if (url.includes("getShareInfoByCodeV2"))
+        return raw('{"res_code":0,"shareId":123456789012345678,"fileId":924511245739356595,"shareMode":1,"needAccessCode":0}');
+      if (url.includes("listShareDir"))
+        return raw('{"res_code":0,"fileListAO":{"folderList":[],"fileList":[{"id":924511245739356595,"name":"x.mkv","size":1000000000,"md5":"M"}]}}');
+      if (url.includes("createBatchTask")) return raw('{"res_code":0,"taskId":987654321098765432}');
+      if (url.includes("checkBatchTask")) return raw('{"res_code":0,"taskStatus":1,"successedCount":0,"failedCount":0}');
+      throw new Error("unexpected " + url);
+    });
+    const c = new TianyiClient({ sessionKey: "SK", accessToken: "AT", refreshToken: "RT", fetchImpl, sleepImpl: async () => {} });
+    const r = await c.saveShare({ shareCode: "abc", accessCode: "", targetFolderId: "-11" });
+    expect(r.ok).toBe(false);
+    expect(r.timedOut).toBe(true);
+    expect(r.message).toContain("轮询超时");
+  });
+
   it("returns ok:false for an empty / dead share (no files listed)", async () => {
     const raw = (text: string) => ({ status: 200, text });
     const fetchImpl = vi.fn<TianyiFetch>(async (url) => {

@@ -121,3 +121,18 @@ F02合并后Linux PostgreSQL仓储回归：原有123项仓储契约加13项导�
 - 集成：六盘SQL eligibility遗漏参数编号导致自动整理停留planning，修复后自动整理与迁移29项PG通过。新增消息worker恢复真实queued任务、长直转期间查询/停止及不重复推送，由独立审核代理复核。
 
 以上均未连接真实平台/网盘，未访问生产实例或发布。最终检查结果统一记录在本轮交付文档，不能将过程中的首次失败写成全绿。
+
+## v1.1 最终复审、上游 #379 合并与隔离全量验收（2026-11-25）
+
+- **分支与上游同步**：在 `feature/pickarm-v1` 提交了原进行中的 `e61a7a4` 合并与 v1.1 改动（`d2627b8`，排除了本机 `.agents/`、`openspec/` 及环境配置文件），随后无冲突合入上游最新提交 `582a3b73`（#379 已通知追完的季不再按网盘重复通知，合并提交 `abd804f`）。`git patch-id` 比对确认 `#379` 全部 10 个文件（+226/-2）零遗漏合入，2 条索引未改变原生表列结构，`scripts/fork-migration-policy.json` 保持兼容，多账号隔离与 `messagingJobId` 同事务关联完好保留。
+- **审核模型与过程记录**：`AGENTS.md` 原指定的 `metapi/deepseek-v4.1-flash` 在当前环境不可用；经用户明确批准改用 `Claude Opus 5.5 High` 派发独立只读审核代理 `f21-reviewer`，期间触发第三方配额耗尽（HTTP 429），随后原地切换并继承上下文创建原生 `Gemini 4 Neon High` 审核代理 `f21-reviewer-v2` 完成全部两轮只读复审。
+- **F21 独立复审与闭环修复**：
+  - 首轮复审确认首审 `F21-S1..S10` 与 `F21-Q1..Q5`（含 `direct_pending` 查询/停止/展示链路、`#379` 合入及 `.github/workflows/docker-autobuild.yml` / `ci.yml`）均已闭环；同时在实时 `transfer()` 回执层新发现 2 项 P1 与 3 项 P2：
+    - `F21-R1` [P1]：光鸭离线磁力 `transfer()` 在 `listTask` 轮询超时（`status=1`）或失败（`status=3`）时静默返回 `receipt.state="completed"`，可能触发过早扫描。已抽出共享 `mapGuangYaTaskStatus()` 与 `pollTaskOutcome()`，修正为 `1->running`、`2->completed`、`3->failed`（写明 `GUANGYA_OFFLINE_FAILED`）、其余或提交后瞬态异常 `->unknown`，并补齐 3 项回归测试。
+    - `F21-R2` [P1]：天翼 `saveShare` 轮询超时/提交后异常及 123 离线提交后瞬态异常返回 `receipt.state="failed"` 阻断异步恢复。已为 `TianyiSaveResult` 增加 `timedOut?: boolean`，天翼和 123 在已取得任务 ID 后超时返回 `running`、瞬态异常返回 `unknown`，仅提交前失败或明确终态失败写 `failed`，并补齐 3 份测试文件回归。
+    - P2 修复：整理 `link-runtime.ts` 为具名阶段函数（关闭 `F21-Q6` 残留）；`storage-115-executor.ts` 在带 `onSubmitted` 时以 `offlineTaskComplete` 作为 `115_offline` 完成依据（防止多文件边下边落盘误判完成）；`fork-release-config.test.ts` 补齐 `'*.postgres.test.ts'` 断言；`commands.ts` 去除 `状态：待转存 · 待转存` 重复拼接。
+  - 二轮最终复核确认：**Spec 合规通过、代码质量通过、无遗留 P0/P1/P2 问题**（复核运行 18 个定向文件 477 passed | 8 skipped、双端 `tsc` 0 错及 Node 实时探针验证）。
+- **冻结代码全量验收（本地 + 隔离 Linux 测试环境 Node 22.23.5 / PostgreSQL 18.6 / Redis 7）**：
+  - 本地 Windows：`npm run build:workflow`（5.61s）、`npm run typecheck`（7.71s）、`npm run typecheck:migration`（3.39s）、`npx tsc --noEmit --project apps/web/tsconfig.json`（3.95s）、`npm run lint`（23.02s，0 warnings）、无库 `npm run build:web`（90.11s，65/65 路由）全部退出码 0；`RUN_MESSAGING_BROWSER=1` 下本机 Chrome 运行 `messaging-settings-form.browser.test.ts` 2/2 通过（21.88s）。
+  - 隔离 Linux 测试环境（导入全部 1219 个冻结工作区文件，LF 行尾，清除 12 个容器过时文件）：`build:workflow`（7s）、`lint`（27s）、`typecheck`（9s）、`typecheck:migration`（4s）、`tsc:web`（15s）、`tsc:desktop`（1s）、`tsc:tmdb-proxy`（1s）、`tsc:scout-connect`（3s）、无库 `build:web`（104s）全部退出码 0；启用 `MEDIA_TRACK_INPROCESS_WORKER=1` 的全仓非 PG 回归 `450 files passed | 7 skipped (457)`、`5877 tests passed | 27 skipped (5904)`（跳过的 7 个文件 / 27 项全部为 `*.browser.test.ts` 开关用例）；全量串行 PG/Redis 测试（`--no-file-parallelism`，含全部 25 个 `*.pg.test.ts` / `*.postgres.test.ts` 与 `fork-migration.test.ts`）`26 files passed (26)`、`110 tests passed (110)`（含 `summary-cache.pg.test.ts` 真实 PG+Redis 8 项与 `fork-migration.test.ts` 14 项）；`repository-contract-postgres.test.ts` + `postgres-schema-init.test.ts` `2 files passed (2)`、`124 tests passed (124)`。
+- **未验证的外部项**：既有 6 个库管理 `*.browser.test.ts`（25 项，需独立预置预览服务，本次 UI 组件未改，仅在非 PG 跑中按开关跳过）；真实微信/飞书/Telegram 平台收发、真实 115/夸克/UC/123/天翼/光鸭网盘写入与配额、真实 Emby/Jellyfin/Plex/Webhook 刷新、正式生产备份切换与本轮镜像推送发布。详细交付清单见 [DELIVERY-20261125](DELIVERY-20261125.md)。

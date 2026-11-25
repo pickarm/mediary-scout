@@ -288,6 +288,52 @@ describe("Storage115Executor", () => {
     await expect(executor.getTransferStatus(attempt.receipt!)).resolves.toBe("completed");
   });
 
+  it("keeps 115_offline receipt.state=running when a partial video exists on disk before offlineTaskComplete", async () => {
+    const infoHash = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+    const api = new FakePan115Api({
+      offlineTaskList: [
+        {
+          infoHash,
+          name: "Multi.Show",
+          percentDone: 50,
+          status: 1,
+          statusText: "下载中",
+          url: "",
+        },
+      ],
+    });
+    const origAdd = api.addOfflineTask.bind(api);
+    api.addOfflineTask = async (input) => {
+      const res = await origAdd(input);
+      api.directories[input.directoryId] = [
+        { fid: "part_1", n: "Show.S01E01.mkv", s: "1000000000" },
+      ];
+      return res;
+    };
+    const executor = new Storage115Executor({
+      api,
+      offlineMaterializeAttempts: 1,
+      offlineMaterializePollMs: 0,
+      sleep: async () => {},
+    });
+    const attempt = await executor.transfer({
+      workflowRunId: "run_partial",
+      directoryId: "123",
+      candidate: candidateFixture({
+        type: "magnet",
+        providerPayload: { url: `magnet:?xt=urn:btih:${infoHash}` },
+      }),
+      wholePackage: true,
+      onSubmitted: async () => {},
+    });
+    expect(attempt.status).toBe("succeeded");
+    expect(attempt.receipt).toMatchObject({
+      kind: "115_offline",
+      state: "running",
+      infoHash,
+    });
+  });
+
   it("lists video files by media extension, not by episode wildcard", async () => {
     // A movie file has no SxxExx/第N集 code but is still a real video. Detection
     // must key off the media extension; the episode code is optional metadata.

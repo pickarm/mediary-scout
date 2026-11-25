@@ -325,6 +325,7 @@ export class Pan123StorageExecutor implements StorageExecutor {
     let providerMessage = "";
     let offlineTaskId: string | null = null;
     let offlineCompleted = false;
+    let offlineTerminalFailed = false;
     try {
       if (useOffline) {
         const offline = await this.transferOfflineMagnet({
@@ -380,6 +381,7 @@ export class Pan123StorageExecutor implements StorageExecutor {
       // Any other failure (dead magnet / dead share / bad params) is a FAILED
       // attempt with a loud message; the agent moves to the next candidate.
       providerMessage = error instanceof Error ? error.message : String(error);
+      offlineTerminalFailed = providerMessage.startsWith("PAN123_OFFLINE_FAILED");
     }
 
     let materializedFileIds: string[] = [];
@@ -413,6 +415,13 @@ export class Pan123StorageExecutor implements StorageExecutor {
     const emptyHint = useOffline
       ? "离线任务完成但目标目录未出现新视频"
       : "转存完成但目标目录未出现新视频";
+    const receiptState: "running" | "completed" | "failed" | "unknown" = providerMessage
+      ? useOffline && offlineTaskId !== null && !offlineTerminalFailed
+        ? "unknown"
+        : "failed"
+      : useOffline
+        ? offlineCompleted ? "completed" : "running"
+        : "completed";
     const attempt: TransferAttempt = {
       id: `${input.workflowRunId}_transfer_${this.nextTransferNumber}`,
       workflowRunId: input.workflowRunId,
@@ -422,11 +431,7 @@ export class Pan123StorageExecutor implements StorageExecutor {
       materializedFileIds,
       receipt: {
         kind: useOffline ? "pan123_offline" : "pan123_share",
-        state: providerMessage
-          ? "failed"
-          : useOffline
-            ? offlineCompleted ? "completed" : "running"
-            : "completed",
+        state: receiptState,
         ...(offlineTaskId === null ? {} : { providerTaskId: offlineTaskId }),
         submittedAt: new Date().toISOString(),
       },

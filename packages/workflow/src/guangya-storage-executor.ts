@@ -256,6 +256,7 @@ export class GuangYaStorageExecutor implements StorageExecutor {
 
     let providerMessage = "";
     let acceptedOfflineTaskId: string | null = null;
+    let offlineState: "running" | "completed" | "failed" | "unknown" = "failed";
     try {
       const resolved = await this.client.resolveRes(url);
       const subs = flattenBtSubfiles(resolved.btResInfo?.subfiles ?? []);
@@ -282,6 +283,7 @@ export class GuangYaStorageExecutor implements StorageExecutor {
       }
       const taskId = await this.client.createTask(taskInput);
       acceptedOfflineTaskId = taskId;
+      offlineState = "unknown";
       await notifyTransferSubmitted(input.onSubmitted, {
         kind: "guangya_offline",
         state: "running",
@@ -289,7 +291,12 @@ export class GuangYaStorageExecutor implements StorageExecutor {
         ...(resolved.btResInfo?.infoHash ? { infoHash: resolved.btResInfo.infoHash } : {}),
         submittedAt: new Date().toISOString(),
       });
-      await this.pollTask(taskId);
+      offlineState = (
+        await this.pollTaskOutcome(taskId, this.taskPollMaxPolls, this.taskPollIntervalMs)
+      ).status;
+      if (offlineState === "failed") {
+        providerMessage = `GUANGYA_OFFLINE_FAILED: 离线任务失败(taskId=${taskId}, status=3)`;
+      }
     } catch (error) {
       if (isTransferSubmissionPersistenceError(error)) {
         throw error;
@@ -301,6 +308,7 @@ export class GuangYaStorageExecutor implements StorageExecutor {
       // Any other failure (dead/expired magnet, bad params) is a FAILED attempt
       // with a loud message; the agent moves to the next candidate.
       providerMessage = error instanceof Error ? error.message : String(error);
+      offlineState = acceptedOfflineTaskId === null ? "failed" : "unknown";
     }
 
     const after = await this.listVideoFiles(safe);
@@ -310,19 +318,23 @@ export class GuangYaStorageExecutor implements StorageExecutor {
       : materializedFileIds.length > 0
         ? "succeeded"
         : "no_target_change";
+    const noVideoHint =
+      offlineState === "running"
+        ? "离线任务仍在运行，等待网盘完成"
+        : offlineState === "unknown"
+          ? "离线任务状态未确认，待核实"
+          : "离线任务完成但目标目录未出现新视频";
 
     const attempt: TransferAttempt = {
       id: `${input.workflowRunId}_transfer_${this.nextTransferNumber}`,
       workflowRunId: input.workflowRunId,
       candidateId: input.candidate.id,
       status,
-      providerMessage:
-        providerMessage ||
-        (status === "no_target_change" ? "离线任务完成但目标目录未出现新视频" : ""),
+      providerMessage: providerMessage || (status === "no_target_change" ? noVideoHint : ""),
       materializedFileIds,
       receipt: {
         kind: "guangya_offline",
-        state: providerMessage ? "failed" : "completed",
+        state: offlineState,
         ...(acceptedOfflineTaskId === null ? {} : { providerTaskId: acceptedOfflineTaskId }),
         submittedAt: new Date().toISOString(),
       },
@@ -340,24 +352,12 @@ export class GuangYaStorageExecutor implements StorageExecutor {
     if (kind === "guangya_share") {
       if (!this.client.getTaskStatus) return "unknown";
       const { status } = await this.client.getTaskStatus(taskId);
-      return status === 2
-        ? "completed"
-        : status === 1
-          ? "running"
-          : status === 3
-            ? "failed"
-            : "unknown";
+      return mapGuangYaTaskStatus(status);
     }
     if (kind !== "guangya_offline") return "unknown";
     const [task] = await this.client.listTask([taskId]);
     if (!task) return "unknown";
-    return task.status === 2
-      ? "completed"
-      : task.status === 1
-        ? "running"
-      : task.status === 3
-          ? "failed"
-          : "unknown";
+    return mapGuangYaTaskStatus(task.status);
   }
 
   /** 光鸭分享链 → our directory: token → list the share root → restore EVERY root
@@ -782,25 +782,33 @@ export class GuangYaStorageExecutor implements StorageExecutor {
    *  transfer() diffs listVideoFiles before/after, transferSubtitleUrl verifies the
    *  returned fileId is present in the target directory. */
   private async pollTaskForFileId(taskId: string, maxPolls: number, intervalMs: number): Promise<string> {
+    return (await this.pollTaskOutcome(taskId, maxPolls, intervalMs)).fileId;
+  }
+
+  private async pollTaskOutcome(
+    taskId: string,
+    maxPolls: number,
+    intervalMs: number,
+  ): Promise<{ fileId: string; status: "running" | "completed" | "failed" | "unknown" }> {
+    let lastObserved: "running" | "completed" | "failed" | "unknown" = "unknown";
     for (let i = 0; i < maxPolls; i++) {
       const tasks = await this.client.listTask([taskId]);
       const t = tasks.find((x) => x.taskId === taskId);
       if (!t) {
-        return "";
+        return { fileId: "", status: lastObserved };
       }
+      lastObserved = mapGuangYaTaskStatus(t.status);
       if (t.fileId !== "" && t.fileId !== "0") {
-        return t.fileId;
+        return { fileId: t.fileId, status: lastObserved };
       }
       if (t.status >= 2) {
-        return "";
+        return { fileId: "", status: lastObserved };
       }
-      await new Promise((r) => setTimeout(r, intervalMs));
+      if (i + 1 < maxPolls && intervalMs > 0) {
+        await new Promise((r) => setTimeout(r, intervalMs));
+      }
     }
-    return "";
-  }
-
-  private async pollTask(taskId: string): Promise<void> {
-    await this.pollTaskForFileId(taskId, this.taskPollMaxPolls, this.taskPollIntervalMs);
+    return { fileId: "", status: lastObserved };
   }
 
   private async directoryContainsLargeVideo(directoryId: string): Promise<boolean> {
@@ -1025,4 +1033,14 @@ function numberValue(value: unknown): number {
     return Number.isFinite(parsed) ? parsed : 0;
   }
   return 0;
+}
+
+function mapGuangYaTaskStatus(status: number): "running" | "completed" | "failed" | "unknown" {
+  return status === 2
+    ? "completed"
+    : status === 1
+      ? "running"
+      : status === 3
+        ? "failed"
+        : "unknown";
 }

@@ -196,6 +196,7 @@ export class TianyiStorageExecutor implements StorageExecutor {
 
     let providerMessage = "";
     let taskId: string | null = null;
+    let receiptState: "running" | "completed" | "failed" | "unknown" = "failed";
     try {
       const parsed = parseTianyiShareUrl(url);
       if (!parsed) {
@@ -224,6 +225,9 @@ export class TianyiStorageExecutor implements StorageExecutor {
         // ok:false with an EMPTY message must never be reclassified as
         // success/no_target_change — fall back to a loud generic reason.
         providerMessage = result.message || "SHARE_SAVE failed(provider 未给原因)"; // failedCount>0 (和谐) / dead share / poll timeout
+        receiptState = result.timedOut === true && taskId !== null ? "running" : "failed";
+      } else {
+        receiptState = "completed";
       }
     } catch (error) {
       if (isTransferSubmissionPersistenceError(error)) {
@@ -236,6 +240,7 @@ export class TianyiStorageExecutor implements StorageExecutor {
       // Any other failure (dead/expired share, bad params) is a FAILED attempt
       // with a loud message; the agent moves to the next candidate.
       providerMessage = error instanceof Error ? error.message : String(error);
+      receiptState = taskId === null ? "failed" : "unknown";
     }
 
     const after = await this.listVideoFiles(safe);
@@ -257,7 +262,7 @@ export class TianyiStorageExecutor implements StorageExecutor {
       materializedFileIds,
       receipt: {
         kind: "tianyi_share",
-        state: providerMessage ? "failed" : "completed",
+        state: receiptState,
         ...(taskId === null ? {} : { providerTaskId: taskId }),
         submittedAt: new Date().toISOString(),
       },

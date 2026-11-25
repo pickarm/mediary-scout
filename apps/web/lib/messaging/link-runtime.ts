@@ -5,97 +5,169 @@ import { getAccountScopedSettings, getLibraryStorageExecutor, getWorkerStoragePa
 import { getLibraryPool, getLibraryServices } from "../library-runtime";
 import { getLibraryIdentificationService } from "../library-identification-runtime";
 import { getLibraryOrganizationService } from "../library-organization-runtime";
-import type { LinkImportDependencies, LinkIdentityFact, LinkScanInput, LinkScanResult } from "./link-import";
+import type {
+  LinkImportDependencies,
+  LinkIdentityFact,
+  LinkOrganizationInput,
+  LinkOrganizationResult,
+  LinkPreparedLanding,
+  LinkRefreshInput,
+  LinkScanInput,
+  LinkScanResult,
+  LinkStorageOption,
+  LinkTransferInput,
+  LinkTransferReconcileInput,
+  LinkTransferReconcileResult,
+  LinkTransferResult,
+} from "./link-import";
 import type { PostgresMessagingStore } from "./store";
 
 /** Thin production bindings to the original transfer, scan/import and organizer. */
 export function createLinkImportDependencies(store: PostgresMessagingStore): LinkImportDependencies {
   return {
     store,
-    listStorages: async (accountId) => (await getWorkflowRepository().listConnectedStorages(accountId))
-      .filter((s) => s.status === "active" && isRegisteredStorageProvider(s.provider))
-      .map((s) => ({ id: s.id, label: s.label ?? s.provider, provider: s.provider as "pan115" | "quark" | "uc" | "pan123" | "tianyi" | "guangya" })),
-    prepareLanding: async (input) => {
-      assertWritable();
-      const parents = await getWorkerStorageParents(input.accountId, input.storage.id, { strictId: true });
-      const storage = await getLibraryStorageExecutor(input.accountId, input.storage.id);
-      const name = `消息转存-${input.jobId}`;
-      const directoryId = await withStorageWriteTask([storage], () => findOrCreate(storage, parents.movies, name));
-      return { directoryId, name };
-    },
-    submitTransfer: async (input) => {
-      assertWritable();
-      const storage = await landingExecutor(input.accountId, input.storage.id, input.storage.provider, input.landingDirectoryId, input.workflowRunId);
-      const attempt = await withStorageWriteTask([storage], () => storage.transfer({
-        workflowRunId: input.workflowRunId, directoryId: input.landingDirectoryId,
-        candidate: input.candidate, wholePackage: true, onSubmitted: input.onSubmitted,
-      }));
-      return { status: attempt.status, providerMessage: attempt.providerMessage, receipt: attempt.receipt ?? {}, materializedFileIds: attempt.materializedFileIds };
-    },
-    reconcileTransfer: async (input) => {
-      const storage = await getLibraryStorageExecutor(input.accountId, input.storage.id);
-      // The message row wraps the provider receipt; restore its original discriminator.
-      const receipt: Record<string, unknown> = { ...input.receipt, ...(typeof input.receipt.providerKind === "string" ? { kind: input.receipt.providerKind } : {}) };
-      const status = receipt.state === "completed" ? "completed" : await storage.getTransferStatus?.(receipt) ?? "unknown";
-      return {
-        status: status === "completed" ? "succeeded" : status === "running" ? "pending" : status,
-        providerMessage: status === "unknown" ? "提交结果待核实" : status === "completed" ? "远端任务已完成" : "远端任务尚未完成",
-        receipt: { ...receipt, state: status }, materializedFileIds: [],
-      };
-    },
+    listStorages: listActiveLinkStorages,
+    prepareLanding: prepareDirectLanding,
+    submitTransfer: submitDirectTransfer,
+    reconcileTransfer: reconcileDirectTransfer,
     scanAndIdentify: (input) => scanAndIdentify(store, input),
-    organize: async (input) => {
-      assertWritable();
-      const service = await getLibraryOrganizationService(input.accountId, input.storage.id);
-      const verified = new Set<string>();
-      const keys: string[] = [];
-      const skippedReasons = new Set<string>();
-      let partial = false;
-      // Each batch uses the existing bounded preview and persisted operation journal.
-      for (let offset = 0; offset < input.videos.length; offset += 20) {
-        if (await stopRequested(store, input.workflowRunId, input.accountId)) { partial = true; break; }
-        const videos = input.videos.slice(offset, offset + 20);
-        let plan = await service.preview(input.scanTaskId, { fileIds: videos.map((f) => f.providerFileId), limit: 20 });
-        keys.push(plan.operationKey);
-        if (plan.status !== "completed" && plan.status !== "failed") {
-          await service.store.requestExecution(service.scope, input.scanTaskId, plan.operationKey, new Date().toISOString());
-          while (plan.status !== "completed" && plan.status !== "failed") {
-            if (await stopRequested(store, input.workflowRunId, input.accountId)) {
-              await service.store.pause(service.scope, input.scanTaskId, plan.operationKey, new Date().toISOString());
-              partial = true; break;
-            }
-            plan = await service.executeSlice(input.scanTaskId, plan.operationKey);
-            if (plan.status === "paused") { partial = true; break; }
-          }
-        }
-        const videoIds = new Set(videos.map((f) => f.providerFileId));
-        for (const op of plan.operations) {
-          if (op.status === "verified" && videoIds.has(op.fileId) && (op.originalParentId !== op.targetParentId || op.originalName !== op.targetName)) verified.add(op.fileId);
-        }
-        for (const skipped of plan.skippedFiles) {
-          const reason = skipped.reason.trim();
-          if (reason) skippedReasons.add(reason);
-        }
-        if (plan.status !== "completed" || plan.skippedFiles.length > 0) partial = true;
-      }
-      const providerMessage = partial
-        ? skippedReasons.size > 0
-          ? `部分文件跳过（${[...skippedReasons].slice(0, 3).join("；")}），可在媒体库中查看整理记录`
-          : "部分文件待确认，可在媒体库中查看整理记录"
-        : "视频和配对字幕已核实整理";
-      return { organizationKey: keys.join(","), status: partial ? "partial" : "completed", verifiedNewVideoFileIds: [...verified], providerMessage };
-    },
-    refresh: async (input) => {
-      if (!input.verifiedNewVideoFileIds.length) return;
-      const items = await landedMediaItems(input.accountId, input.storage.id, input.storage.label, input.verifiedNewVideoFileIds);
-      if (!items.length) return;
-      const result = await refreshConfiguredMediaServers({
-        repository: getAccountScopedSettings(input.accountId),
-        items,
-      });
-      if (result.failures.length) throw new Error(result.failures.map((f) => `${f.server}: ${f.error}`).join("；"));
-    },
+    organize: (input) => organizeDirectLanding(store, input),
+    refresh: refreshLandedMedia,
   };
+}
+
+async function listActiveLinkStorages(accountId: string): Promise<readonly LinkStorageOption[]> {
+  return (await getWorkflowRepository().listConnectedStorages(accountId))
+    .filter((s) => s.status === "active" && isRegisteredStorageProvider(s.provider))
+    .map((s) => ({
+      id: s.id,
+      label: s.label ?? s.provider,
+      provider: s.provider as "pan115" | "quark" | "uc" | "pan123" | "tianyi" | "guangya",
+    }));
+}
+
+async function prepareDirectLanding(
+  input: Parameters<LinkImportDependencies["prepareLanding"]>[0],
+): Promise<LinkPreparedLanding> {
+  assertWritable();
+  const parents = await getWorkerStorageParents(input.accountId, input.storage.id, { strictId: true });
+  const storage = await getLibraryStorageExecutor(input.accountId, input.storage.id);
+  const name = `消息转存-${input.jobId}`;
+  const directoryId = await withStorageWriteTask([storage], () => findOrCreate(storage, parents.movies, name));
+  return { directoryId, name };
+}
+
+async function submitDirectTransfer(input: LinkTransferInput): Promise<LinkTransferResult> {
+  assertWritable();
+  const storage = await landingExecutor(
+    input.accountId,
+    input.storage.id,
+    input.storage.provider,
+    input.landingDirectoryId,
+    input.workflowRunId,
+  );
+  const attempt = await withStorageWriteTask([storage], () =>
+    storage.transfer({
+      workflowRunId: input.workflowRunId,
+      directoryId: input.landingDirectoryId,
+      candidate: input.candidate,
+      wholePackage: true,
+      onSubmitted: input.onSubmitted,
+    }),
+  );
+  return {
+    status: attempt.status,
+    providerMessage: attempt.providerMessage,
+    receipt: attempt.receipt ?? {},
+    materializedFileIds: attempt.materializedFileIds,
+  };
+}
+
+async function reconcileDirectTransfer(input: LinkTransferReconcileInput): Promise<LinkTransferReconcileResult> {
+  const storage = await getLibraryStorageExecutor(input.accountId, input.storage.id);
+  // The message row wraps the provider receipt; restore its original discriminator.
+  const receipt: Record<string, unknown> = {
+    ...input.receipt,
+    ...(typeof input.receipt.providerKind === "string" ? { kind: input.receipt.providerKind } : {}),
+  };
+  const status = receipt.state === "completed" ? "completed" : await storage.getTransferStatus?.(receipt) ?? "unknown";
+  return {
+    status: status === "completed" ? "succeeded" : status === "running" ? "pending" : status,
+    providerMessage: status === "unknown" ? "提交结果待核实" : status === "completed" ? "远端任务已完成" : "远端任务尚未完成",
+    receipt: { ...receipt, state: status },
+    materializedFileIds: [],
+  };
+}
+
+async function organizeDirectLanding(store: PostgresMessagingStore, input: LinkOrganizationInput): Promise<LinkOrganizationResult> {
+  assertWritable();
+  const service = await getLibraryOrganizationService(input.accountId, input.storage.id);
+  const verified = new Set<string>();
+  const keys: string[] = [];
+  const skippedReasons = new Set<string>();
+  let partial = false;
+  // Each batch uses the existing bounded preview and persisted operation journal.
+  for (let offset = 0; offset < input.videos.length; offset += 20) {
+    if (await stopRequested(store, input.workflowRunId, input.accountId)) {
+      partial = true;
+      break;
+    }
+    const videos = input.videos.slice(offset, offset + 20);
+    let plan = await service.preview(input.scanTaskId, { fileIds: videos.map((f) => f.providerFileId), limit: 20 });
+    keys.push(plan.operationKey);
+    if (plan.status !== "completed" && plan.status !== "failed") {
+      await service.store.requestExecution(service.scope, input.scanTaskId, plan.operationKey, new Date().toISOString());
+      while (plan.status !== "completed" && plan.status !== "failed") {
+        if (await stopRequested(store, input.workflowRunId, input.accountId)) {
+          await service.store.pause(service.scope, input.scanTaskId, plan.operationKey, new Date().toISOString());
+          partial = true;
+          break;
+        }
+        plan = await service.executeSlice(input.scanTaskId, plan.operationKey);
+        if (plan.status === "paused") {
+          partial = true;
+          break;
+        }
+      }
+    }
+    const videoIds = new Set(videos.map((f) => f.providerFileId));
+    for (const op of plan.operations) {
+      if (
+        op.status === "verified" &&
+        videoIds.has(op.fileId) &&
+        (op.originalParentId !== op.targetParentId || op.originalName !== op.targetName)
+      ) {
+        verified.add(op.fileId);
+      }
+    }
+    for (const skipped of plan.skippedFiles) {
+      const reason = skipped.reason.trim();
+      if (reason) skippedReasons.add(reason);
+    }
+    if (plan.status !== "completed" || plan.skippedFiles.length > 0) partial = true;
+  }
+  const providerMessage = partial
+    ? skippedReasons.size > 0
+      ? `部分文件跳过（${[...skippedReasons].slice(0, 3).join("；")}），可在媒体库中查看整理记录`
+      : "部分文件待确认，可在媒体库中查看整理记录"
+    : "视频和配对字幕已核实整理";
+  return {
+    organizationKey: keys.join(","),
+    status: partial ? "partial" : "completed",
+    verifiedNewVideoFileIds: [...verified],
+    providerMessage,
+  };
+}
+
+async function refreshLandedMedia(input: LinkRefreshInput): Promise<void> {
+  if (!input.verifiedNewVideoFileIds.length) return;
+  const items = await landedMediaItems(input.accountId, input.storage.id, input.storage.label, input.verifiedNewVideoFileIds);
+  if (!items.length) return;
+  const result = await refreshConfiguredMediaServers({
+    repository: getAccountScopedSettings(input.accountId),
+    items,
+  });
+  if (result.failures.length) throw new Error(result.failures.map((f) => `${f.server}: ${f.error}`).join("；"));
 }
 
 function assertWritable(): void {

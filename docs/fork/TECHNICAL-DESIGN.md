@@ -2,7 +2,7 @@
 
 ## v1.1集成契约
 
-- 同步目标e61a7a4；当前分支feature/pickarm-v1，合并保持未提交，未获授权不commit/push。保留上游与Fork导出；关键回归后再开发新增功能。
+- 已将 `e61a7a4`（`d2627b8`）与上游 `#379`（`582a3b73` -> `abd804f`）合入 `feature/pickarm-v1`；本轮新增修复与文档更新保留于工作区待授权提交，未经授权不 `push`、不切/合 `main`。保留上游与 Fork 导出；`#379` 的 `hasSeasonCompletionNotification` 及两张表索引保留 `account_id` 隔离，未改变迁移表列指纹。
 - 偏好单一解析器区分inherit/unlimited/text：账号own row非null时包括空串都保留，否则读全局；只有inherit读取旧high/medium。API high/medium映射新预设，any/空串清空，4K/null/未知值仍拒绝；字段省略不变，同时提供合法新旧值时新值优先。
 - 平台适配器统一使用apps/web/lib/messaging/types.ts的MessagingConnection、InboundMessage、MessageReply、MessagingSink及MessagingTransport。仅协议收发，账号来自已保存连接，不从聊天文本获取。连接配置沿用account_settings；connectionId在凭证刷新时保持稳定，bot更换才新建。
 - MessagingSink.accept(messages,cursor)必须在同一个PG事务中保存原消息及接收游标，然后才ACK/继续拉取。新增messaging_jobs唯一(connection_id,platform_message_id)，保存账号、会话、输入、阶段、候选、workflow/scan/organization关联、独立落地区、provider回执与结果。候选确认以CAS进入排队，并在原reserveWorkflowRun事务内关联消息任务，命中已有run也关联。
