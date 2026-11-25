@@ -28,7 +28,7 @@ export async function POST(request: NextRequest): Promise<Response> {
     if (Object.keys(body).some((key) => !allowed.has(key))) throw new LibraryApiError(400, "配置包含不支持的字段。");
     const storageId = requireString(body.storageId, "网盘");
     const scope = { accountId, connectedStorageId: storageId };
-    const { scanStore, client } = await getLibraryServices(scope);
+    const { scanStore, reader } = await getLibraryServices(scope);
     const configId = body.configId === undefined ? crypto.randomUUID() : requireString(body.configId, "配置 ID", 100);
     const previous = await scanStore.getConfiguration(scope, configId);
     if (!Array.isArray(body.sourceRoots) || body.sourceRoots.length < 1 || body.sourceRoots.length > 20) throw new LibraryApiError(400, "来源目录需选择 1 到 20 个。");
@@ -45,10 +45,8 @@ export async function POST(request: NextRequest): Promise<Response> {
       if (typeof token !== "string") throw new LibraryApiError(400, "请从目录选择器重新选择来源目录。");
       const ticket = verifyDirectorySelectionTicket(token, scope);
       if (!ticket || ticket.directoryId !== directoryId) throw new LibraryApiError(400, "目录选择已过期或无效，请重新选择。");
-      const parentPage = await client.listFilesPage(ticket.parentId, ticket.page, 200);
-      const match = parentPage.items.find((item) => item.fileId === directoryId && item.resType === 2 && item.fileName === ticket.name);
-      if (!match) throw new LibraryApiError(400, "所选目录已不存在或不属于所选上级目录。");
-      roots.push({ directoryId, name: match.fileName });
+      const match = await verifyTicketDirectory(reader, ticket, directoryId);
+      roots.push({ directoryId, name: match.name });
     }
     const mediaKind = body.mediaKind;
     if (typeof mediaKind !== "string" || !kinds.has(mediaKind as ScanMediaKind)) throw new LibraryApiError(400, "媒体类型无效。");
@@ -59,10 +57,8 @@ export async function POST(request: NextRequest): Promise<Response> {
       if (typeof selectionToken !== "string") throw new LibraryApiError(400, "请从目录选择器重新选择目标目录。");
       const ticket = verifyDirectorySelectionTicket(selectionToken, scope);
       if (!ticket || ticket.directoryId !== directoryId) throw new LibraryApiError(400, "目录选择已过期或无效，请重新选择。");
-      const parentPage = await client.listFilesPage(ticket.parentId, ticket.page, 200);
-      const match = parentPage.items.find((item) => item.fileId === directoryId && item.resType === 2 && item.fileName === ticket.name);
-      if (!match) throw new LibraryApiError(400, "所选目标目录已不存在或不属于所选上级目录。");
-      return { directoryId, name: match.fileName };
+      const match = await verifyTicketDirectory(reader, ticket, directoryId);
+      return { directoryId, name: match.name };
     };
     const movieTarget = await target(body.movieTargetDirectoryId, body.movieTargetSelectionToken, previous?.movieTargetDirectoryId ?? null, previous?.movieTargetDirectoryName, "电影目标目录");
     const tvTarget = await target(body.tvTargetDirectoryId, body.tvTargetSelectionToken, previous?.tvTargetDirectoryId ?? null, previous?.tvTargetDirectoryName, "剧集目标目录");
@@ -96,4 +92,21 @@ export async function POST(request: NextRequest): Promise<Response> {
     await scanStore.saveConfiguration(configuration);
     return Response.json({ item: configuration }, { status: 201 });
   } catch (error) { return apiErrorResponse(error); }
+}
+
+async function verifyTicketDirectory(
+  reader: Awaited<ReturnType<typeof getLibraryServices>>["reader"],
+  ticket: NonNullable<ReturnType<typeof verifyDirectorySelectionTicket>>,
+  directoryId: string,
+) {
+  const parentPage = await reader.listPage({
+    directoryId: ticket.parentId,
+    directoryPath: "",
+    page: ticket.page,
+    pageSize: 200,
+    ...(ticket.cursor === undefined ? {} : { cursor: ticket.cursor }),
+  });
+  const match = parentPage.items.find((item) => item.fileId === directoryId && item.isDirectory && item.name === ticket.name);
+  if (!match) throw new LibraryApiError(400, "所选目录已不存在或不属于所选上级目录。");
+  return match;
 }

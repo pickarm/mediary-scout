@@ -8,6 +8,7 @@ import type {
 import { episodeCodeFromFileName } from "./episode-code.js";
 import { isPan115AuthError } from "./pan115-cookie-client.js";
 import type { StorageExecutor, UnparsedVideoFile } from "./ports.js";
+import { notifyTransferSubmitted } from "./transfer-receipt.js";
 
 /**
  * Depth bound for the recursive video collectors, matching listTree's default.
@@ -129,6 +130,11 @@ export interface Pan115OfflineTask {
 export interface Pan115StorageApi {
   createFolder(input: { name: string; parentId: string }): Promise<string>;
   listItems(input: { directoryId: string }): Promise<Pan115Item[]>;
+  listItemsPage?(input: {
+    directoryId: string;
+    offset: number;
+    limit: number;
+  }): Promise<{ items: Pan115Item[]; total: number }>;
   getDirectoryInfo(input: { directoryId: string }): Promise<Pan115DirectoryInfo | null>;
   receiveShare(input: {
     shareCode: string;
@@ -542,6 +548,62 @@ export class Storage115Executor implements StorageExecutor {
     return this.callApi("getSpace", () => getSpace.call(this.api));
   }
 
+  async listDirectoryPage(input: {
+    directoryId: string;
+    page: number;
+    pageSize: number;
+    cursor?: string;
+  }): Promise<{
+    items: Array<{
+      fileId: string;
+      parentId: string;
+      name: string;
+      isDirectory: boolean;
+      sizeBytes: number | null;
+    }>;
+    nextPage: number | null;
+    nextCursor?: string;
+  }> {
+    if (!this.api.listItemsPage) {
+      throw new Error("PAN115_DIRECTORY_PAGE_UNSUPPORTED");
+    }
+    const directoryId = normalizeDirectoryId(input.directoryId);
+    const cursorOffset = input.cursor === undefined ? null : Number(input.cursor);
+    if (cursorOffset !== null && (!Number.isSafeInteger(cursorOffset) || cursorOffset < 0)) {
+      throw new Error("PAN115_DIRECTORY_PAGE_CURSOR_INVALID");
+    }
+    const offset = cursorOffset ?? input.page * input.pageSize;
+    const pageResult = await this.callApi("listItems", () => {
+      const listItemsPage = this.api.listItemsPage!;
+      return listItemsPage.call(this.api, {
+        directoryId,
+        offset,
+        limit: input.pageSize,
+      });
+    });
+    const items = pageResult.items.map((item) => {
+      const fileId = fileIdFromItem(item) || directoryIdFromItem(item);
+      const name = itemName(item);
+      if (!fileId || !name) {
+        throw new Error("PAN115_DIRECTORY_PAGE_INVALID_ITEM");
+      }
+      return {
+        fileId,
+        parentId: directoryId,
+        name,
+        isDirectory: isDirectory(item),
+        sizeBytes: numberValue(item.size ?? item.s),
+      };
+    });
+    const nextOffset = offset + items.length;
+    const hasMore = items.length > 0 && nextOffset < pageResult.total;
+    return {
+      items,
+      nextPage: hasMore ? input.page + 1 : null,
+      ...(hasMore ? { nextCursor: String(nextOffset) } : {}),
+    };
+  }
+
   async createDirectory(input: { name: string; parentId: string }): Promise<string> {
     const safeParentId = await this.assertWithinWriteScope(input.parentId, "create directory");
     // Find-or-create: seasons of one title initialize at different times and
@@ -584,6 +646,8 @@ export class Storage115Executor implements StorageExecutor {
     workflowRunId: string;
     directoryId: string;
     candidate: ResourceCandidate;
+    wholePackage?: boolean;
+    onSubmitted?: (receipt: Record<string, unknown>) => Promise<void>;
   }): Promise<TransferAttempt> {
     // Fail fast ON the transfer line: the write-scope check and the before-snapshot
     // below are preparatory calls whose only purpose is the ingest call the guard is
@@ -608,6 +672,16 @@ export class Storage115Executor implements StorageExecutor {
     const offlineInfoHash = isOfflineTaskCandidate(input.candidate)
       ? infoHashFromMagnet(stringValue(input.candidate.providerPayload["url"]))
       : null;
+    const providerKind = offlineInfoHash === null ? "115_share" : "115_offline";
+    const submittedReceipt: Record<string, unknown> = {
+      kind: providerKind,
+      state: providerKind === "115_share" ? "completed" : "running",
+      submittedAt: new Date().toISOString(),
+      ...(offlineInfoHash === null ? {} : { infoHash: offlineInfoHash }),
+    };
+    if (action.ok || action.alreadyTransferred) {
+      await notifyTransferSubmitted(input.onSubmitted, submittedReceipt);
+    }
     // Did 115 report the task as a COMPLETED 秒传? Then a not-yet-listed file is
     // just a lagging directory index, NOT a failure — so we extend the grace and
     // must not cancel it (the bug the wall-clock-only window had).
@@ -658,6 +732,7 @@ export class Storage115Executor implements StorageExecutor {
       status !== "succeeded" &&
       !action.alreadyTransferred &&
       !offlineTaskComplete &&
+      input.onSubmitted === undefined &&
       isOfflineTaskCandidate(input.candidate)
     ) {
       if (offlineInfoHash) {
@@ -671,6 +746,13 @@ export class Storage115Executor implements StorageExecutor {
       }
     }
     const providerMessage = transferMessage(input.candidate, action, status, offlineTaskComplete, nameIsInfohash);
+    const receiptState: "running" | "completed" | "failed" | "unknown" = status === "failed"
+      ? "failed"
+      : providerKind === "115_share" || status === "succeeded" || offlineTaskComplete
+        ? "completed"
+        : input.onSubmitted === undefined
+          ? "unknown"
+          : "running";
 
     const attempt: TransferAttempt = {
       // Scope the id to the run: the per-executor counter resets when the worker
@@ -682,9 +764,33 @@ export class Storage115Executor implements StorageExecutor {
       status,
       providerMessage,
       materializedFileIds,
+      receipt: {
+        ...submittedReceipt,
+        state: receiptState,
+      },
     };
     this.nextTransferNumber += 1;
     return attempt;
+  }
+
+  async getTransferStatus(
+    receipt: Record<string, unknown>,
+  ): Promise<"running" | "completed" | "failed" | "unknown"> {
+    const kind = receipt["providerKind"] ?? receipt["kind"];
+    if (kind === "115_share") {
+      const state = receipt["state"];
+      return state === "running" || state === "completed" || state === "failed" || state === "unknown"
+        ? state
+        : "unknown";
+    }
+    if (kind !== "115_offline") return "unknown";
+    const infoHash = stringValue(receipt["infoHash"]).toLowerCase();
+    if (!infoHash) return "unknown";
+    const task = await this.findOfflineTask(infoHash);
+    if (!task) return "unknown";
+    if (task.status === 5 || task.status === -1) return "failed";
+    if (task.percentDone >= 100 || /成功|完成/.test(task.statusText)) return "completed";
+    return "running";
   }
 
   /** Subtitle direct-link landing, single file — delegates to the batch so there

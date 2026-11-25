@@ -3,6 +3,7 @@ import { Suspense } from "react";
 import { AppSidebar } from "../../../components/app-sidebar";
 import { LibraryManagement } from "../../../components/library-management";
 import type { SafeLibraryStorage } from "../../../components/library-scan-client";
+import { getStorageBrand, isRegisteredStorageProvider } from "@media-track/workflow";
 import { DEFAULT_NAMING_TEMPLATES } from "@media-track/workflow/library";
 import { getWorkflowRepository, requireAuthenticatedAccountId } from "../../../lib/workflow-runtime";
 
@@ -15,7 +16,7 @@ function ManageShell({ busy = false }: { busy?: boolean }) {
     <div className="app-shell">
       <AppSidebar active="library-manage" />
       <main className="main product-main" aria-busy={busy}>
-        <div className="section-heading library-heading"><div><h1>库管理</h1><p>配置光鸭媒体库扫描与查看扫描任务</p></div></div>
+        <div className="section-heading library-heading"><div><h1>库管理</h1><p>配置网盘媒体库扫描与查看扫描任务</p></div></div>
       </main>
     </div>
   );
@@ -25,19 +26,40 @@ async function ManageSurface() {
   await connection();
   const accountId = await requireAuthenticatedAccountId();
   const rows = await getWorkflowRepository().listConnectedStorages(accountId);
-  const storages: SafeLibraryStorage[] = rows
-    .filter((row) => row.provider === "guangya")
-    .map((row) => ({ id: row.id, label: row.label?.trim() || "光鸭网盘", status: row.status }));
+  const storages = libraryStorageChoices(rows);
 
   return (
     <div className="app-shell">
       <AppSidebar active="library-manage" />
       <main className="main product-main">
         <div className="section-heading library-heading">
-          <div><h1>库管理</h1><p>配置光鸭媒体库扫描与查看扫描任务</p></div>
+          <div><h1>库管理</h1><p>配置网盘媒体库扫描与查看扫描任务</p></div>
         </div>
         <LibraryManagement storages={storages} defaultTemplates={DEFAULT_NAMING_TEMPLATES} settingsHref="/settings" />
       </main>
     </div>
   );
+}
+
+interface ConnectedStorageChoiceRow {
+  id: string;
+  provider: string;
+  label: string | null;
+  status: "active" | "frozen";
+}
+
+export function libraryStorageChoices(rows: readonly ConnectedStorageChoiceRow[]): SafeLibraryStorage[] {
+  return rows
+    .filter((row): row is ConnectedStorageChoiceRow & { provider: ReturnType<typeof getStorageBrand>["provider"] } => isRegisteredStorageProvider(row.provider))
+    .map((row) => {
+      const brand = getStorageBrand(row.provider);
+      const customLabel = row.label?.trim();
+      return {
+        id: row.id,
+        provider: row.provider,
+        label: customLabel ? `${brand.label}（${customLabel}）` : brand.label,
+        status: row.status,
+        rootDirectoryId: brand.provisionRootId,
+      };
+    });
 }

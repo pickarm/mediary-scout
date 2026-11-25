@@ -272,6 +272,9 @@ export interface TransferAttempt {
   status: TransferStatus;
   providerMessage: string;
   materializedFileIds: string[];
+  /** Provider-neutral recovery facts for a transfer submitted later, including
+   *  the provider task id / hash and its latest known state. */
+  receipt?: Record<string, unknown>;
   /**
    * What became of the files this transfer materialized, counted at the end of
    * its run: kept = moved into a target dir (or landed in the movie dir) and
@@ -349,6 +352,8 @@ export interface NotificationReport {
   landingDir?: string;
   /** Short drive labels where files landed during this run (e.g. ["115"] or ["115", "123"]). */
   driveLabels?: string[];
+  /** Standing selection preference text that was active when the agent searched/picked for this run. */
+  selectionPreference?: string;
 }
 
 export interface NotificationEvent {

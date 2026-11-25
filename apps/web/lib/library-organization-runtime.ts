@@ -1,14 +1,23 @@
 import { createHash } from "node:crypto";
-import { GuangYaClient, getGuangYaAuthCoordinator, parseGuangYaUid, type ConnectedStorage } from "@media-track/workflow";
-import { buildOrganizationPlan, createGuangYaRequestScheduler, getGuangYaMinIntervalMs, getGuangYaWriteCoordinator, LibraryOrganizer, PostgresOrganizationStore, PostgresLibraryStore, createGuangYaOrganizationStorage, type OrganizationPlan, type OrganizationScope } from "@media-track/workflow/library";
+import { isRegisteredStorageProvider, parseGuangYaUid, type ConnectedStorage } from "@media-track/workflow";
+import {
+  buildOrganizationPlan,
+  createStorageOrganizationStorage,
+  getGuangYaWriteCoordinator,
+  LibraryOrganizer,
+  PostgresOrganizationStore,
+  PostgresLibraryStore,
+  type OrganizationPlan,
+  type OrganizationScope,
+  type OrganizationStorage,
+} from "@media-track/workflow/library";
 import { getLibraryPool } from "./library-runtime";
-import { getWorkflowRepository } from "./workflow-runtime";
+import { getLibraryStorageExecutor, getWorkflowRepository } from "./workflow-runtime";
 import { createGuangYaAuthHooks } from "./guangya-auth-runtime";
 import { isDemoMode } from "./demo-mode";
 
 const DEFAULT_PREVIEW_FILES = 50;
 const MAX_EXECUTE_OPERATIONS = 20;
-const services = new Map<string, {service:OrganizationRuntimeService;fingerprint:string}>();
 
 export class LibraryOrganizationRuntimeError extends Error {
   constructor(readonly code: "storage_not_found" | "storage_frozen" | "credentials_invalid" | "organization_conflict", message: string) { super(message); this.name = "LibraryOrganizationRuntimeError"; }
@@ -20,19 +29,23 @@ export interface PreviewOrganizationInput {
   limit?: number;
 }
 
+interface OrganizationRuntimeOptions {
+  storageFactory: (authorizedRoots: readonly string[]) => Promise<OrganizationStorage>;
+}
+
 export class OrganizationRuntimeService {
   readonly store: PostgresOrganizationStore;
   private readonly libraryStore: PostgresLibraryStore;
-  private readonly organizer: LibraryOrganizer;
-  private readonly storage: ReturnType<typeof createGuangYaOrganizationStorage>;
-  private readonly accountKey: string;
 
-  constructor(readonly scope: OrganizationScope, client: GuangYaClient, pool = getLibraryPool(), accountKey: string, private readonly coordinator = getGuangYaWriteCoordinator()) {
+  constructor(
+    readonly scope: OrganizationScope,
+    private readonly options: OrganizationRuntimeOptions,
+    pool = getLibraryPool(),
+    private readonly accountKey: string | null = null,
+    private readonly coordinator: ReturnType<typeof getGuangYaWriteCoordinator> | null = null,
+  ) {
     this.store = new PostgresOrganizationStore(pool);
     this.libraryStore = new PostgresLibraryStore(pool);
-    this.storage = createGuangYaOrganizationStorage(client);
-    this.organizer = new LibraryOrganizer({ store: this.store, storage: this.storage });
-    this.accountKey = accountKey;
   }
 
   async preview(taskId: string, selection: PreviewOrganizationInput = {}): Promise<OrganizationPlan> {
@@ -48,16 +61,21 @@ export class OrganizationRuntimeService {
     const operationKey = `org_${digest}`;
     const candidate=buildOrganizationPlan({...authorized,operationKey});
     if(candidate.operations.length>200) throw new LibraryOrganizationRuntimeError("organization_conflict","该批次会生成超过200个网盘操作，请缩小文件选择后重新预览。");
-    return this.organizer.plan({...authorized,operationKey});
+    const storage = await this.storageFor(authorized.sourceRoots, authorized.targetRoots);
+    return new LibraryOrganizer({ store: this.store, storage }).plan({...authorized,operationKey});
   }
 
   async executeSlice(taskId: string, operationKey: string): Promise<OrganizationPlan> {
     if (process.env.MEDIA_TRACK_REHEARSAL === "1") throw new LibraryOrganizationRuntimeError("organization_conflict","演练模式禁止真实网盘写入。");
-    return this.coordinator.run([this.accountKey], async () => {
-      await this.coordinator.assertHeld(this.accountKey);
-      const plan = await this.organizer.execute(this.scope,taskId,operationKey,{maxOperations:MAX_EXECUTE_OPERATIONS});
-      await this.coordinator.assertHeld(this.accountKey);
-      await this.syncVerifiedLocations(plan.plan);
+    return this.withWriteFence(async () => {
+      const existing = await this.store.get(this.scope, taskId, operationKey);
+      if (!existing) throw new LibraryOrganizationRuntimeError("organization_conflict","整理清单不存在。");
+      await this.store.authorizeExecution(existing);
+      const storage = await this.storageFor(existing.sourceRootIds, existing.targetRootIds);
+      const organizer = new LibraryOrganizer({ store: this.store, storage });
+      const plan = await organizer.execute(this.scope,taskId,operationKey,{maxOperations:MAX_EXECUTE_OPERATIONS});
+      await this.assertWriteFence();
+      await this.syncVerifiedLocations(plan.plan, storage);
       return (await this.store.get(this.scope,taskId,operationKey)) ?? plan.plan;
     });
   }
@@ -78,23 +96,26 @@ export class OrganizationRuntimeService {
     const keys=await this.store.listVerifiedLocationPlanKeys(this.scope,Math.min(20,Math.max(1,limit)));
     let recovered=0;
     for (const key of keys) {
-      await this.coordinator.run([this.accountKey],async()=>{
-        await this.coordinator.assertHeld(this.accountKey);
+      await this.withWriteFence(async()=>{
         const plan=await this.store.get(this.scope,key.taskId,key.operationKey);
-        if (plan) await this.syncVerifiedLocations(plan);
-        await this.coordinator.assertHeld(this.accountKey);
+        if (plan) {
+          await this.store.authorizeExecution(plan);
+          const storage = await this.storageFor(plan.sourceRootIds, plan.targetRootIds);
+          await this.syncVerifiedLocations(plan, storage);
+        }
+        await this.assertWriteFence();
       });
       recovered+=1;
     }
     return recovered;
   }
 
-  private async syncVerifiedLocations(plan: OrganizationPlan): Promise<void> {
+  private async syncVerifiedLocations(plan: OrganizationPlan, storage: OrganizationStorage): Promise<void> {
     const pending=await this.store.listVerifiedLocationsToSync(this.scope,plan.taskId,plan.operationKey,200);
     for (const operation of pending) {
-      const current=await this.storage.read(operation.fileId,[operation.parentId]);
+      const current=await storage.read(operation.fileId,[operation.parentId]);
       if (!current || current.fileId!==operation.fileId || current.parentId!==operation.parentId || current.name!==operation.name || current.isDirectory) continue;
-      const parentOfTargetDirectoryId=await this.resolveTargetDirectoryParent(operation.targetRootId,operation.relativePath,operation.parentId);
+      const parentOfTargetDirectoryId=await this.resolveTargetDirectoryParent(storage,operation.targetRootId,operation.relativePath,operation.parentId);
       await this.libraryStore.updateVerifiedOrganizationLocation({
         accountId:this.scope.accountId,connectedStorageId:this.scope.connectedStorageId,taskId:plan.taskId,
         operationKey:plan.operationKey,fileId:operation.fileId,parentDirectoryId:operation.parentId,name:operation.name,
@@ -103,12 +124,12 @@ export class OrganizationRuntimeService {
     }
   }
 
-  private async resolveTargetDirectoryParent(targetRootId:string,relativePath:string,targetParentId:string):Promise<string|undefined> {
+  private async resolveTargetDirectoryParent(storage: OrganizationStorage,targetRootId:string,relativePath:string,targetParentId:string):Promise<string|undefined> {
     const segments=relativePath.split("/").slice(0,-1);
     let parent=targetRootId;
     if (!segments.length) return undefined;
     for (const name of segments) {
-      const matches=(await this.storage.list(parent)).filter((item)=>item.name===name&&item.isDirectory&&item.parentId===parent);
+      const matches=(await storage.list(parent)).filter((item)=>item.name===name&&item.isDirectory&&item.parentId===parent);
       if (matches.length!==1) return undefined;
       const directory=matches[0]!;
       if (directory.fileId===targetParentId) return parent;
@@ -116,41 +137,82 @@ export class OrganizationRuntimeService {
     }
     return undefined;
   }
+
+  private async storageFor(sourceRoots: readonly string[], targetRoots: readonly string[]): Promise<OrganizationStorage> {
+    return this.options.storageFactory([...new Set([...sourceRoots, ...targetRoots])]);
+  }
+
+  private async withWriteFence<T>(run: () => Promise<T>): Promise<T> {
+    if (!this.accountKey || !this.coordinator) return run();
+    return this.coordinator.run([this.accountKey], async () => {
+      await this.assertWriteFence();
+      const result = await run();
+      await this.assertWriteFence();
+      return result;
+    });
+  }
+
+  private async assertWriteFence(): Promise<void> {
+    if (this.accountKey && this.coordinator) await this.coordinator.assertHeld(this.accountKey);
+  }
 }
 
 export async function getLibraryOrganizationService(accountId: string, connectedStorageId: string): Promise<OrganizationRuntimeService> {
   if (isDemoMode()) throw new LibraryOrganizationRuntimeError("storage_not_found","演示模式不提供真实网盘整理操作");
-  if (!accountId.trim() || !connectedStorageId.trim()) throw new LibraryOrganizationRuntimeError("storage_not_found","请先选择有效的光鸭网盘连接。");
+  if (!accountId.trim() || !connectedStorageId.trim()) throw new LibraryOrganizationRuntimeError("storage_not_found","请先选择有效的网盘连接。");
   const scope = {accountId,connectedStorageId};
   const storage = (await getWorkflowRepository().listConnectedStorages(accountId)).find((row) => row.id === connectedStorageId);
-  if (!storage || storage.accountId !== accountId || storage.provider !== "guangya") throw new LibraryOrganizationRuntimeError("storage_not_found","找不到该账号的光鸭连接。");
-  if (storage.status !== "active") throw new LibraryOrganizationRuntimeError("storage_frozen","该光鸭连接已冻结，请重新绑定后再试。");
-  const creds = credentials(storage);
-  const providerUid = storage.providerUid.trim() || parseGuangYaUid(creds.accessToken)?.trim() || creds.deviceId.trim();
-  if (!providerUid) throw new LibraryOrganizationRuntimeError("credentials_invalid","光鸭连接身份信息不可用，请重新绑定。");
-  const key = `${accountId}\0${connectedStorageId}`;
-  const auth = createGuangYaAuthHooks({accountId,connectedStorageId,providerUid,credentials:creds,rawCredentialDeviceId:creds.deviceId,connectionMarker:connectionMarker(storage.payload)});
-  const accountKey = `guangya:${providerUid}`;
-  const writeCoordinator=getGuangYaWriteCoordinator();
-  const fingerprint=createHash("sha256").update(`${providerUid}\0${connectionMarker(storage.payload)}`).digest("hex");
-  let cached = services.get(key);
-  if (!cached || cached.fingerprint!==fingerprint) {
-    const client = new GuangYaClient({
-      ...auth.credentials,
-      requestScheduler:createGuangYaRequestScheduler({accountKey,minIntervalMs:getGuangYaMinIntervalMs()}),
-      authCoordinator:getGuangYaAuthCoordinator(),authAccountKey:auth.accountKey,
-      loadCurrentCredentials:auth.loadCurrentCredentials,onTokensRefreshed:auth.onTokensRefreshed,
-      beforeWrite:async () => {
-        await writeCoordinator.assertHeld(accountKey);
-        if (!(await auth.loadCurrentCredentials())) throw new LibraryOrganizationRuntimeError("storage_frozen","光鸭连接已冻结或凭证已变更，整理已停止。");
-        await writeCoordinator.assertHeld(accountKey);
-      },
-    });
-    const service = new OrganizationRuntimeService(scope,client,getLibraryPool(),accountKey,writeCoordinator);
-    cached={service,fingerprint};
-    services.set(key,cached);
+  if (!storage || storage.accountId !== accountId || !isRegisteredStorageProvider(storage.provider)) {
+    throw new LibraryOrganizationRuntimeError("storage_not_found","找不到该账号的网盘连接。");
   }
-  return cached.service;
+  if (storage.status !== "active") throw new LibraryOrganizationRuntimeError("storage_frozen","该网盘连接已冻结，请重新绑定后再试。");
+
+  let accountKey: string | null = null;
+  let coordinator: ReturnType<typeof getGuangYaWriteCoordinator> | null = null;
+  let guangyaAuth: ReturnType<typeof createGuangYaAuthHooks> | null = null;
+  if (storage.provider === "guangya") {
+    const creds = credentials(storage);
+    const providerUid = storage.providerUid.trim() || parseGuangYaUid(creds.accessToken)?.trim() || creds.deviceId.trim();
+    if (!providerUid) throw new LibraryOrganizationRuntimeError("credentials_invalid","光鸭连接身份信息不可用，请重新绑定。");
+    guangyaAuth = createGuangYaAuthHooks({accountId,connectedStorageId,providerUid,credentials:creds,rawCredentialDeviceId:creds.deviceId,connectionMarker:connectionMarker(storage.payload)});
+    accountKey = `guangya:${providerUid}`;
+    coordinator = getGuangYaWriteCoordinator();
+  }
+
+  const auth = guangyaAuth;
+  const fence = coordinator;
+  const storageFactory = async (authorizedRoots: readonly string[]): Promise<OrganizationStorage> => {
+    const executor = await getLibraryStorageExecutor(accountId, connectedStorageId, authorizedRoots);
+    const organizationStorage = createStorageOrganizationStorage(executor);
+    if (!auth || !accountKey || !fence) return organizationStorage;
+    return checkedGuangYaStorage(organizationStorage, async () => {
+      await fence.assertHeld(accountKey);
+      if (!(await auth.loadCurrentCredentials())) {
+        throw new LibraryOrganizationRuntimeError("storage_frozen","光鸭连接已冻结或凭证已变更，整理已停止。");
+      }
+      await fence.assertHeld(accountKey);
+    });
+  };
+  return new OrganizationRuntimeService(scope,{storageFactory},getLibraryPool(),accountKey,coordinator);
+}
+
+function checkedGuangYaStorage(storage: OrganizationStorage, beforeWrite: () => Promise<void>): OrganizationStorage {
+  return {
+    list: (parentId) => storage.list(parentId),
+    read: (fileId, knownParentIds) => storage.read(fileId, knownParentIds),
+    async createDir(parentId, name) {
+      await beforeWrite();
+      return storage.createDir(parentId, name);
+    },
+    async rename(fileId, name) {
+      await beforeWrite();
+      await storage.rename(fileId, name);
+    },
+    async move(fileId, parentId) {
+      await beforeWrite();
+      await storage.move(fileId, parentId);
+    },
+  };
 }
 
 function credentials(storage: ConnectedStorage): {accessToken:string;refreshToken:string;deviceId:string} {

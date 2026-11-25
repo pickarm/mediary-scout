@@ -161,6 +161,24 @@ describe("Pan123Client transport / listFiles", () => {
     expect(items.map((i) => i.name)).toEqual(["p1", "p2"]);
   });
 
+  it("listFilesPage returns exactly one page and preserves Next for a durable restart", async () => {
+    const nexts: string[] = [];
+    const fetchImpl = fetchStub((url) => {
+      nexts.push(new URL(url).searchParams.get("next") ?? "");
+      return {
+        status: 200,
+        body: '{"code":0,"data":{"InfoList":[{"FileId":2,"FileName":"p2","Size":2,"Etag":"E2","Type":0}],"Next":"77"}}',
+      };
+    });
+    const c = new Pan123Client({ token: "TK", fetchImpl });
+
+    await expect(c.listFilesPage({ parentFileId: "0", cursor: "55", limit: 1 })).resolves.toEqual({
+      items: [{ id: "2", name: "p2", size: 2, etag: "E2", isFolder: false }],
+      nextCursor: "77",
+    });
+    expect(nexts).toEqual(["55"]);
+  });
+
   it("listFiles maxPages:1 sends exactly ONE request even when a next-page cursor exists (cheap probe)", async () => {
     // probeStorageConnection 契约是 cheap read:验活只需第一页,大账号不能付全量翻页
     // (至多 100 个串行签名往返)的代价。默认(不传 opts)行为不变=全量翻页。

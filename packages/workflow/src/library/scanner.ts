@@ -49,10 +49,18 @@ export interface DirectoryPage {
   items: readonly ScanFileFact[];
   /** The next zero-based page, or null when the directory is complete. */
   nextPage: number | null;
+  /** Provider-native continuation token, persisted beside nextPage. */
+  nextCursor?: string;
 }
 
 export interface DirectoryReader {
-  listPage(input: { directoryId: string; directoryPath: string; page: number; pageSize: number }): Promise<DirectoryPage>;
+  listPage(input: {
+    directoryId: string;
+    directoryPath: string;
+    page: number;
+    pageSize: number;
+    cursor?: string;
+  }): Promise<DirectoryPage>;
 }
 
 export interface ScanDirectoryCheckpoint {
@@ -60,6 +68,7 @@ export interface ScanDirectoryCheckpoint {
   parentDirectoryId: string | null;
   path: string;
   nextPage: number;
+  nextCursor?: string;
   status: ScanDirectoryStatus;
 }
 
@@ -92,6 +101,7 @@ export interface ScanStore {
     facts: readonly ScanFileFact[];
     childDirectories: readonly ScanDirectoryCheckpoint[];
     nextPage: number | null;
+    nextCursor?: string | null;
     now: string;
   }): Promise<boolean>;
   failPage(input: { scope: ScanScope; taskId: string; leaseId: string; directoryId: string; page: number; message: string; now: string }): Promise<boolean>;
@@ -251,7 +261,13 @@ export class LibraryScanner {
         continue;
       }
       try {
-        const page = await this.reader.listPage({ directoryId: directory.directoryId, directoryPath: directory.path, page: directory.nextPage, pageSize: this.pageSize });
+        const page = await this.reader.listPage({
+          directoryId: directory.directoryId,
+          directoryPath: directory.path,
+          page: directory.nextPage,
+          pageSize: this.pageSize,
+          ...(directory.nextCursor !== undefined ? { cursor: directory.nextCursor } : {}),
+        });
         validatePage(directory, page);
         const children = page.items.filter((fact) => fact.isDirectory).map((fact) => ({
           directoryId: fact.fileId,
@@ -260,7 +276,17 @@ export class LibraryScanner {
           nextPage: 0,
           status: "pending" as const,
         }));
-        await this.store.commitPage({ scope, taskId, leaseId, directory, facts: page.items, childDirectories: children, nextPage: page.nextPage, now: this.now() });
+        await this.store.commitPage({
+          scope,
+          taskId,
+          leaseId,
+          directory,
+          facts: page.items,
+          childDirectories: children,
+          nextPage: page.nextPage,
+          nextCursor: page.nextCursor ?? null,
+          now: this.now(),
+        });
       } catch (error) {
         const currentTask = await this.requireTask(scope, taskId);
         if (currentTask.status !== "running") return;
@@ -300,6 +326,13 @@ function factFromGuangYa(item: GuangYaItem, parentPath: string): ScanFileFact {
 function validatePage(directory: ScanDirectoryCheckpoint, page: DirectoryPage): void {
   if (page.nextPage !== null && (!Number.isSafeInteger(page.nextPage) || page.nextPage <= directory.nextPage)) {
     throw new Error("扫描分页游标无效或未前进");
+  }
+  if (page.nextCursor !== undefined) {
+    if (!page.nextCursor.trim()) throw new Error("扫描分页游标为空");
+    if (page.nextCursor === directory.nextCursor) throw new Error("扫描分页游标未前进");
+  }
+  if (page.nextPage === null && page.nextCursor !== undefined) {
+    throw new Error("扫描分页已完成但仍返回了下一游标");
   }
   for (const fact of page.items) {
     if (!fact.fileId || fact.parentDirectoryId !== directory.directoryId || !fact.name || !fact.path || fact.fileId === directory.directoryId) {

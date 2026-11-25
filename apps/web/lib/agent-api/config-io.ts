@@ -1,8 +1,12 @@
 import {
+  planSelectionPreferenceWrite,
+  resolveSelectionPreferenceReadState,
+} from "@media-track/workflow";
+import {
   getWorkflowRepository,
   getAccountScopedSettings,
   getLlmConfig,
-  getQualityPreference,
+  readRawSelectionPreference,
   getPreferredLanguage,
   getDailySweepTime,
   getProwlarrConfig,
@@ -10,6 +14,7 @@ import {
   LLM_API_KEY_SETTING_KEY,
   LLM_MODEL_ID_SETTING_KEY,
   QUALITY_PREFERENCE_SETTING_KEY,
+  SELECTION_PREFERENCE_SETTING_KEY,
   PREFERRED_LANGUAGE_SETTING_KEY,
   DAILY_SWEEP_TIME_SETTING_KEY,
   PANSOU_BASE_URL_SETTING_KEY,
@@ -25,6 +30,7 @@ type PushChannelKey = (typeof PUSH_CHANNEL_KEYS)[number];
 export interface AgentConfigView {
   llm: { baseURL: string | null; modelId: string | null; apiKey: string | null };
   qualityPreference: string | undefined;
+  selectionPreference: string | undefined;
   preferredLanguage: string | undefined;
   dailySweepTime: string;
   pansouBaseUrl: string | null;
@@ -51,9 +57,10 @@ export function isMaskedPlaceholder(value: string): boolean {
 export async function readAgentConfig(accountId: string): Promise<AgentConfigView> {
   const settings = getAccountScopedSettings(accountId);
   const repository = getWorkflowRepository();
-  const [llm, quality, language, sweepTime, prowlarr, storageRows] = await Promise.all([
+  const [llm, savedSelection, legacyQuality, language, sweepTime, prowlarr, storageRows] = await Promise.all([
     getLlmConfig(settings),
-    getQualityPreference(settings),
+    readRawSelectionPreference(settings),
+    settings.getSetting(QUALITY_PREFERENCE_SETTING_KEY),
     getPreferredLanguage(settings),
     getDailySweepTime(repository),
     getProwlarrConfig(settings),
@@ -61,6 +68,10 @@ export async function readAgentConfig(accountId: string): Promise<AgentConfigVie
   ]);
   const pansou = (await settings.getSetting(PANSOU_BASE_URL_SETTING_KEY))?.trim() || null;
   const tmdbKey = (await settings.getSetting(TMDB_API_KEY_SETTING_KEY))?.trim() || null;
+  const preference = resolveSelectionPreferenceReadState({
+    savedSelection,
+    legacyQuality,
+  });
 
   const push: Partial<Record<PushChannelKey, string>> = {};
   for (const key of PUSH_CHANNEL_KEYS) {
@@ -79,7 +90,8 @@ export async function readAgentConfig(accountId: string): Promise<AgentConfigVie
       modelId: llm.modelId ?? null,
       apiKey: maskSecret(llm.apiKey),
     },
-    qualityPreference: quality,
+    qualityPreference: preference.qualityPreference,
+    selectionPreference: preference.selectionPreference,
     preferredLanguage: language,
     dailySweepTime: sweepTime,
     pansouBaseUrl: pansou,
@@ -98,7 +110,8 @@ export async function readAgentConfig(accountId: string): Promise<AgentConfigVie
 
 export interface AgentConfigWriteInput {
   llm?: { baseURL?: string; modelId?: string; apiKey?: string };
-  qualityPreference?: string;
+  qualityPreference?: string | null;
+  selectionPreference?: string | null;
   preferredLanguage?: string;
   dailySweepTime?: string;
   pansouBaseUrl?: string;
@@ -111,8 +124,6 @@ export type AgentConfigWriteResult =
   | { ok: true; updated: string[] }
   | { ok: false; field: string; message: string };
 
-const QUALITY_VALUES = ["high", "medium"];
-
 /**
  * Partial update: only provided fields are written. Secret fields reject
  * masked placeholders ("***…") so an agent echoing back a read value can
@@ -124,6 +135,17 @@ export async function writeAgentConfig(
 ): Promise<AgentConfigWriteResult> {
   const repository = getWorkflowRepository();
   const updated: string[] = [];
+  const preferenceWrite = planSelectionPreferenceWrite({
+    selectionPreference: input.selectionPreference,
+    qualityPreference: input.qualityPreference,
+  });
+  if (preferenceWrite.kind === "invalid") {
+    return {
+      ok: false,
+      field: preferenceWrite.field,
+      message: preferenceWrite.message,
+    };
+  }
 
   const setAccount = (key: string, value: string) =>
     repository.setAccountSetting(accountId, key, value);
@@ -146,16 +168,9 @@ export async function writeAgentConfig(
     }
   }
 
-  if (input.qualityPreference !== undefined) {
-    if (!QUALITY_VALUES.includes(input.qualityPreference)) {
-      return {
-        ok: false,
-        field: "qualityPreference",
-        message: `无效画质偏好，可选：${QUALITY_VALUES.join(" / ")}`,
-      };
-    }
-    await setAccount(QUALITY_PREFERENCE_SETTING_KEY, input.qualityPreference);
-    updated.push("qualityPreference");
+  if (preferenceWrite.kind === "set") {
+    await setAccount(SELECTION_PREFERENCE_SETTING_KEY, preferenceWrite.value);
+    updated.push(preferenceWrite.updatedField);
   }
 
   if (input.preferredLanguage !== undefined) {

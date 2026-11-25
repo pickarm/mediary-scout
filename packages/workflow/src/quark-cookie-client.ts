@@ -180,6 +180,15 @@ export class QuarkCookieClient {
 
   /** Immediate children of a directory (file/sort, one page; size covers a media leaf). */
   async listItems(input: { directoryId: string; page?: number; size?: number }): Promise<QuarkItem[]> {
+    return (await this.listItemsPage(input)).items;
+  }
+
+  /** One native file/sort page plus the response total when the server supplies it. */
+  async listItemsPage(input: {
+    directoryId: string;
+    page?: number;
+    size?: number;
+  }): Promise<{ items: QuarkItem[]; total: number | null }> {
     const response = await this.getJson("/1/clouddrive/file/sort", [
       ["pdir_fid", input.directoryId],
       ["_page", String(input.page ?? 1)],
@@ -188,7 +197,13 @@ export class QuarkCookieClient {
       ["_sort", "file_type:asc,updated_at:desc"],
     ]);
     const data = unwrap(response, this.errCode("LIST_ITEMS_FAILED"));
-    return listFrom(data);
+    const nativeTotal = numberValue(recordValue(recordValue(response, "metadata"), "_total"));
+    const fallbackTotal = numberValue(recordValue(data, "total") ?? recordValue(data, "total_count"));
+    const total = Number.isFinite(nativeTotal) ? nativeTotal : fallbackTotal;
+    return {
+      items: listFrom(data),
+      total: Number.isFinite(total) && total >= 0 ? total : null,
+    };
   }
 
   /** A single file/directory's identity incl. its immediate parent (pdir_fid).
@@ -299,6 +314,22 @@ export class QuarkCookieClient {
       await this.sleepFn(this.pollDelayMs);
     }
     return false;
+  }
+
+  /** Single non-sleeping status read for a receipt restored after a restart. */
+  async getTaskStatus(
+    taskId: string,
+  ): Promise<"running" | "completed" | "failed" | "unknown"> {
+    const response = await this.getJson("/1/clouddrive/task", [
+      ["task_id", taskId],
+      ["retry_index", "0"],
+    ]);
+    const data = unwrap(response, this.errCode("TASK_FAILED"));
+    const status = numberValue(recordValue(data, "status"));
+    if (status === 2) return "completed";
+    if (status === 3) return "failed";
+    if (status === 0 || status === 1) return "running";
+    return "unknown";
   }
 
   /** Delete files (action_type:2 = move to recycle bin, same as 115's rb/delete).

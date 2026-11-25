@@ -99,7 +99,7 @@ integration("PostgresLibraryAutoOrganizationScheduler", () => {
     const suffix = randomUUID().replaceAll("-", "");
     const scope = { accountId: `account_${suffix}`, connectedStorageId: `storage_${suffix}` };
     await pool.query("INSERT INTO accounts (id,username,password_hash,is_owner,created_at) VALUES ($1,$2,'',false,now()::text)", [scope.accountId, `user_${suffix}`]);
-    await pool.query("INSERT INTO connected_storages (id,account_id,provider,provider_uid,payload,created_at) VALUES ($1,$2,'guangya',$3,'{}'::jsonb,now()::text)", [scope.connectedStorageId, scope.accountId, `uid_${suffix}`]);
+    await pool.query("INSERT INTO connected_storages (id,account_id,provider,provider_uid,payload,created_at) VALUES ($1,$2,'quark',$3,'{}'::jsonb,now()::text)", [scope.connectedStorageId, scope.accountId, `uid_${suffix}`]);
     const rootId = `root_${suffix}`;
     const targetId = `target_${suffix}`;
     const config: ScanConfiguration = {

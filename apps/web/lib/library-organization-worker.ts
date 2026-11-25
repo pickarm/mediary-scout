@@ -2,9 +2,11 @@ import { isDemoMode } from "./demo-mode";
 import { getLibraryPool } from "./library-runtime";
 import { getLibraryOrganizationService } from "./library-organization-runtime";
 import { isUpdateHoldActive, whileInFlight } from "./update-hold";
+import { STORAGE_BRANDS } from "@media-track/workflow";
 
 const POLL_MS=boundedEnv("MEDIA_TRACK_LIBRARY_ORGANIZATION_WORKER_POLL_MS",3_000,1_000,60_000);
 const MAX_SCOPES_PER_TICK=4;
+const REGISTERED_STORAGE_PROVIDERS=STORAGE_BRANDS.map(({provider})=>provider);
 let started=false;
 let ticking=false;
 let cursor: {accountId:string;connectedStorageId:string}|null=null;
@@ -39,17 +41,19 @@ interface ScopeRow {account_id:string;connected_storage_id:string}
 async function queryRunnableScopes(after:{accountId:string;connectedStorageId:string}|null,limit:number):Promise<Array<{accountId:string;connectedStorageId:string}>> {
   const pool=getLibraryPool();
   const cursorSql=after?"AND (s.account_id,s.id)>($1,$2)":"";
-  const params=after?[after.accountId,after.connectedStorageId,limit]:[limit];
+  const providerIndex=after?3:1;
+  const limitIndex=providerIndex+1;
+  const params=after?[after.accountId,after.connectedStorageId,REGISTERED_STORAGE_PROVIDERS,limit]:[REGISTERED_STORAGE_PROVIDERS,limit];
   const result=await pool.query<ScopeRow>(
     `SELECT s.account_id,s.id AS connected_storage_id FROM connected_storages s
-      WHERE s.provider='guangya' AND s.status='active' ${cursorSql}
+      WHERE s.provider=ANY($${providerIndex}::text[]) AND s.status='active' ${cursorSql}
         AND (EXISTS(SELECT 1 FROM library_organization_plans p WHERE p.account_id=s.account_id AND p.connected_storage_id=s.id
           AND p.execute_requested=true AND p.status IN ('planned','paused','failed','running') AND (p.lease_id IS NULL OR p.lease_expires_at<=now()))
           OR EXISTS(SELECT 1 FROM library_organization_operations o JOIN library_file_bindings b
             ON b.account_id=o.account_id AND b.connected_storage_id=o.connected_storage_id AND b.file_id=o.file_id
             WHERE o.account_id=s.account_id AND o.connected_storage_id=s.id AND o.status='verified'
               AND o.target_parent_id IS NOT NULL AND b.parent_directory_id<>o.target_parent_id))
-      ORDER BY s.account_id,s.id LIMIT $${params.length}`,
+      ORDER BY s.account_id,s.id LIMIT $${limitIndex}`,
     params,
   );
   return result.rows.map((row)=>({accountId:row.account_id,connectedStorageId:row.connected_storage_id}));

@@ -311,17 +311,17 @@ describe("getQualityPreference", () => {
   });
 
   it("'any' → undefined", async () => {
-    expect(await getQualityPreference(repoWith("any"))).toBeUndefined();
+    expect(await getQualityPreference(repoMap({ quality_preference: "any" }))).toBeUndefined();
   });
 
   it("'high'/'medium' pass through (trimmed)", async () => {
-    expect(await getQualityPreference(repoWith("high"))).toBe("high");
-    expect(await getQualityPreference(repoWith(" medium "))).toBe("medium");
+    expect(await getQualityPreference(repoMap({ quality_preference: "high" }))).toBe("high");
+    expect(await getQualityPreference(repoMap({ quality_preference: " medium " }))).toBe("medium");
   });
 
   it("garbage (incl. legacy '4K') → undefined (safe)", async () => {
-    expect(await getQualityPreference(repoWith("4K"))).toBeUndefined();
-    expect(await getQualityPreference(repoWith("ultra"))).toBeUndefined();
+    expect(await getQualityPreference(repoMap({ quality_preference: "4K" }))).toBeUndefined();
+    expect(await getQualityPreference(repoMap({ quality_preference: "ultra" }))).toBeUndefined();
   });
 });
 

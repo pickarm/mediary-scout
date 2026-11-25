@@ -1,8 +1,10 @@
 import type { Pool, PoolClient } from "pg";
+import { STORAGE_BRANDS } from "../storage-brands.js";
 import { DEFAULT_NAMING_TEMPLATES, deriveSubtitlePath, type NamingTemplateKind } from "./naming.js";
 import type { OrganizationGraph, OrganizationIdentity, OrganizationOperation, OrganizationPlan, OrganizationPlanInput, OrganizationScope, OrganizationTaskStatus } from "./organizer.js";
 
 export const LIBRARY_ORGANIZATION_SCHEMA_ADVISORY_LOCK_KEY = 4_011_989_144;
+const REGISTERED_STORAGE_PROVIDERS = STORAGE_BRANDS.map(({ provider }) => provider);
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS library_organization_plans (
@@ -358,9 +360,9 @@ export class PostgresOrganizationStore implements OrganizationStore {
              JOIN library_scan_configs c ON c.account_id=t.account_id AND c.connected_storage_id=t.connected_storage_id AND c.config_id=t.config_id
              JOIN connected_storages s ON s.id=t.connected_storage_id AND s.account_id=t.account_id
             WHERE t.account_id=$1 AND t.connected_storage_id=$2 AND t.task_id=$3 AND t.status IN ('completed','partial')
-              AND s.provider='guangya' AND s.status='active' AND c.configuration->>'autoOrganize'='true'
+              AND s.provider=ANY($4::text[]) AND s.status='active' AND c.configuration->>'autoOrganize'='true'
             FOR UPDATE OF t,c,s`,
-          [scope.accountId, scope.connectedStorageId, taskId],
+          [scope.accountId, scope.connectedStorageId, taskId, REGISTERED_STORAGE_PROVIDERS],
         );
         if (eligibility.rowCount !== 1) return false;
       }
@@ -431,7 +433,10 @@ export class PostgresOrganizationStore implements OrganizationStore {
   }
 
   private async assertStorage(client: PoolClient, scope: OrganizationScope): Promise<void> {
-    const result = await client.query("SELECT 1 FROM connected_storages WHERE id=$1 AND account_id=$2 AND provider='guangya'", [scope.connectedStorageId,scope.accountId]);
+    const result = await client.query(
+      "SELECT 1 FROM connected_storages WHERE id=$1 AND account_id=$2 AND provider=ANY($3::text[])",
+      [scope.connectedStorageId,scope.accountId,REGISTERED_STORAGE_PROVIDERS],
+    );
     if (!result.rowCount) throw new Error("整理网盘不存在或不属于指定账号");
   }
   private async transaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {

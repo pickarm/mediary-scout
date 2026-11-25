@@ -47,6 +47,27 @@ describe("QuarkCookieClient", () => {
     expect(requests[0]?.headers["Cookie"]).toBe("__uid=u");
   });
 
+  it("returns one native page with its total for restart-safe directory scanning", async () => {
+    const requests: RecordedRequest[] = [];
+    const client = new QuarkCookieClient({
+      cookie: "__uid=u",
+      fetchJson: record(requests, async () => ({
+        code: 0,
+        metadata: { _total: 3 },
+        data: {
+          list: [{ fid: "f2", file_name: "b.mkv", dir: false, size: 200 }],
+        },
+      })),
+    });
+
+    await expect(client.listItemsPage({ directoryId: "root_dir", page: 2, size: 1 })).resolves.toEqual({
+      items: [{ fid: "f2", file_name: "b.mkv", dir: false, size: 200 }],
+      total: 3,
+    });
+    expect(requests[0]?.url).toContain("_page=2");
+    expect(requests[0]?.url).toContain("_size=1");
+  });
+
   it("createFolder posts to /file and returns the new fid", async () => {
     const requests: RecordedRequest[] = [];
     const client = new QuarkCookieClient({

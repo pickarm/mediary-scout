@@ -40,6 +40,27 @@ describe("configuration source directory authorization", () => {
     if (parentId === "target-parent" && page === 3) return { items: [{ fileId: "target-dir", parentId, fileName: "电影归档", fileSize: 0, resType: 2 }], hasMore: false };
     return { items: [], hasMore: false };
   });
+  const readerPage = vi.fn(async (input: { directoryId: string; page: number; cursor?: string }) => {
+    if (input.directoryId === "native-parent" && input.page === 4 && input.cursor === "native-cursor") {
+      return {
+        items: [{ fileId: "native-dir", parentDirectoryId: input.directoryId, name: "原生分页目录", isDirectory: true, sizeBytes: null, path: "原生分页目录", modifiedAt: null }],
+        nextPage: null,
+      };
+    }
+    const result = await listing(input.directoryId, input.page, 200);
+    return {
+      items: result.items.map((item) => ({
+        fileId: item.fileId,
+        parentDirectoryId: item.parentId,
+        name: item.fileName,
+        isDirectory: item.resType === 2,
+        sizeBytes: item.fileSize,
+        path: item.fileName,
+        modifiedAt: null,
+      })),
+      nextPage: result.hasMore ? input.page + 1 : null,
+    };
+  });
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -48,6 +69,7 @@ describe("configuration source directory authorization", () => {
     listing.mockClear();
     mocks.getServices.mockResolvedValue({
       client: { listFilesPage: listing },
+      reader: { listPage: readerPage },
       scanStore: {
         getConfiguration: vi.fn(async () => previous),
         saveConfiguration: vi.fn(async (value: unknown) => { saved.push(value); }),
@@ -75,6 +97,27 @@ describe("configuration source directory authorization", () => {
     expect(response.status).toBe(201);
     expect(listing).toHaveBeenCalledWith("parent-deep", 17, 200);
     expect(saved[0]).toMatchObject({ sourceRoots: [{ directoryId: "dir-deep", name: "Season 2" }], autoAcquire: false, autoOrganize: false });
+  });
+
+  it("authorizes non-GuangYa selections from reader facts at the signed page and cursor", async () => {
+    const ticket = issueDirectorySelectionTicket({
+      ...scope, directoryId: "native-dir", parentId: "native-parent", name: "原生分页目录", page: 4, cursor: "native-cursor",
+    });
+    const response = await POST(post({
+      storageId: "storage-a",
+      sourceRoots: [{ directoryId: "native-dir", selectionToken: ticket }],
+      mediaKind: "mixed",
+      templates: templateSet,
+    }));
+
+    expect(response.status).toBe(201);
+    expect(readerPage).toHaveBeenCalledWith(expect.objectContaining({
+      directoryId: "native-parent",
+      page: 4,
+      cursor: "native-cursor",
+      pageSize: 200,
+    }));
+    expect(saved[0]).toMatchObject({ sourceRoots: [{ directoryId: "native-dir", name: "原生分页目录" }] });
   });
 
   it("rejects forged IDs, cross-account tickets, stale tickets, and non-directory entries", async () => {

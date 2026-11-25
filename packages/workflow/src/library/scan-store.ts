@@ -49,6 +49,7 @@ const SCAN_SCHEMA = `
     parent_directory_id text,
     path text NOT NULL,
     next_page integer NOT NULL DEFAULT 0,
+    next_cursor text,
     status text NOT NULL CHECK (status IN ('pending','running','done','failed')),
     PRIMARY KEY (account_id, connected_storage_id, task_id, directory_id),
     FOREIGN KEY (account_id, connected_storage_id, task_id)
@@ -108,6 +109,7 @@ const SCAN_SCHEMA_COMPAT = `
   ALTER TABLE library_scan_tasks ADD COLUMN IF NOT EXISTS lease_id text;
   ALTER TABLE library_scan_tasks ADD COLUMN IF NOT EXISTS lease_expires_at text;
   ALTER TABLE library_scan_failures ADD COLUMN IF NOT EXISTS resolved_at text;
+  ALTER TABLE library_scan_directories ADD COLUMN IF NOT EXISTS next_cursor text;
 `;
 
 interface TaskRow {
@@ -127,6 +129,7 @@ interface DirectoryRow {
   parent_directory_id: string | null;
   path: string;
   next_page: number;
+  next_cursor: string | null;
   status: ScanDirectoryStatus;
 }
 interface FileRow {
@@ -391,7 +394,7 @@ export class PostgresScanStore implements ScanStore {
       await this.assertTaskScope(client, scope, taskId);
       if (statuses.length === 0) return [];
       const result = await client.query<DirectoryRow>(
-        "SELECT directory_id,parent_directory_id,path,next_page,status FROM library_scan_directories " +
+        "SELECT directory_id,parent_directory_id,path,next_page,next_cursor,status FROM library_scan_directories " +
           "WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND status=ANY($4::text[]) ORDER BY path,directory_id LIMIT 1",
         [scope.accountId, scope.connectedStorageId, taskId, statuses],
       );
@@ -399,12 +402,22 @@ export class PostgresScanStore implements ScanStore {
     });
   }
 
-  async commitPage(input: { scope: ScanScope; taskId: string; leaseId: string; directory: ScanDirectoryCheckpoint; facts: readonly ScanFileFact[]; childDirectories: readonly ScanDirectoryCheckpoint[]; nextPage: number | null; now: string }): Promise<boolean> {
+  async commitPage(input: {
+    scope: ScanScope;
+    taskId: string;
+    leaseId: string;
+    directory: ScanDirectoryCheckpoint;
+    facts: readonly ScanFileFact[];
+    childDirectories: readonly ScanDirectoryCheckpoint[];
+    nextPage: number | null;
+    nextCursor?: string | null;
+    now: string;
+  }): Promise<boolean> {
     await this.ensureSchema();
     return this.withTransaction(async (client) => {
       if (!(await this.lockTaskLease(client, input.scope, input.taskId, input.leaseId))) return false;
       const current = await client.query<DirectoryRow>(
-        "SELECT directory_id,parent_directory_id,path,next_page,status FROM library_scan_directories WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND directory_id=$4 FOR UPDATE",
+        "SELECT directory_id,parent_directory_id,path,next_page,next_cursor,status FROM library_scan_directories WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND directory_id=$4 FOR UPDATE",
         [input.scope.accountId, input.scope.connectedStorageId, input.taskId, input.directory.directoryId],
       );
       const row = current.rows[0];
@@ -431,8 +444,8 @@ export class PostgresScanStore implements ScanStore {
       }
       const complete = input.nextPage === null;
       await client.query(
-        "UPDATE library_scan_directories SET next_page=COALESCE($5,next_page),status=$6 WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND directory_id=$4",
-        [input.scope.accountId,input.scope.connectedStorageId,input.taskId,input.directory.directoryId,input.nextPage,complete ? "done" : "pending"],
+        "UPDATE library_scan_directories SET next_page=COALESCE($5,next_page),next_cursor=$6,status=$7 WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND directory_id=$4",
+        [input.scope.accountId,input.scope.connectedStorageId,input.taskId,input.directory.directoryId,input.nextPage,input.nextCursor ?? null,complete ? "done" : "pending"],
       );
       await client.query(
         "UPDATE library_scan_failures SET resolved_at=$6 WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND directory_id=$4 AND page=$5 AND resolved_at IS NULL",
@@ -459,7 +472,7 @@ export class PostgresScanStore implements ScanStore {
     return this.withTransaction(async (client) => {
       if (!(await this.lockTaskLease(client, input.scope, input.taskId, input.leaseId))) return false;
       const current = await client.query<DirectoryRow>(
-        "SELECT directory_id,parent_directory_id,path,next_page,status FROM library_scan_directories " +
+        "SELECT directory_id,parent_directory_id,path,next_page,next_cursor,status FROM library_scan_directories " +
           "WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND directory_id=$4 FOR UPDATE",
         [input.scope.accountId,input.scope.connectedStorageId,input.taskId,input.directoryId],
       );
@@ -575,7 +588,7 @@ export class PostgresScanStore implements ScanStore {
       if (input.afterDirectoryId !== undefined) { params.push(input.afterDirectoryId); cursor = ` AND directory_id > $${params.length}`; }
       params.push(limit);
       const result = await client.query<DirectoryRow>(
-        "SELECT directory_id,parent_directory_id,path,next_page,status FROM library_scan_directories " +
+        "SELECT directory_id,parent_directory_id,path,next_page,next_cursor,status FROM library_scan_directories " +
           `WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3${cursor} ORDER BY directory_id LIMIT $${params.length}`,
         params,
       );
@@ -623,7 +636,10 @@ export class PostgresScanStore implements ScanStore {
   }
 
   private async assertOwnership(client: PoolClient, scope: ScanScope): Promise<void> {
-    const result = await client.query("SELECT 1 FROM connected_storages WHERE id=$1 AND account_id=$2 AND provider='guangya'", [scope.connectedStorageId,scope.accountId]);
+    const result = await client.query(
+      "SELECT 1 FROM connected_storages WHERE id=$1 AND account_id=$2 AND provider=ANY($3::text[])",
+      [scope.connectedStorageId,scope.accountId,["pan115","quark","uc","pan123","tianyi","guangya"]],
+    );
     if (!result.rowCount) throw new ScanStorageScopeError("网盘不存在或不属于指定账号");
   }
   private async assertTaskScope(client: PoolClient, scope: ScanScope, taskId: string): Promise<void> {
@@ -670,7 +686,14 @@ function sameRoots(left: readonly { directoryId: string; name: string }[], right
   return left.length === right.length && left.every((root, i) => root.directoryId === right[i]?.directoryId && root.name === right[i]?.name);
 }
 function directoryFromRow(row: DirectoryRow): ScanDirectoryCheckpoint {
-  return { directoryId: row.directory_id,parentDirectoryId: row.parent_directory_id,path: row.path,nextPage: Number(row.next_page),status: row.status };
+  return {
+    directoryId: row.directory_id,
+    parentDirectoryId: row.parent_directory_id,
+    path: row.path,
+    nextPage: Number(row.next_page),
+    ...(row.next_cursor === null ? {} : { nextCursor: row.next_cursor }),
+    status: row.status,
+  };
 }
 
 function taskFromRow(row: TaskRow, failures: readonly FailureRow[]): ScanTask {

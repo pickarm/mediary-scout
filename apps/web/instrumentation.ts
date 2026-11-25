@@ -38,4 +38,6 @@ export async function register(): Promise<void> {
   startLibraryAutoOrganizationWorker();
   const { startLibraryPreparationWorker } = await import("./lib/library-preparation-worker");
   startLibraryPreparationWorker();
+  const { startMessagingWorker } = await import("./lib/messaging/worker");
+  startMessagingWorker();
 }

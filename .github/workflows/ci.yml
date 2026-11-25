@@ -67,13 +67,13 @@ jobs:
       - run: npm run build:web
         env:
           MEDIA_TRACK_POSTGRES_URL: ""
-      - run: npx vitest run --exclude '**/*.pg.test.ts'
+      - run: npx vitest run --exclude '**/*.pg.test.ts' --exclude '**/*.postgres.test.ts'
       # Every PostgreSQL suite in the repo, wherever it lives. Run files serially to
       # prevent test-only DDL/DML deadlocks while still proving each suite executes.
       - name: PostgreSQL integration suites (all locations)
         shell: bash
         run: |
-          mapfile -t pg_tests < <(git ls-files '*.pg.test.ts')
+          mapfile -t pg_tests < <(git ls-files '*.pg.test.ts' '*.postgres.test.ts')
           printf 'PG suites: %s\n' "${#pg_tests[@]}"
           npx vitest run --no-file-parallelism "${pg_tests[@]}"
       # MEDIA_TRACK_CI_REQUIRE_POSTGRES=1 makes the contract hard-fail if it cannot

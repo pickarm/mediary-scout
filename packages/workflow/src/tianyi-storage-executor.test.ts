@@ -8,7 +8,13 @@ import { parseTianyiShareUrl, TianyiStorageExecutor } from "./tianyi-storage-exe
  *  method signatures (read from tianyi-client.ts, not guessed). */
 type TianyiClientShape = Pick<
   TianyiClient,
-  "listFiles" | "createFolder" | "saveShare" | "renameFile" | "batchDelete" | "moveFiles"
+  | "listFiles"
+  | "createFolder"
+  | "saveShare"
+  | "getBatchTaskStatus"
+  | "renameFile"
+  | "batchDelete"
+  | "moveFiles"
 >;
 
 function fakeClient(overrides: Partial<TianyiClientShape> = {}): TianyiClientShape {
@@ -16,6 +22,10 @@ function fakeClient(overrides: Partial<TianyiClientShape> = {}): TianyiClientSha
     listFiles: vi.fn<TianyiClient["listFiles"]>(async () => []),
     createFolder: vi.fn<TianyiClient["createFolder"]>(async () => "newdir123"),
     saveShare: vi.fn<TianyiClient["saveShare"]>(async () => ({ ok: true, failed: 0, message: "" })),
+    getBatchTaskStatus: vi.fn<TianyiClient["getBatchTaskStatus"]>(async () => ({
+      status: 4,
+      failedCount: 0,
+    })),
     renameFile: vi.fn<TianyiClient["renameFile"]>(async () => {}),
     batchDelete: vi.fn<TianyiClient["batchDelete"]>(async () => {}),
     moveFiles: vi.fn<TianyiClient["moveFiles"]>(async () => {}),
@@ -91,6 +101,52 @@ describe("parseTianyiShareUrl", () => {
 });
 
 describe("TianyiStorageExecutor.transfer", () => {
+  it("awaits the submitted task receipt before the save poll and maps that receipt on recovery", async () => {
+    let landed = false;
+    const order: string[] = [];
+    const saveShare = vi.fn<TianyiClient["saveShare"]>(async (input) => {
+      order.push("save");
+      await input.onSubmitted?.("task-42");
+      order.push("poll");
+      landed = true;
+      return { ok: true, failed: 0, message: "" };
+    });
+    const listFiles = vi.fn<TianyiClient["listFiles"]>(async () => {
+      order.push(landed ? "list-after" : "list-before");
+      return landed ? [file("landed", "Show.S01E01.mkv")] : [];
+    });
+    const client = fakeClient({ listFiles, saveShare });
+    const executor = makeExecutor(client);
+    const submitted: Record<string, unknown>[] = [];
+
+    const attempt = await executor.transfer({
+      workflowRunId: "run-1",
+      directoryId: SCOPE,
+      candidate: candidate(),
+      wholePackage: true,
+      onSubmitted: async (receipt) => {
+        order.push("callback");
+        submitted.push(receipt);
+      },
+    });
+
+    expect(order.slice(0, 4)).toEqual(["list-before", "save", "callback", "poll"]);
+    expect(submitted).toEqual([
+      expect.objectContaining({
+        kind: "tianyi_share",
+        state: "running",
+        providerTaskId: "task-42",
+      }),
+    ]);
+    expect(attempt.receipt).toMatchObject({
+      kind: "tianyi_share",
+      state: "completed",
+      providerTaskId: "task-42",
+    });
+    await expect(executor.getTransferStatus(attempt.receipt!)).resolves.toBe("completed");
+    expect(client.getBatchTaskStatus).toHaveBeenCalledWith("task-42");
+  });
+
   it("saves a share into the scope dir via SHARE_SAVE and diffs landed videos (succeeded)", async () => {
     let landed = false;
     const listFiles = vi.fn<TianyiClient["listFiles"]>(async () =>

@@ -33,6 +33,7 @@ import {
   isFreeLlmPreset,
   isBlankEnvValue,
   llmConfigError,
+  resolveRuntimeSelectionPreference,
   formatDailyDigestPushText,
   scheduledDigestItems,
   getTrackedSeasonStatusView,
@@ -55,6 +56,8 @@ import {
   runScheduledType3Monitoring,
   sweepOrphanStagingDirs,
   sendPushNotifications,
+  extractLandedMediaEvents,
+  refreshConfiguredMediaServers,
   createPostgresWorkflowRepositorySync,
   createSqliteWorkflowRepository,
   migrateLegacyCookieToDefaultAccount,
@@ -906,6 +909,19 @@ export async function queueCandidateTracking(
       message: error instanceof Error ? error.message : "未登录，无法获取。",
     };
   }
+  return queueCandidateTrackingForAccount(accountId, candidateId, connectedStorageId);
+}
+
+/** Internal entry for an already authenticated account-owned integration. */
+export async function queueCandidateTrackingForAccount(
+  accountId: string,
+  candidateId: string,
+  connectedStorageId?: string | null,
+  messagingJobId?: string,
+): Promise<CandidateTrackingRequestResult> {
+  if (!accountId.trim() || accountId === UNAUTHENTICATED_ACCOUNT_ID) {
+    return { status: "unsupported", message: "未登录，无法获取。" };
+  }
   const workspace = await resolveQueueStorage(accountId, connectedStorageId);
   if (workspace.unknown) {
     return { status: "unsupported", message: "网盘工作区不可用（未找到或暂时无法访问），请刷新后重试。" };
@@ -915,7 +931,7 @@ export async function queueCandidateTracking(
   }
   const movieTmdbId = parseMovieCandidateId(candidateId);
   if (movieTmdbId !== null) {
-    const movie = await movieTargetFromTmdbId(movieTmdbId);
+    const movie = await movieTargetFromTmdbId(movieTmdbId, accountId);
     if (!movie) {
       return { status: "unsupported", message: "无法获取该电影的信息。" };
     }
@@ -925,6 +941,7 @@ export async function queueCandidateTracking(
       repository: getWorkflowRepository(),
       accountId,
       connectedStorageId: workspace.id,
+      ...(messagingJobId ? { messagingJobId } : {}),
     });
     return {
       status: request.status === "queued" ? "queued" : request.status,
@@ -933,7 +950,7 @@ export async function queueCandidateTracking(
     };
   }
 
-  const target = await trackingTargetFromCandidateId(candidateId);
+  const target = await trackingTargetFromCandidateId(candidateId, accountId);
   if (!target) {
     return {
       status: "unsupported",
@@ -948,6 +965,7 @@ export async function queueCandidateTracking(
     repository: getWorkflowRepository(),
     accountId,
     connectedStorageId: workspace.id,
+    ...(messagingJobId ? { messagingJobId } : {}),
   });
   const status = request.status === "completed" ? "queued" : request.status;
 
@@ -1018,7 +1036,7 @@ export function buildAccountContextResolver(): ResolveAccountWorkerContext {
     // specific drive it was queued onto.
     const scoped = getAccountScopedSettings(accountId);
     const parents = await getWorkerStorageParents(accountId, connectedStorageId);
-    const { model, llmConfig, preferredLanguage, qualityPreference } = await getAgentModel(scoped);
+    const { model, llmConfig, preferredLanguage, qualityPreference, selectionPreference } = await getAgentModel(scoped);
     // The run's drive brand selects its resource sources (quark→PanSou quark-only;
     // 115→PanSou+Prowlarr). null when no drive resolves → default 115 fallback.
     const driveProvider =
@@ -1074,6 +1092,7 @@ export function buildAccountContextResolver(): ResolveAccountWorkerContext {
       agentMemory,
       ...(preferredLanguage === undefined ? {} : { preferredLanguage }),
       ...(qualityPreference === undefined ? {} : { qualityPreference }),
+      ...(selectionPreference === undefined ? {} : { selectionPreference }),
       storageParentDirectoryId: parents.tv,
       animeStorageParentDirectoryId: parents.anime,
       moviesParentDirectoryId: parents.movies,
@@ -1232,9 +1251,10 @@ async function runNextQueuedWorkflowNow(claim: QueueClaimOptions | undefined) {
   // The user's language preference is standing context baked into the agent
   // instance (one global preference), so every workflow — movie, series, type2,
   // anime — searches with it. No per-workflow plumbing.
-  const { model, llmConfig, preferredLanguage, qualityPreference } = await getAgentModel(getAccountScopedSettings(accountId));
+  const { model, llmConfig, preferredLanguage, qualityPreference, selectionPreference } = await getAgentModel(getAccountScopedSettings(accountId));
   const language = preferredLanguage === undefined ? {} : { preferredLanguage };
   const quality = qualityPreference === undefined ? {} : { qualityPreference };
+  const selection = selectionPreference === undefined ? {} : { selectionPreference };
   const storage = await getWorkerStorageExecutor(accountId);
   const parents = await getWorkerStorageParents(accountId);
   const resolveAccountContext = buildAccountContextResolver();
@@ -1259,6 +1279,7 @@ async function runNextQueuedWorkflowNow(claim: QueueClaimOptions | undefined) {
     llmConfig,
     ...language,
     ...quality,
+    ...selection,
     storageParentDirectoryId: parents.tv,
     animeStorageParentDirectoryId: parents.anime,
     resolveAccountContext,
@@ -1281,6 +1302,7 @@ async function runNextQueuedWorkflowNow(claim: QueueClaimOptions | undefined) {
     llmConfig,
     ...language,
     ...quality,
+    ...selection,
     storageParentDirectoryId: parents.tv,
     animeStorageParentDirectoryId: parents.anime,
     resolveAccountContext,
@@ -1303,6 +1325,7 @@ async function runNextQueuedWorkflowNow(claim: QueueClaimOptions | undefined) {
     llmConfig,
     ...language,
     ...quality,
+    ...selection,
     moviesParentDirectoryId: parents.movies,
     resolveAccountContext,
     onAuthErrorFreeze,
@@ -1324,6 +1347,7 @@ async function runNextQueuedWorkflowNow(claim: QueueClaimOptions | undefined) {
     llmConfig,
     ...language,
     ...quality,
+    ...selection,
     storageParentDirectoryId: parents.tv,
     animeStorageParentDirectoryId: parents.anime,
     moviesParentDirectoryId: parents.movies,
@@ -1349,6 +1373,7 @@ async function runNextQueuedWorkflowNow(claim: QueueClaimOptions | undefined) {
     llmConfig,
     ...language,
     ...quality,
+    ...selection,
     resolveAccountContext,
     onAuthErrorFreeze,
     mayStartRun,
@@ -1375,13 +1400,44 @@ export const PREFERRED_LANGUAGE_SETTING_KEY = "preferred_language";
 
 export const QUALITY_PREFERENCE_SETTING_KEY = "quality_preference";
 
+export const SELECTION_PREFERENCE_SETTING_KEY = "selection_preference";
+
+/** Read this account's raw saved selection_preference (own row first so an explicit ""
+ *  is preserved and does not fall through to global settings; global app_settings is
+ *  only consulted when the account has never written `selection_preference`). */
+export async function readRawSelectionPreference(repository: {
+  getSetting(key: string): Promise<string | null>;
+  getOwnSetting?: (key: string) => Promise<string | null>;
+}): Promise<string | null> {
+  if (repository.getOwnSetting) {
+    const own = await repository.getOwnSetting(SELECTION_PREFERENCE_SETTING_KEY);
+    if (own !== null) return own;
+  }
+  return repository.getSetting(SELECTION_PREFERENCE_SETTING_KEY);
+}
+
+/** Effective runtime selection preference for an account, honoring explicit clear (""),
+ *  legacy `quality_preference` ("high"/"medium"), and the shipped default template. */
+export async function getSelectionPreference(repository: {
+  getSetting(key: string): Promise<string | null>;
+  getOwnSetting?: (key: string) => Promise<string | null>;
+}): Promise<string | undefined> {
+  const [savedSelection, legacyQuality] = await Promise.all([
+    readRawSelectionPreference(repository),
+    repository.getSetting(QUALITY_PREFERENCE_SETTING_KEY),
+  ]);
+  return resolveRuntimeSelectionPreference({ savedSelection, legacyQuality });
+}
+
 /** The user's acquisition quality preference, or undefined when 不限/unset
  *  (the default). undefined → inject NO quality guidance (coverage-only, current
  *  behavior). Only "high"/"medium" are honored; anything else (incl. the legacy
  *  "4K" value) is treated as 不限. */
 export async function getQualityPreference(
-  repository: { getSetting(key: string): Promise<string | null> },
+  repository: { getSetting(key: string): Promise<string | null>; getOwnSetting?: (key: string) => Promise<string | null> },
 ): Promise<"high" | "medium" | undefined> {
+  // Any saved new value, including an explicit empty string, replaces the legacy guidance.
+  if ((await readRawSelectionPreference(repository)) !== null) return undefined;
   const value = (await repository.getSetting(QUALITY_PREFERENCE_SETTING_KEY))?.trim();
   return value === "high" || value === "medium" ? value : undefined;
 }
@@ -2021,12 +2077,13 @@ function parseMovieCandidateId(candidateId: string): number | null {
 
 export async function movieTargetFromTmdbId(
   tmdbId: number,
+  accountId?: string,
 ): Promise<{ title: MediaTitle; keyword: string } | null> {
   if (process.env.MEDIA_TRACK_SEARCH_PROVIDER === "tmdb") {
     return prepareMovieTarget({
       tmdbId,
       qualityPreference: defaultQuality(),
-      metadataProvider: createTmdbMetadataProvider(await getTmdbAccesses(getAccountScopedSettings(await getCurrentAccountId()))),
+      metadataProvider: createTmdbMetadataProvider(await getTmdbAccesses(getAccountScopedSettings(accountId ?? await getCurrentAccountId()))),
     });
   }
   const candidate = findDemoCandidateByTmdbId(tmdbId);
@@ -2181,6 +2238,30 @@ async function pushNotificationsSince(
             `[media-track] digest push failed: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
+      }
+
+      // Issue #373: trigger library scan on configured media servers (Emby / Jellyfin /
+      // Plex / custom webhook) ONLY when real files landed this run/sweep, coalesced
+      // once per account. DETACHED on purpose: the configured settle delay (up to
+      // 120 s) plus HTTP timeouts must never stall run finalization or the sweep.
+      const landedItems = extractLandedMediaEvents(notifications);
+      if (landedItems.length > 0) {
+        void refreshConfiguredMediaServers({ repository: settings, items: landedItems })
+          .then((refreshSummary) => {
+            if (refreshSummary.refreshed.length > 0) {
+              console.log(
+                `[media-server] refreshed ${refreshSummary.refreshed.join(", ")} for ${landedItems.length} landed item(s)`,
+              );
+            }
+            for (const fail of refreshSummary.failures) {
+              console.error(`[media-server] refresh ${fail.server} failed: ${fail.error}`);
+            }
+          })
+          .catch((error: unknown) => {
+            console.error(
+              `[media-server] refresh dispatch failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
       }
     }
   } catch (error) {
@@ -2491,7 +2572,7 @@ async function runScheduledType3Now(options?: { force?: boolean }): Promise<Sche
     await hydratePan115CookieFromDb();
     const sync = tmdbSeasonMetadataSync();
     const accountId = await getCurrentAccountId();
-    const { model, llmConfig, preferredLanguage, qualityPreference } = await getAgentModel(getAccountScopedSettings(accountId));
+    const { model, llmConfig, preferredLanguage, qualityPreference, selectionPreference } = await getAgentModel(getAccountScopedSettings(accountId));
     const parents = await getWorkerStorageParents(accountId);
     result = await runScheduledType3Monitoring({
       repository,
@@ -2501,6 +2582,7 @@ async function runScheduledType3Now(options?: { force?: boolean }): Promise<Sche
       llmConfig,
       ...(preferredLanguage === undefined ? {} : { preferredLanguage }),
       ...(qualityPreference === undefined ? {} : { qualityPreference }),
+      ...(selectionPreference === undefined ? {} : { selectionPreference }),
       storageParentDirectoryId: parents.tv,
       animeStorageParentDirectoryId: parents.anime,
       moviesParentDirectoryId: parents.movies,
@@ -2645,7 +2727,7 @@ async function seedDemoIfEmpty(targetRepository: WorkflowRepository): Promise<vo
   await seedDemoWorkflowRepository(targetRepository);
 }
 
-async function trackingTargetFromCandidateId(candidateId: string): Promise<{
+async function trackingTargetFromCandidateId(candidateId: string, accountId?: string): Promise<{
   title: MediaTitle;
   season: TrackedSeason;
   keyword: string;
@@ -2662,7 +2744,7 @@ async function trackingTargetFromCandidateId(candidateId: string): Promise<{
       seasonNumber: parsed.seasonNumber,
       qualityPreference: defaultQuality(),
       storageDirectoryId: storageDirectoryIdForCandidate(candidateId),
-      metadataProvider: createTmdbMetadataProvider(await getTmdbAccesses(getAccountScopedSettings(await getCurrentAccountId()))),
+      metadataProvider: createTmdbMetadataProvider(await getTmdbAccesses(getAccountScopedSettings(accountId ?? await getCurrentAccountId()))),
     });
   }
 
@@ -3043,7 +3125,7 @@ async function defaultDriveIdOf(accountId: string): Promise<string | null> {
 async function getAccountStorageCredentials(
   accountId: string,
   connectedStorageId?: string | null,
-  options?: { strictId?: boolean },
+  options?: { strictId?: boolean; provisionMissingDirs?: boolean },
 ): Promise<AccountStorageCredentials | null> {
   try {
     const storages = await getWorkflowRepository().listConnectedStorages(accountId);
@@ -3074,7 +3156,7 @@ async function getAccountStorageCredentials(
     // persisted so subsequent runs skip. Best-effort: a failure leaves the CIDs
     // null and the scoped executor still fails loud (surfaced, not silent).
     const liveMode = process.env.MEDIA_TRACK_STORAGE_ADAPTER === "115";
-    if (liveMode && drive.status === "active" && !(rootCid && moviesCid && tvCid && animeCid)) {
+    if (options?.provisionMissingDirs !== false && liveMode && drive.status === "active" && !(rootCid && moviesCid && tvCid && animeCid)) {
       try {
         const p = await provisionDriveCategoryDirs(drive.provider, cookie, credential, drive.providerUid);
         ({ rootCid, moviesCid, tvCid, animeCid } = p);
@@ -3408,16 +3490,35 @@ export async function getWorkerStorageExecutor(
   accountId: string = DEFAULT_ACCOUNT_ID,
   connectedStorageId?: string | null,
 ): Promise<StorageExecutor> {
+  return buildAccountStorageExecutor(accountId, connectedStorageId);
+}
+
+/** Separate library executor: additional roots must come from saved scan authorization. */
+export async function getLibraryStorageExecutor(
+  accountId: string,
+  connectedStorageId: string,
+  authorizedRoots: readonly string[] = [],
+): Promise<StorageExecutor> {
+  return buildAccountStorageExecutor(accountId, connectedStorageId, authorizedRoots, true);
+}
+
+async function buildAccountStorageExecutor(
+  accountId: string,
+  connectedStorageId?: string | null,
+  authorizedRoots: readonly string[] = [],
+  strictId = false,
+): Promise<StorageExecutor> {
   const adapter = process.env.MEDIA_TRACK_STORAGE_ADAPTER ?? "fake";
   // "115" is the legacy name for "real storage mode"; the actual brand now comes
   // from the resolved drive's provider, so a quark drive works under the same gate.
   if (adapter === "115") {
-    const creds = await getAccountStorageCredentials(accountId, connectedStorageId);
+    const creds = await getAccountStorageCredentials(accountId, connectedStorageId, { strictId, provisionMissingDirs: !strictId });
+    if (strictId && (!creds || creds.status !== "active")) throw new Error("指定网盘不存在、已冻结或不属于当前账号");
     if (creds) {
       // Scope writes to THIS drive's own provisioned dirs — not the global env CIDs
       // (which belong to the default account's drive). Dispatch by the drive's
       // brand: 115 → Storage115Executor, quark → QuarkStorageExecutor.
-      const scopeCids = [creds.rootCid, creds.moviesCid, creds.tvCid, creds.animeCid].filter(
+      const scopeCids = [creds.rootCid, creds.moviesCid, creds.tvCid, creds.animeCid, ...authorizedRoots].filter(
         (cid): cid is string => Boolean(cid),
       );
       // Token-auth brands (光鸭/天翼) authenticate with a rotating credential blob
@@ -3428,7 +3529,7 @@ export async function getWorkerStorageExecutor(
         const guangYaAuth = creds.provider === "guangya"
           ? makeGuangYaAuthHooks(accountId, creds.id, creds.providerUid, creds.credential, creds.connectionMarker)
           : null;
-        return attachConfiguredAcquisitionLibraryStore(
+        return finishLibraryExecutor(
           createExecutorForBrand({
             provider: creds.provider,
             credential: guangYaAuth?.credentials ?? creds.credential ?? {},
@@ -3438,16 +3539,18 @@ export async function getWorkerStorageExecutor(
             onCredentialRefresh: makeTokenPersister(accountId, creds.id, creds.provider),
             ...(guangYaAuth ? { persistGuangYaTokens: guangYaAuth.onTokensRefreshed } : {}),
             ...(guangYaAuth ? { loadGuangYaCredentials: guangYaAuth.loadCurrentCredentials } : {}),
-          }),
+          }), strictId && scopeCids.length === 0,
         );
       }
-      return attachConfiguredAcquisitionLibraryStore(
-        createExecutorForBrand({
+      return finishLibraryExecutor(
+        creds.provider === "pan115" && strictId && scopeCids.length === 0
+          ? createBootstrapPan115CookieStorageExecutor({ cookie: creds.cookie })
+          : createExecutorForBrand({
           provider: creds.provider,
           cookie: creds.cookie,
           scopeCids,
           env: process.env,
-        }),
+        }), strictId && scopeCids.length === 0,
       );
     }
     // Legacy env-cookie 115 bootstrap when PAN115_COOKIE AND explicit 115 write
@@ -3478,14 +3581,23 @@ export async function getWorkerStorageExecutor(
   return attachConfiguredAcquisitionLibraryStore(fakeStorageExecutor);
 }
 
+function finishLibraryExecutor(storage: StorageExecutor, directoryReadsOnly: boolean): StorageExecutor {
+  if (!directoryReadsOnly) return attachConfiguredAcquisitionLibraryStore(storage);
+  return {
+    ...createUnconfiguredStorageExecutor(),
+    ...(storage.listDirectoryPage ? { listDirectoryPage: storage.listDirectoryPage.bind(storage) } : {}),
+  };
+}
+
 /**
  * The 115 landing parent CIDs for a run's account. Sourced from the account's
  * connected_storage (set at connect-time directory provision); falls back to the
  * env CIDs when the account has no 115 connection or the adapter is fake.
  */
-async function getWorkerStorageParents(
+export async function getWorkerStorageParents(
   accountId: string = DEFAULT_ACCOUNT_ID,
   connectedStorageId?: string | null,
+  options?: { strictId?: boolean; provisionMissingDirs?: boolean },
 ): Promise<{
   tv: string;
   anime: string;
@@ -3493,8 +3605,12 @@ async function getWorkerStorageParents(
 }> {
   const creds =
     process.env.MEDIA_TRACK_STORAGE_ADAPTER === "115"
-      ? await getAccountStorageCredentials(accountId, connectedStorageId)
+      ? await getAccountStorageCredentials(accountId, connectedStorageId, options)
       : null;
+  if (options?.strictId && process.env.MEDIA_TRACK_STORAGE_ADAPTER === "115" && (!creds || creds.status !== "active")) {
+    throw new Error("指定网盘不存在、已冻结或不属于当前账号");
+  }
+  if (creds && creds.provider !== "pan115" && !(creds.tvCid && creds.moviesCid)) throw new Error("该网盘分类目录尚未就绪");
   return {
     tv: creds?.tvCid || storageParentDirectoryId(),
     anime: creds?.animeCid || creds?.tvCid || animeParentDirectoryId(),
@@ -3600,6 +3716,7 @@ export async function acquireLlmPreflightError(
 
 async function getAgentModel(repository: {
   getSetting(key: string): Promise<string | null>;
+  getOwnSetting?: (key: string) => Promise<string | null>;
 }): Promise<{
   model: ReturnType<typeof createAgentModelFromEnv>;
   /** The config that built `model` (baseURL/modelId only — NEVER the apiKey: the
@@ -3608,12 +3725,14 @@ async function getAgentModel(repository: {
   llmConfig: { baseURL?: string; modelId?: string };
   preferredLanguage: string | undefined;
   qualityPreference: "high" | "medium" | undefined;
+  selectionPreference: string | undefined;
 }> {
   assertWorkflowAgentAdapterPolicy(process.env);
   const env = process.env;
   const adapter = env.MEDIA_TRACK_AGENT_ADAPTER === "vercel-ai" ? "vercel-ai" : "fake";
   const preferredLanguage = await getPreferredLanguage(repository);
   const qualityPreference = await getQualityPreference(repository);
+  const selectionPreference = await getSelectionPreference(repository);
 
   // Resolve the live model config the SAME way the test action does (shared
   // resolver) — DB-first, then .env, then the shipped free preset
@@ -3648,7 +3767,7 @@ async function getAgentModel(repository: {
     ...(baseURL === undefined ? {} : { baseURL }),
     ...(modelId === undefined ? {} : { modelId }),
   };
-  return { model, llmConfig, preferredLanguage, qualityPreference };
+  return { model, llmConfig, preferredLanguage, qualityPreference, selectionPreference };
 }
 
 function fakeTransferOutcomes() {

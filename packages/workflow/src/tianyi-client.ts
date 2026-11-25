@@ -377,16 +377,33 @@ export class TianyiClient {
   // ── 目录读 ───────────────────────────────────────────────────────────────
 
   async listFiles(folderId: string = ROOT_FOLDER_ID): Promise<TianyiItem[]> {
+    return (await this.listFilesPage({ folderId, pageNum: 1, pageSize: 1000 })).items;
+  }
+
+  /** One native listFiles page. The provider accepts numbered pages; a full page
+   *  is not treated as the end of the directory. */
+  async listFilesPage(input: {
+    folderId: string;
+    pageNum: number;
+    pageSize: number;
+  }): Promise<{ items: TianyiItem[]; hasMore: boolean }> {
+    if (!Number.isSafeInteger(input.pageNum) || input.pageNum < 1) {
+      throw new RangeError("pageNum must be a positive integer");
+    }
+    if (!Number.isSafeInteger(input.pageSize) || input.pageSize < 1 || input.pageSize > 1000) {
+      throw new RangeError("pageSize must be between 1 and 1000");
+    }
     const data = await this.webGet("/api/open/file/listFiles.action", [
-      ["folderId", folderId],
+      ["folderId", input.folderId],
       ["mediaType", "0"],
       ["orderBy", "lastOpTime"],
       ["descending", "true"],
-      ["pageNum", "1"],
-      ["pageSize", "1000"],
+      ["pageNum", String(input.pageNum)],
+      ["pageSize", String(input.pageSize)],
       ["iconOption", "0"],
     ]);
-    return mergeTianyiListing(data["fileListAO"]);
+    const items = mergeTianyiListing(data["fileListAO"]);
+    return { items, hasMore: items.length === input.pageSize };
   }
 
   /** Query total and used storage capacity (`GET /api/open/user/getUserInfo.action`).
@@ -453,6 +470,7 @@ export class TianyiClient {
     shareCode: string;
     accessCode: string;
     targetFolderId: string;
+    onSubmitted?: (taskId: string) => Promise<void>;
   }): Promise<TianyiSaveResult> {
     const info = await this.getShareInfo(input.shareCode);
     const items = await this.listShareDir({
@@ -480,7 +498,22 @@ export class TianyiClient {
     if (!taskId) {
       return { ok: false, failed: 0, message: "SHARE_SAVE 未返回 taskId(账号唯一转存槽可能占用)" };
     }
+    await input.onSubmitted?.(taskId);
     return this.pollBatchTask(taskId, input.targetFolderId);
+  }
+
+  /** One status read for a persisted SHARE_SAVE task. */
+  async getBatchTaskStatus(
+    taskId: string,
+  ): Promise<{ status: number; failedCount: number }> {
+    const data = await this.webPost("/api/open/batch/checkBatchTask.action", {
+      type: "SHARE_SAVE",
+      taskId,
+    });
+    return {
+      status: numOf(data["taskStatus"]),
+      failedCount: numOf(data["failedCount"]),
+    };
   }
 
   private async pollBatchTask(
@@ -490,14 +523,12 @@ export class TianyiClient {
     intervalMs = DEFAULT_SAVE_POLL_INTERVAL_MS,
   ): Promise<TianyiSaveResult> {
     for (let i = 0; i < maxPolls; i++) {
-      const d = await this.webPost("/api/open/batch/checkBatchTask.action", { type: "SHARE_SAVE", taskId });
-      const status = numOf(d["taskStatus"]);
+      const { status, failedCount } = await this.getBatchTaskStatus(taskId);
       if (status === 4) {
-        const failed = numOf(d["failedCount"]);
         return {
-          ok: failed === 0,
-          failed,
-          message: failed > 0 ? `${failed} 个文件被拦(可能被和谐)` : "",
+          ok: failedCount === 0,
+          failed: failedCount,
+          message: failedCount > 0 ? `${failedCount} 个文件被拦(可能被和谐)` : "",
         };
       }
       if (status === 2) {

@@ -2,14 +2,17 @@ import { driveConnectionBadge } from "../../lib/settings-badge";
 import { maskProviderUid } from "../../lib/mask-provider-uid";
 import { connection } from "next/server";
 import { Suspense } from "react";
-import { Bell, Bot, Cable, CalendarClock, Clapperboard, ExternalLink, Gauge, KeyRound, Languages, Radio, ShieldCheck, Subtitles, TriangleAlert, Users } from "lucide-react";
+import { Bell, Bot, Cable, CalendarClock, Clapperboard, ExternalLink, Gauge, KeyRound, Languages, Radio, RefreshCw, ShieldCheck, Subtitles, TriangleAlert, Users } from "lucide-react";
 import { AppSidebar } from "../../components/app-sidebar";
 import { AddDriveBrandTabs } from "../../components/add-drive-brand-tabs";
 import { TestConnectionButton } from "../../components/test-connection-button";
 import { UnbindStorageButton } from "../../components/unbind-storage-button";
 import { PushNotificationForm } from "../../components/push-notification-form";
+import { MediaServerRefreshForm } from "../../components/media-server-refresh-form";
 import { PreferredLanguageForm } from "../../components/preferred-language-form";
-import { QualityPreferenceForm } from "../../components/quality-preference-form";
+import { SelectionPreferenceForm } from "../../components/selection-preference-form";
+import { MessagingSettingsForm } from "../../components/messaging-settings-form";
+import { readMessagingConnections, messagingConnectionViews } from "../../lib/messaging/config";
 import { LlmConfigForm } from "../../components/llm-config-form";
 import { RestoreFreeLlmButton } from "../../components/restore-free-llm-button";
 import { TmdbApiKeyForm } from "../../components/tmdb-api-key-form";
@@ -38,7 +41,11 @@ import { RemoteAccessSection } from "../../components/settings/remote-access-sec
 import { UpdateSection } from "../../components/settings/update-section";
 import { GitHubNameplate } from "../../components/github-nameplate";
 import { SettingsActionInbox } from "../../components/settings-action-inbox";
-import { loadSettingsAttentionSummary, markSettingsAttentionSeen } from "../../lib/settings-attention-server";
+import {
+  loadSettingsAttentionSummary,
+  markSettingsAttentionSeen,
+  resolveCurrentIsOwner,
+} from "../../lib/settings-attention-server";
 import {
   getAccountConnectedStorages,
   getAccountScopedSettings,
@@ -56,6 +63,7 @@ import {
   getWorkflowRepository,
   PREFERRED_LANGUAGE_SETTING_KEY,
   QUALITY_PREFERENCE_SETTING_KEY,
+  readRawSelectionPreference,
   LLM_BASE_URL_SETTING_KEY,
   LLM_MODEL_ID_SETTING_KEY,
   LLM_API_KEY_SETTING_KEY,
@@ -87,6 +95,9 @@ import {
   getStorageBrand,
   isFreeLlmPreset,
   isRegisteredStorageProvider,
+  MEDIA_SERVER_SETTING_KEYS,
+  parseMediaServerDelaySeconds,
+  resolveInitialSelectionPreferenceText,
 } from "@media-track/workflow";
 import { isDemoMode } from "../../lib/demo-mode";
 
@@ -165,7 +176,13 @@ export default function SettingsPage({
                     <DailySweepSection />
                   </Suspense>
                   <Suspense fallback={<div className="skeleton skeleton-heading" />}>
+                    <MediaServerRefreshSection />
+                  </Suspense>
+                  <Suspense fallback={<div className="skeleton skeleton-heading" />}>
                     <PushNotificationSection />
+                  </Suspense>
+                  <Suspense fallback={<div className="skeleton skeleton-heading" />}>
+                    <MessagingSection />
                   </Suspense>
                 </>
               }
@@ -296,7 +313,11 @@ async function PreferredLanguageSection() {
 async function QualityPreferenceSection() {
   await connection();
   const repository = getAccountScopedSettings(await getCurrentAccountId());
-  const initial = (await repository.getSetting(QUALITY_PREFERENCE_SETTING_KEY)) ?? "any";
+  const [savedSelection, legacyQuality] = await Promise.all([
+    readRawSelectionPreference(repository),
+    repository.getSetting(QUALITY_PREFERENCE_SETTING_KEY),
+  ]);
+  const initial = resolveInitialSelectionPreferenceText({ savedSelection, legacyQuality });
 
   return (
     <section className="panel" style={{ maxWidth: 720, marginTop: 24 }}>
@@ -304,12 +325,12 @@ async function QualityPreferenceSection() {
         <div>
           <h2 className="panel-title">
             <Gauge size={16} aria-hidden style={{ verticalAlign: "-2px", marginRight: 8 }} />
-            偏好画质
+            选源要求
           </h2>
-          <p className="panel-note">优先获取的画质档位（覆盖优先，找不到不留缺）</p>
+          <p className="panel-note">电影、剧集、巡检补缺与换源共用的挑片倾向（覆盖优先，找不到理想版本时不留缺）</p>
         </div>
       </div>
-      <QualityPreferenceForm initial={initial} />
+      <SelectionPreferenceForm initial={initial} saved={savedSelection !== null && savedSelection !== undefined} />
     </section>
   );
 }
@@ -899,6 +920,69 @@ async function PushNotificationSection() {
       </div>
 
       <PushNotificationForm configured={configured} />
+    </section>
+  );
+}
+
+async function MediaServerRefreshSection() {
+  await connection();
+  if (!(await resolveCurrentIsOwner())) return null;
+  const repository = getAccountScopedSettings(await getCurrentAccountId());
+  const [embyUrl, embyKey, jellyfinUrl, jellyfinKey, plexUrl, plexToken, webhookUrl, delayRaw] =
+    await Promise.all([
+      repository.getSetting(MEDIA_SERVER_SETTING_KEYS.embyUrl),
+      repository.getSetting(MEDIA_SERVER_SETTING_KEYS.embyApiKey),
+      repository.getSetting(MEDIA_SERVER_SETTING_KEYS.jellyfinUrl),
+      repository.getSetting(MEDIA_SERVER_SETTING_KEYS.jellyfinApiKey),
+      repository.getSetting(MEDIA_SERVER_SETTING_KEYS.plexUrl),
+      repository.getSetting(MEDIA_SERVER_SETTING_KEYS.plexToken),
+      repository.getSetting(MEDIA_SERVER_SETTING_KEYS.webhookUrl),
+      repository.getSetting(MEDIA_SERVER_SETTING_KEYS.delaySeconds),
+    ]);
+
+  return (
+    <section className="panel" style={{ maxWidth: 720, marginTop: 24 }}>
+      <div className="panel-header">
+        <div>
+          <h2 className="panel-title">
+            <RefreshCw size={16} aria-hidden style={{ verticalAlign: "-2px", marginRight: 8 }} />
+            影视服务器入库刷新
+          </h2>
+          <p className="panel-note">
+            新视频落盘后自动触发媒体库扫描（通过 CloudDrive2 / OpenList / rclone 挂载网盘时无需手动扫库）
+          </p>
+        </div>
+      </div>
+      <MediaServerRefreshForm
+        initial={{
+          embyUrl: embyUrl ?? "",
+          embyKeySet: Boolean(embyKey?.trim()),
+          jellyfinUrl: jellyfinUrl ?? "",
+          jellyfinKeySet: Boolean(jellyfinKey?.trim()),
+          plexUrl: plexUrl ?? "",
+          plexTokenSet: Boolean(plexToken?.trim()),
+          webhookSet: Boolean(webhookUrl?.trim()),
+          delaySeconds: parseMediaServerDelaySeconds(delayRaw),
+        }}
+      />
+    </section>
+  );
+}
+
+async function MessagingSection() {
+  await connection();
+  const accountId = await getCurrentAccountId();
+  const repository = getWorkflowRepository();
+  const [connections, storages] = await Promise.all([
+    readMessagingConnections(accountId, repository), repository.listConnectedStorages(accountId),
+  ]);
+  return (
+    <section className="panel" style={{ maxWidth: 720, marginTop: 24 }}>
+      <div className="panel-header"><div>
+        <h2 className="panel-title">消息机器人</h2>
+        <p className="panel-note">通过本人私聊搜片、转存、查询和停止任务。开启前填写平台凭证与本人标识。</p>
+      </div></div>
+      <MessagingSettingsForm initial={messagingConnectionViews(connections)} storages={storages.filter((s) => s.status === "active").map((s) => ({ id: s.id, label: s.label ?? s.provider }))} />
     </section>
   );
 }

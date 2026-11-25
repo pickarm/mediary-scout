@@ -9,6 +9,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PostgresWorkflowRepository, initializeWorkflowPostgresSchema } from "../src/postgres.js";
 import { workflowPersistenceFixture } from "./workflow-fixtures.js";
+import { PostgresMessagingStore } from "../../../apps/web/lib/messaging/store.js";
 
 const adminConnectionString = process.env.MEDIA_TRACK_TEST_POSTGRES_ADMIN_URL;
 const integration = describe.skipIf(!adminConnectionString);
@@ -162,6 +163,7 @@ integration("F16 migration rehearsal and switch tooling", () => {
     copyUrl = copy.toString();
     pool = new pg.Pool({ connectionString: copyUrl, application_name: "fork-migration-fixture" });
     await initializeWorkflowPostgresSchema(pool);
+    await new PostgresMessagingStore(pool).ensureSchema();
     await seedFixture(pool, accountId, storageId);
     manifestPath = path.join(tempDir, "source-manifest.json");
   }, 60_000);

@@ -56,6 +56,13 @@
   ],
   "fingerprintTables": [
     {
+      "id": "messaging_jobs",
+      "table": "messaging_jobs",
+      "columns": ["id", "connection_id", "platform_message_id", "account_id", "platform", "conversation_id", "sender_id", "text", "callback_data", "reply_token", "input_kind", "phase", "candidates", "selected_candidate_index", "workflow_run_id", "scan_task_id", "organization_key", "landing_storage_id", "landing_directory_id", "receipt", "result", "error", "send_status", "stop_requested", "received_seq", "created_at", "updated_at"],
+      "group": "messaging",
+      "required": false
+    },
+    {
       "id": "media_titles",
       "table": "media_titles",
       "columns": ["id", "payload"],

@@ -65,6 +65,7 @@ export function LibraryScanSettings({
   const [pickerPath, setPickerPath] = useState<Array<{ id: string; label: string }>>([]);
   const [directoryItems, setDirectoryItems] = useState<LibraryDirectoryChoice[]>([]);
   const [directoryNextPage, setDirectoryNextPage] = useState<number | null>(null);
+  const [directoryNextCursor, setDirectoryNextCursor] = useState<string | null>(null);
   const [directoryLoading, setDirectoryLoading] = useState(false);
   const [directoryError, setDirectoryError] = useState<string | null>(null);
   const generation = useRef(0);
@@ -238,7 +239,7 @@ export function LibraryScanSettings({
     void loadStorageData(storageId, controller.signal, currentGeneration);
   };
 
-  const loadDirectory = useCallback(async (parentId: string, page: number, replace: boolean) => {
+  const loadDirectory = useCallback(async (parentId: string, page: number, cursor: string | null, replace: boolean) => {
     if (!storageId) return;
     const currentGeneration = generation.current;
     const currentPickerGeneration = ++pickerGeneration.current;
@@ -248,10 +249,11 @@ export function LibraryScanSettings({
     setDirectoryLoading(true);
     setDirectoryError(null);
     try {
-      const result = await loadDirectoryPage(storageId, parentId, page, controller.signal);
+      const result = await loadDirectoryPage(storageId, parentId, page, cursor, controller.signal);
       if (controller.signal.aborted || generation.current !== currentGeneration || pickerGeneration.current !== currentPickerGeneration) return;
       setDirectoryItems((current) => replace ? result.items : [...current, ...result.items]);
       setDirectoryNextPage(result.nextPage);
+      setDirectoryNextCursor(result.nextCursor);
     } catch (error) {
       if (!controller.signal.aborted && pickerGeneration.current === currentPickerGeneration) setDirectoryError(error instanceof Error ? error.message : "读取目录失败。");
     } finally { if (!controller.signal.aborted && generation.current === currentGeneration && pickerGeneration.current === currentPickerGeneration) setDirectoryLoading(false); }
@@ -259,21 +261,22 @@ export function LibraryScanSettings({
 
   const openPicker = (kind: PickerKind) => {
     setPickerKind(kind);
-    setPickerPath([{ id: "", label: "光鸭网盘根目录" }]);
-    setDirectoryItems([]); setDirectoryNextPage(null); setDirectoryError(null);
-    void loadDirectory("", 0, true);
+    const rootId = storage?.rootDirectoryId ?? "";
+    setPickerPath([{ id: rootId, label: `${storage?.label ?? "网盘"}根目录` }]);
+    setDirectoryItems([]); setDirectoryNextPage(null); setDirectoryNextCursor(null); setDirectoryError(null);
+    void loadDirectory(rootId, 0, null, true);
   };
 
   const enterDirectory = (item: LibraryDirectoryChoice) => {
     const path = [...pickerPath, { id: item.directoryId, label: item.name }];
-    setPickerPath(path); setDirectoryItems([]); setDirectoryNextPage(null);
-    void loadDirectory(item.directoryId, 0, true);
+    setPickerPath(path); setDirectoryItems([]); setDirectoryNextPage(null); setDirectoryNextCursor(null);
+    void loadDirectory(item.directoryId, 0, null, true);
   };
 
   const goBackInPicker = (index: number) => {
     const path = pickerPath.slice(0, index + 1);
-    setPickerPath(path); setDirectoryItems([]); setDirectoryNextPage(null);
-    void loadDirectory(path[path.length - 1]?.id ?? "", 0, true);
+    setPickerPath(path); setDirectoryItems([]); setDirectoryNextPage(null); setDirectoryNextCursor(null);
+    void loadDirectory(path[path.length - 1]?.id ?? "", 0, null, true);
   };
 
   const chooseDirectory = (item: LibraryDirectoryChoice) => {
@@ -384,8 +387,8 @@ export function LibraryScanSettings({
   return (
     <div className={styles.root}>
       {emptyStorages ? <section className={`panel ${styles.empty}`}>
-        <strong>还没有连接光鸭网盘</strong>
-        <p>连接光鸭后即可选择媒体目录并创建扫描任务。</p>
+        <strong>还没有连接可用网盘</strong>
+        <p>连接网盘后即可选择媒体目录并创建扫描任务。</p>
         <Link className="primary-button" href={settingsHref}>前往设置连接</Link>
       </section> : <>
         <section className={`panel ${styles.panel}`}>
@@ -398,7 +401,7 @@ export function LibraryScanSettings({
               </select>
             </label>
           </div>
-          {storage?.status === "frozen" && <div className={styles.notice}>该光鸭连接已冻结，可查看已有配置和任务；恢复连接后才能修改配置或开始扫描。</div>}
+          {storage?.status === "frozen" && <div className={styles.notice}>该网盘连接已冻结，可查看已有配置和任务；恢复连接后才能修改配置或开始扫描。</div>}
           {pageError && <div className={styles.error} role="alert"><CircleAlert size={17} /> <span>{pageError}</span><button className="secondary-button" onClick={reload}><RefreshCw size={14} />重试</button></div>}
           {loading && configurations.length === 0 && <div className={styles.loading}><LoaderCircle size={18} className={styles.spin} />正在读取已保存配置与扫描任务…</div>}
           <div className={styles.configSelectRow}>
@@ -420,7 +423,7 @@ export function LibraryScanSettings({
                   <Folder size={15} /><span title={root.directoryId}>{root.name}</span>
                   <button type="button" aria-label={`移除${root.name}`} onClick={() => setSourceRoots((current) => current.filter((entry) => entry.directoryId !== root.directoryId))} disabled={formDisabled}><X size={14} /></button>
                 </div>)}
-                {sourceRoots.length === 0 && <p className={styles.hint}>从光鸭目录中选择一个或多个来源。</p>}
+                {sourceRoots.length === 0 && <p className={styles.hint}>从当前网盘目录中选择一个或多个来源。</p>}
               </div>
               <button className="secondary-button" type="button" onClick={() => openPicker("sources")} disabled={formDisabled || sourceRoots.length >= 20}><Folder size={15} />选择来源目录</button>
             </fieldset>
@@ -495,9 +498,9 @@ export function LibraryScanSettings({
 
       {pickerKind && <div className={styles.backdrop} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPickerKind(null); }}>
         <section className={`${styles.picker} panel`} role="dialog" aria-modal="true" aria-labelledby="directory-picker-title">
-          <div className={styles.pickerHeader}><div><h2 id="directory-picker-title">选择{pickerKind === "sources" ? "扫描来源" : pickerKind === "movie" ? "电影目标" : "剧集目标"}目录</h2><p>只能选择此光鸭账号中实际浏览到的目录。</p></div><button className="secondary-button" onClick={() => setPickerKind(null)} aria-label="关闭目录选择器"><X size={16} /></button></div>
+          <div className={styles.pickerHeader}><div><h2 id="directory-picker-title">选择{pickerKind === "sources" ? "扫描来源" : pickerKind === "movie" ? "电影目标" : "剧集目标"}目录</h2><p>只能选择此账号中实际浏览到的目录。</p></div><button className="secondary-button" onClick={() => setPickerKind(null)} aria-label="关闭目录选择器"><X size={16} /></button></div>
           <nav className={styles.breadcrumb} aria-label="目录路径">{pickerPath.map((entry, index) => <span key={`${entry.id}-${index}`}><button type="button" onClick={() => goBackInPicker(index)}>{entry.label}</button>{index < pickerPath.length - 1 && <ChevronRight size={14} />}</span>)}</nav>
-          {directoryError && <div className={styles.error} role="alert"><span>{directoryError}</span><button className="secondary-button" onClick={() => void loadDirectory(pickerPath[pickerPath.length - 1]?.id ?? "", directoryItems.length ? (directoryNextPage ?? 0) : 0, directoryItems.length === 0)}>重试</button></div>}
+          {directoryError && <div className={styles.error} role="alert"><span>{directoryError}</span><button className="secondary-button" onClick={() => void loadDirectory(pickerPath[pickerPath.length - 1]?.id ?? "", directoryItems.length ? (directoryNextPage ?? 0) : 0, directoryItems.length ? directoryNextCursor : null, directoryItems.length === 0)}>重试</button></div>}
           {directoryLoading && directoryItems.length === 0 && <div className={styles.loading}><LoaderCircle size={18} className={styles.spin} />正在读取目录…</div>}
           <div className={styles.directoryList}>
             {directoryItems.map((item) => <div className={styles.directoryRow} key={item.directoryId}>
@@ -506,7 +509,7 @@ export function LibraryScanSettings({
             </div>)}
             {!directoryItems.length && !directoryLoading && !directoryError && <div className={styles.emptyDirectory}>此目录下没有可选子目录。</div>}
           </div>
-          {directoryNextPage !== null && <button className="secondary-button" type="button" onClick={() => void loadDirectory(pickerPath[pickerPath.length - 1]?.id ?? "", directoryNextPage, false)} disabled={directoryLoading}>{directoryLoading ? "读取中…" : "加载更多目录"}<ChevronRight size={14} /></button>}
+          {directoryNextPage !== null && <button className="secondary-button" type="button" onClick={() => void loadDirectory(pickerPath[pickerPath.length - 1]?.id ?? "", directoryNextPage, directoryNextCursor, false)} disabled={directoryLoading}>{directoryLoading ? "读取中…" : "加载更多目录"}<ChevronRight size={14} /></button>}
           <div className={styles.pickerFooter}><button className="secondary-button" type="button" onClick={() => pickerPath.length > 1 ? goBackInPicker(pickerPath.length - 2) : setPickerKind(null)}><ChevronLeft size={14} />{pickerPath.length > 1 ? "返回上级" : "取消"}</button></div>
         </section>
       </div>}

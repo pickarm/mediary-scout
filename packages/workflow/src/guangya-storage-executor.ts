@@ -28,6 +28,10 @@ import { episodeCodeFromFileName } from "./episode-code.js";
 import { isGuangYaAuthError, parseGuangYaShareUrl } from "./guangya-client.js";
 import type { GuangYaResolvedRes, GuangYaTaskStatus } from "./guangya-client.js";
 import type { StorageExecutor, UnparsedVideoFile } from "./ports.js";
+import {
+  isTransferSubmissionPersistenceError,
+  notifyTransferSubmitted,
+} from "./transfer-receipt.js";
 
 const MAX_RECURSIVE_COLLECT_DEPTH = 6;
 const DEFAULT_MIN_VIDEO_SIZE_BYTES = 10 * 1024 * 1024;
@@ -64,6 +68,11 @@ export interface GuangYaStorageItem {
  */
 export interface GuangYaStorageClient {
   listFiles(parentId: string): Promise<GuangYaStorageItem[]>;
+  listFilesPage?(
+    parentId: string,
+    page: number,
+    pageSize: number,
+  ): Promise<{ items: GuangYaStorageItem[]; hasMore: boolean }>;
   createDir(parentId: string, dirName: string): Promise<string>;
   renameFile(fileId: string, newName: string): Promise<void>;
   deleteFiles(fileIds: string[]): Promise<void>;
@@ -154,6 +163,37 @@ export class GuangYaStorageExecutor implements StorageExecutor {
     return this.client.getSpace();
   }
 
+  async listDirectoryPage(input: {
+    directoryId: string;
+    page: number;
+    pageSize: number;
+  }): Promise<{
+    items: Array<{
+      fileId: string;
+      parentId: string;
+      name: string;
+      isDirectory: boolean;
+      sizeBytes: number | null;
+    }>;
+    nextPage: number | null;
+  }> {
+    if (!this.client.listFilesPage) {
+      throw new Error("GUANGYA_DIRECTORY_PAGE_UNSUPPORTED");
+    }
+    const directoryId = normalizeId(input.directoryId);
+    const page = await this.client.listFilesPage(directoryId, input.page, input.pageSize);
+    return {
+      items: page.items.map((item) => ({
+        fileId: idOf(item),
+        parentId: item.parentId,
+        name: nameOf(item),
+        isDirectory: isDirectory(item),
+        sizeBytes: sizeOf(item),
+      })),
+      nextPage: page.hasMore ? input.page + 1 : null,
+    };
+  }
+
   async createDirectory(input: { name: string; parentId: string }): Promise<string> {
     const safeParentId = this.assertWithinWriteScope(input.parentId, "create directory");
     // Find-or-create: seasons of one title initialize at different times and must
@@ -195,6 +235,8 @@ export class GuangYaStorageExecutor implements StorageExecutor {
     workflowRunId: string;
     directoryId: string;
     candidate: ResourceCandidate;
+    wholePackage?: boolean;
+    onSubmitted?: (receipt: Record<string, unknown>) => Promise<void>;
   }): Promise<TransferAttempt> {
     const url = stringValue(input.candidate.providerPayload["url"]);
     const share = parseGuangYaShareUrl(url);
@@ -213,11 +255,12 @@ export class GuangYaStorageExecutor implements StorageExecutor {
     const before = new Set((await this.listVideoFiles(safe)).map((f) => f.id));
 
     let providerMessage = "";
+    let acceptedOfflineTaskId: string | null = null;
     try {
       const resolved = await this.client.resolveRes(url);
       const subs = flattenBtSubfiles(resolved.btResInfo?.subfiles ?? []);
       const excluded = new Set(resolved.btResInfo?.excludeIndices ?? []);
-      const videoIndexes = subs
+      const availableIndexes = subs
         .map((s) => ({
           // Protobuf JSON omits uint32 zero values (`fileIndex: 0`), so a missing/null
           // leaf fileIndex is 0 per the official guangyapan-drive skill, never the
@@ -225,20 +268,32 @@ export class GuangYaStorageExecutor implements StorageExecutor {
           idx: s.fileIndex ?? 0,
           name: s.fileName,
         }))
-        .filter((s) => !excluded.has(s.idx) && isVideoName(s.name, this.videoExtensions))
+        .filter((s) => !excluded.has(s.idx))
+        .filter((s) => input.wholePackage === true || isVideoName(s.name, this.videoExtensions))
         .map((s) => s.idx);
-      const uniqueVideoIndexes = [...new Set(videoIndexes)];
+      const uniqueIndexes = [...new Set(availableIndexes)];
       const taskInput: Parameters<GuangYaStorageClient["createTask"]>[0] = {
         url: resolved.url || url,
         parentId: safe,
         newName: resolved.btResInfo?.fileName || "offline",
       };
-      if (uniqueVideoIndexes.length) {
-        taskInput.fileIndexes = uniqueVideoIndexes;
+      if (uniqueIndexes.length) {
+        taskInput.fileIndexes = uniqueIndexes;
       }
       const taskId = await this.client.createTask(taskInput);
+      acceptedOfflineTaskId = taskId;
+      await notifyTransferSubmitted(input.onSubmitted, {
+        kind: "guangya_offline",
+        state: "running",
+        providerTaskId: taskId,
+        ...(resolved.btResInfo?.infoHash ? { infoHash: resolved.btResInfo.infoHash } : {}),
+        submittedAt: new Date().toISOString(),
+      });
       await this.pollTask(taskId);
     } catch (error) {
+      if (isTransferSubmissionPersistenceError(error)) {
+        throw error;
+      }
       // Auth failures must surface so the worker freezes the drive — never absorbed.
       if (isGuangYaAuthError(error)) {
         throw error;
@@ -265,9 +320,44 @@ export class GuangYaStorageExecutor implements StorageExecutor {
         providerMessage ||
         (status === "no_target_change" ? "离线任务完成但目标目录未出现新视频" : ""),
       materializedFileIds,
+      receipt: {
+        kind: "guangya_offline",
+        state: providerMessage ? "failed" : "completed",
+        ...(acceptedOfflineTaskId === null ? {} : { providerTaskId: acceptedOfflineTaskId }),
+        submittedAt: new Date().toISOString(),
+      },
     };
     this.nextTransferNumber += 1;
     return attempt;
+  }
+
+  async getTransferStatus(
+    receipt: Record<string, unknown>,
+  ): Promise<"running" | "completed" | "failed" | "unknown"> {
+    const kind = receipt["providerKind"] ?? receipt["kind"];
+    const taskId = receipt["providerTaskId"];
+    if (typeof taskId !== "string" || !taskId) return "unknown";
+    if (kind === "guangya_share") {
+      if (!this.client.getTaskStatus) return "unknown";
+      const { status } = await this.client.getTaskStatus(taskId);
+      return status === 2
+        ? "completed"
+        : status === 1
+          ? "running"
+          : status === 3
+            ? "failed"
+            : "unknown";
+    }
+    if (kind !== "guangya_offline") return "unknown";
+    const [task] = await this.client.listTask([taskId]);
+    if (!task) return "unknown";
+    return task.status === 2
+      ? "completed"
+      : task.status === 1
+        ? "running"
+      : task.status === 3
+          ? "failed"
+          : "unknown";
   }
 
   /** 光鸭分享链 → our directory: token → list the share root → restore EVERY root
@@ -285,6 +375,7 @@ export class GuangYaStorageExecutor implements StorageExecutor {
     directoryId: string;
     candidate: ResourceCandidate;
     share: { shareId: string; code: string };
+    onSubmitted?: (receipt: Record<string, unknown>) => Promise<void>;
   }): Promise<TransferAttempt> {
     const { client } = this;
     const before = new Set((await this.listVideoFiles(input.directoryId)).map((f) => f.id));
@@ -313,6 +404,12 @@ export class GuangYaStorageExecutor implements StorageExecutor {
       // From here the server-side task EXISTS and may land whatever happens next, so
       // a polling error is not proof of failure — it is pending, like a timeout.
       acceptedTaskId = taskId;
+      await notifyTransferSubmitted(input.onSubmitted, {
+        kind: "guangya_share",
+        state: "running",
+        providerTaskId: taskId,
+        submittedAt: new Date().toISOString(),
+      });
       let done = false;
       for (let poll = 0; poll < this.taskPollMaxPolls; poll += 1) {
         const { status } = await client.getTaskStatus(taskId);
@@ -336,6 +433,9 @@ export class GuangYaStorageExecutor implements StorageExecutor {
         pendingMessage = `GUANGYA_RESTORE_TIMEOUT: 转存任务 ${taskId} 在 ${this.taskPollMaxPolls} 次轮询内未完成(仍在进行,可能稍后落盘;先 inspectStaging 再决定)`;
       }
     } catch (error) {
+      if (isTransferSubmissionPersistenceError(error)) {
+        throw error;
+      }
       if (isGuangYaAuthError(error)) {
         throw error;
       }
@@ -392,6 +492,12 @@ export class GuangYaStorageExecutor implements StorageExecutor {
       // should reread staging before it moves / marks.
       providerMessage: providerMessage || pendingMessage,
       materializedFileIds,
+      receipt: {
+        kind: "guangya_share",
+        state: providerMessage ? "failed" : pendingMessage ? "running" : "completed",
+        ...(acceptedTaskId ? { providerTaskId: acceptedTaskId } : {}),
+        submittedAt: new Date().toISOString(),
+      },
     };
     this.nextTransferNumber += 1;
     return attempt;

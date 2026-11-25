@@ -24,6 +24,10 @@ import {
   type QuarkCookieClient,
   type QuarkItem,
 } from "./quark-cookie-client.js";
+import {
+  isTransferSubmissionPersistenceError,
+  notifyTransferSubmitted,
+} from "./transfer-receipt.js";
 
 const MAX_RECURSIVE_COLLECT_DEPTH = 6;
 const DEFAULT_MAX_WRITE_SCOPE_DEPTH = 8;
@@ -111,6 +115,47 @@ export class QuarkStorageExecutor implements StorageExecutor {
     return this.client.getSpace();
   }
 
+  async listDirectoryPage(input: {
+    directoryId: string;
+    page: number;
+    pageSize: number;
+  }): Promise<{
+    items: Array<{
+      fileId: string;
+      parentId: string;
+      name: string;
+      isDirectory: boolean;
+      sizeBytes: number | null;
+    }>;
+    nextPage: number | null;
+  }> {
+    const directoryId = normalizeId(input.directoryId);
+    const nativePage = input.page + 1;
+    const page = await this.client.listItemsPage({
+      directoryId,
+      page: nativePage,
+      size: input.pageSize,
+    });
+    const items = page.items.map((item) => {
+      const fileId = idOf(item);
+      const name = nameOf(item);
+      if (!fileId || !name) {
+        throw new Error(`${this.profile.errorPrefix}_DIRECTORY_PAGE_INVALID_ITEM`);
+      }
+      return {
+        fileId,
+        parentId: directoryId,
+        name,
+        isDirectory: isDirectory(item),
+        sizeBytes: sizeOf(item),
+      };
+    });
+    const hasMore = page.total === null
+      ? items.length === input.pageSize
+      : nativePage * input.pageSize < page.total;
+    return { items, nextPage: hasMore ? input.page + 1 : null };
+  }
+
   async createDirectory(input: { name: string; parentId: string }): Promise<string> {
     const safeParentId = await this.assertWithinWriteScope(input.parentId, "create directory");
     // Find-or-create: seasons of one title initialize at different times and must
@@ -172,6 +217,8 @@ export class QuarkStorageExecutor implements StorageExecutor {
     workflowRunId: string;
     directoryId: string;
     candidate: ResourceCandidate;
+    wholePackage?: boolean;
+    onSubmitted?: (receipt: Record<string, unknown>) => Promise<void>;
   }): Promise<TransferAttempt> {
     const url = stringValue(input.candidate.providerPayload["url"]);
     // Magnet has no web API on quark — fail LOUD so the caller never thinks a
@@ -186,6 +233,9 @@ export class QuarkStorageExecutor implements StorageExecutor {
     const before = new Set((await this.listVideoFiles(safeDirectoryId)).map((f) => f.id));
 
     let providerMessage = "";
+    let taskId: string | null = null;
+    let taskCompleted = false;
+    const providerKind = this.profile.errorPrefix === "UC" ? "uc_share" : "quark_share";
     try {
       const parsed = parseCloudFamilyShareUrl(url, this.profile);
       if (!parsed) {
@@ -201,15 +251,24 @@ export class QuarkStorageExecutor implements StorageExecutor {
       if (fidList.length === 0) {
         throw new Error(`${this.profile.errorPrefix}_TRANSFER_FAILED: share has no transferable files`);
       }
-      const taskId = await this.client.saveShare({
+      taskId = await this.client.saveShare({
         fid_list: fidList,
         fid_token_list: fidTokenList,
         to_pdir_fid: safeDirectoryId,
         pwd_id: parsed.pwdId,
         stoken,
       });
-      await this.client.pollTask(taskId);
+      await notifyTransferSubmitted(input.onSubmitted, {
+        kind: providerKind,
+        state: "running",
+        providerTaskId: taskId,
+        submittedAt: new Date().toISOString(),
+      });
+      taskCompleted = await this.client.pollTask(taskId);
     } catch (error) {
+      if (isTransferSubmissionPersistenceError(error)) {
+        throw error;
+      }
       // Auth failures must surface so the worker freezes the drive — never absorbed.
       if (isQuarkAuthError(error)) {
         throw error;
@@ -236,9 +295,33 @@ export class QuarkStorageExecutor implements StorageExecutor {
         providerMessage ||
         (status === "no_target_change" ? "转存完成但目标目录未出现新视频" : ""),
       materializedFileIds,
+      receipt: {
+        kind: providerKind,
+        state: providerMessage
+          ? taskId === null ? "failed" : "unknown"
+          : taskCompleted ? "completed" : "running",
+        ...(taskId === null ? {} : { providerTaskId: taskId }),
+        submittedAt: new Date().toISOString(),
+      },
     };
     this.nextTransferNumber += 1;
     return attempt;
+  }
+
+  async getTransferStatus(
+    receipt: Record<string, unknown>,
+  ): Promise<"running" | "completed" | "failed" | "unknown"> {
+    const kind = receipt["providerKind"] ?? receipt["kind"];
+    const providerKind = this.profile.errorPrefix === "UC" ? "uc_share" : "quark_share";
+    if (kind !== providerKind) return "unknown";
+    const taskId = receipt["providerTaskId"];
+    if (typeof taskId !== "string" || !taskId) {
+      const state = receipt["state"];
+      return state === "running" || state === "completed" || state === "failed" || state === "unknown"
+        ? state
+        : "unknown";
+    }
+    return this.client.getTaskStatus(taskId);
   }
 
   async flattenDirectory(directoryId: string): Promise<{ moved: string[]; removed: string[] }> {

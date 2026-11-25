@@ -29,6 +29,10 @@ import { episodeCodeFromFileName } from "./episode-code.js";
 import type { StorageExecutor, UnparsedVideoFile } from "./ports.js";
 import { isTianyiAuthError } from "./tianyi-client.js";
 import type { TianyiBatchEntry, TianyiClient, TianyiItem } from "./tianyi-client.js";
+import {
+  isTransferSubmissionPersistenceError,
+  notifyTransferSubmitted,
+} from "./transfer-receipt.js";
 
 const MAX_RECURSIVE_COLLECT_DEPTH = 6;
 const DEFAULT_MIN_VIDEO_SIZE_BYTES = 10 * 1024 * 1024;
@@ -104,6 +108,38 @@ export class TianyiStorageExecutor implements StorageExecutor {
     return this.client.getSpace();
   }
 
+  async listDirectoryPage(input: {
+    directoryId: string;
+    page: number;
+    pageSize: number;
+  }): Promise<{
+    items: Array<{
+      fileId: string;
+      parentId: string;
+      name: string;
+      isDirectory: boolean;
+      sizeBytes: number | null;
+    }>;
+    nextPage: number | null;
+  }> {
+    const directoryId = normalizeId(input.directoryId);
+    const page = await this.client.listFilesPage({
+      folderId: directoryId,
+      pageNum: input.page + 1,
+      pageSize: Math.min(input.pageSize, 1000),
+    });
+    return {
+      items: page.items.map((item) => ({
+        fileId: idOf(item),
+        parentId: directoryId,
+        name: nameOf(item),
+        isDirectory: isDirectory(item),
+        sizeBytes: sizeOf(item),
+      })),
+      nextPage: page.hasMore ? input.page + 1 : null,
+    };
+  }
+
   async createDirectory(input: { name: string; parentId: string }): Promise<string> {
     const safeParentId = this.assertWithinWriteScope(input.parentId, "create directory");
     // Find-or-create: seasons of one title initialize at different times and must
@@ -145,6 +181,8 @@ export class TianyiStorageExecutor implements StorageExecutor {
     workflowRunId: string;
     directoryId: string;
     candidate: ResourceCandidate;
+    wholePackage?: boolean;
+    onSubmitted?: (receipt: Record<string, unknown>) => Promise<void>;
   }): Promise<TransferAttempt> {
     const url = stringValue(input.candidate.providerPayload["url"]);
     // Magnet/ed2k has no offline API on 天翼 — fail LOUD so the caller never
@@ -157,6 +195,7 @@ export class TianyiStorageExecutor implements StorageExecutor {
     const before = new Set((await this.listVideoFiles(safe)).map((f) => f.id));
 
     let providerMessage = "";
+    let taskId: string | null = null;
     try {
       const parsed = parseTianyiShareUrl(url);
       if (!parsed) {
@@ -167,6 +206,19 @@ export class TianyiStorageExecutor implements StorageExecutor {
         shareCode: parsed.shareCode,
         accessCode,
         targetFolderId: safe,
+        ...(input.onSubmitted === undefined
+          ? {}
+          : {
+              onSubmitted: async (submittedTaskId: string) => {
+                taskId = submittedTaskId;
+                await notifyTransferSubmitted(input.onSubmitted, {
+                  kind: "tianyi_share",
+                  state: "running",
+                  providerTaskId: submittedTaskId,
+                  submittedAt: new Date().toISOString(),
+                });
+              },
+            }),
       });
       if (!result.ok) {
         // ok:false with an EMPTY message must never be reclassified as
@@ -174,6 +226,9 @@ export class TianyiStorageExecutor implements StorageExecutor {
         providerMessage = result.message || "SHARE_SAVE failed(provider 未给原因)"; // failedCount>0 (和谐) / dead share / poll timeout
       }
     } catch (error) {
+      if (isTransferSubmissionPersistenceError(error)) {
+        throw error;
+      }
       // Auth failures must surface so the worker freezes the drive — never absorbed.
       if (isTianyiAuthError(error)) {
         throw error;
@@ -200,9 +255,27 @@ export class TianyiStorageExecutor implements StorageExecutor {
         providerMessage ||
         (status === "no_target_change" ? "转存完成但目标目录未出现新视频" : ""),
       materializedFileIds,
+      receipt: {
+        kind: "tianyi_share",
+        state: providerMessage ? "failed" : "completed",
+        ...(taskId === null ? {} : { providerTaskId: taskId }),
+        submittedAt: new Date().toISOString(),
+      },
     };
     this.nextTransferNumber += 1;
     return attempt;
+  }
+
+  async getTransferStatus(
+    receipt: Record<string, unknown>,
+  ): Promise<"running" | "completed" | "failed" | "unknown"> {
+    if ((receipt["providerKind"] ?? receipt["kind"]) !== "tianyi_share") return "unknown";
+    const taskId = receipt["providerTaskId"];
+    if (typeof taskId !== "string" || !taskId) return "unknown";
+    const { status, failedCount } = await this.client.getBatchTaskStatus(taskId);
+    if (status === 4) return failedCount > 0 ? "failed" : "completed";
+    if (status === 1 || status === 2 || status === 3) return "running";
+    return "unknown";
   }
 
   async flattenDirectory(directoryId: string): Promise<{ moved: string[]; removed: string[] }> {

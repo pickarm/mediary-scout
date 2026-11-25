@@ -46,3 +46,24 @@ docker compose -f docker-compose.fork.yml exec -T web cat BUILD_COMMIT
 发行必须包含完整类型检查（含 Web 源码与测试）、lint、workflow/Web 构建、原有回归、全部位置的 PG/Redis 集成，以及隔离镜像启动检查。镜像启动通过后才推送版本/SHA/latest 标签，三者应指向同一镜像，最后创建 Fork 正式 release。
 
 自动发行凭证保存在 CI Secrets。本次用户授权的本地发布由主代理将凭证通过标准输入交给Docker，使用临时Docker配置并在结束后清理。开发代理不执行发布、生产迁移或真实网盘操作。
+
+## 自动构建与发行工作流
+
+本 Fork 在 `.github/workflows/` 下提供两条镜像构建流水线：
+
+- **日常/分支自动构建（[`.github/workflows/docker-autobuild.yml`](../../.github/workflows/docker-autobuild.yml)）**：
+  - 当代码推送至 `main`（自动打标 `edge`）或 `feature/pickarm-v1`（自动打标 `dev`），或在 GitHub **Actions → Auto build Docker image → Run workflow** 手动触发时运行；
+  - 仅执行一次 `linux/amd64` `docker buildx build`，利用独立 PostgreSQL 与假适配启动并轮询 `/api/health` 确认可用后，推送同一已验证镜像 ID；
+  - 默认免密推送至 **GHCR**（`ghcr.io/<owner>/<repo>:<tag>` 与 `sha-<12位>`），若同时配置了 `DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN` Secrets，也会自动双推至 Docker Hub（默认 `qicket/mediary-scout`，可通过 Repository Variable `DOCKERHUB_IMAGE` 覆盖）；默认不覆盖 `latest`（仅手动勾选 `push_latest` 时更新）。
+- **正式版本发布（[`.github/workflows/fork-image.yml`](../../.github/workflows/fork-image.yml)）**：
+  - 仅在推送 `v*` 轻量标签时触发，先完整执行 [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) 与只读预检，冒烟验证后向 Docker Hub 推送 `<tag>`、`sha-<40位>`、`latest` 并验证远端摘要完全一致，最后创建 GitHub Release。
+
+## v1.1消息入口配置
+
+设置 → 巡检 → 消息机器人分别配置微信、飞书和Telegram。每个平台属于当前巡影账号，只处理配置的本人私聊；连接默认关闭。微信扫码只绑定凭证，随后显式勾选启用并保存。飞书填写App ID、App Secret及本人open_id，应用使用长连接订阅`im.message.receive_v1`和`card.action.trigger`，开放私聊与机器人发消息权限。Telegram填写Bot Token和本人数值ID，并先与机器人私聊。默认目标网盘只能选择本账号的活动连接；无默认且有多个兼容盘时，机器人提供选择。
+
+支持发送“帮助”“我想看 片名”、直接片名、本网盘分享链接或磁力；回复序号或点按钮确认作品、季和目标盘。资源由原获取流程自动选择。发送“查询”或“查询 任务ID”查看进度和持久结果，“停止 任务ID”取消排队任务；原获取执行中会如实说明不可取消。直转提交后停止只阻止后续识别整理，远端仍可能完成，文件不会删除。
+
+115/夸克/UC/123/天翼/光鸭分享只转存至同品牌；磁力使用115、123或光鸭。直转完整包先落到原授权根内的独立目录，再走原扫描识别和整理；身份不明的文件留在落地区，可在媒体库确认。仅实际整理的新视频触发既有媒体服务器刷新配置。
+
+复用现有进程内worker，无新增端口或sidecar。`MEDIA_TRACK_INPROCESS_WORKER=0`、`MEDIA_TRACK_REHEARSAL=1`或演示模式不启动平台连接；关闭某个平台只停止新消息接收。发送失败仍可在后续私聊主动查询结果。平台真实收发及网盘最终一致性验证仍需独立测试目录，不以协议mock代替实测。

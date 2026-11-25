@@ -519,6 +519,26 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
     const blocksTitle = titleBlockFilter(input);
     const requireTracked = reservationRequiresTrackedSeason(input);
     return this.withTransaction(async (client) => {
+      if (input.messagingJobId) {
+        const message = await client.query<{ workflow_run_id: string | null; stop_requested: boolean }>(
+          "SELECT workflow_run_id, stop_requested FROM messaging_jobs WHERE id=$1 AND account_id=$2 AND phase='queued' FOR UPDATE",
+          [input.messagingJobId, accountId],
+        );
+        const row = message.rows[0];
+        if (!row || row.stop_requested) throw new Error("消息任务不存在、已停止或不属于当前账号");
+        if (row.workflow_run_id) {
+          const existing = await this.loadWorkflowRunSnapshot(client, row.workflow_run_id);
+          if (existing && existing.accountId === accountId) return { status: "already_active", snapshot: existing };
+        }
+      }
+      const associateMessage = async (runId: string): Promise<void> => {
+        if (!input.messagingJobId) return;
+        const linked = await client.query(
+          "UPDATE messaging_jobs SET workflow_run_id=$1, updated_at=$2 WHERE id=$3 AND account_id=$4 AND phase='queued' AND stop_requested=false RETURNING id",
+          [runId, snapshot.workflowRun.startedAt, input.messagingJobId, accountId],
+        );
+        if (linked.rowCount !== 1) throw new Error("消息任务关联失败");
+      };
       if (blocksTitle || requireTracked) {
         // READ COMMITTED alone lets two concurrent reservations both see no active
         // run for the title and both insert. Serialize them per (account, drive,
@@ -551,6 +571,7 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
           if (!activeSnapshot) {
             throw new Error(`Missing active workflow run ${titleActive.id}`);
           }
+          await associateMessage(activeSnapshot.workflowRun.id);
           return { status: "already_active", snapshot: activeSnapshot };
         }
       }
@@ -566,11 +587,16 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
         if (!activeSnapshot) {
           throw new Error(`Missing active workflow run ${activeRun.id}`);
         }
+        await associateMessage(activeSnapshot.workflowRun.id);
         return { status: "already_active", snapshot: activeSnapshot };
       }
 
       const existingEpisodes = await this.selectEpisodeStates(client, snapshot.season.id, connectedStorageId);
       if (input.blockIfEpisodeStatesExist === true && existingEpisodes.length > 0) {
+        if (input.messagingJobId) {
+          await client.query("UPDATE messaging_jobs SET phase='completed', result=$1::jsonb, send_status='pending', updated_at=$2 WHERE id=$3 AND account_id=$4",
+            [JSON.stringify({ kind: "already_tracked", text: "该作品已在追踪，后台将沿原设置继续检查。" }), snapshot.workflowRun.startedAt, input.messagingJobId, accountId]);
+        }
         return { status: "already_has_episode_state", episodes: existingEpisodes };
       }
 
@@ -583,10 +609,12 @@ export class PostgresWorkflowRepository implements WorkflowRepository {
         if (!reserved) {
           throw new Error(`Missing reserved workflow run ${snapshot.workflowRun.id}`);
         }
+        await associateMessage(reserved.workflowRun.id);
         return { status: "reserved", snapshot: reserved };
       }
 
       await this.replaceWorkflowRunSnapshot(client, snapshot);
+      await associateMessage(snapshot.workflowRun.id);
       return {
         status: "reserved",
         snapshot: withDerivedEpisodeSummaries(cloneWorkflowValue(snapshot)),

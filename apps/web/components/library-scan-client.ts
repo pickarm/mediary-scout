@@ -1,7 +1,9 @@
 export interface SafeLibraryStorage {
   id: string;
   label: string;
+  provider: "pan115" | "quark" | "uc" | "guangya" | "tianyi" | "pan123";
   status: "active" | "frozen";
+  rootDirectoryId: string;
 }
 
 export interface LibraryDirectoryChoice {
@@ -109,8 +111,14 @@ export async function loadScanTaskPage(storageId: string, cursor: string | null,
   return requestJson(`/api/library/scans?${query}`, signal ? { signal } : {});
 }
 
-export async function loadDirectoryPage(storageId: string, parentId: string, page: number, signal?: AbortSignal): Promise<{ items: LibraryDirectoryChoice[]; nextPage: number | null }> {
-  const query = storageQuery(storageId, { parentId, page: String(page) });
+export async function loadDirectoryPage(
+  storageId: string,
+  parentId: string,
+  page: number,
+  cursor: string | null = null,
+  signal?: AbortSignal,
+): Promise<{ items: LibraryDirectoryChoice[]; nextPage: number | null; nextCursor: string | null }> {
+  const query = storageQuery(storageId, { parentId, page: String(page), ...(cursor ? { cursor } : {}) });
   return requestJson(`/api/library/directories?${query}`, signal ? { signal } : {});
 }
 

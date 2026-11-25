@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { describe, expect, it } from "vitest";
-import { GuangYaClient, getStorageBrand } from "@media-track/workflow";
+import { getStorageBrand } from "@media-track/workflow";
 import { DEFAULT_NAMING_TEMPLATES, PostgresLibraryStore, PostgresScanStore } from "@media-track/workflow/library";
 import { OrganizationRuntimeService } from "./library-organization-runtime";
 
@@ -14,11 +14,12 @@ describe.skipIf(!adminURL)("F08c PostgreSQL runtime recovery with a fake cloud",
     let pool:Pool|null=null;
     const fence=new TestFence();
     const cloud=new FakeCloud(fence);
+    const authorizedRootCalls:string[][]=[];
     try {
       await adminPool.query(`CREATE DATABASE ${dbName}`);
       const url=new URL(adminURL!); url.pathname=`/${dbName}`;
       pool=new Pool({connectionString:url.toString()});
-      const provider=getStorageBrand("guangya").provider;
+      const provider=getStorageBrand("quark").provider;
       const scanStore=new PostgresScanStore(pool); await scanStore.ensureSchema();
       await pool.query("INSERT INTO connected_storages(id,account_id,provider,provider_uid,payload,created_at) VALUES('drive','acct',$1,'uid','{}'::jsonb,'now')",[provider]);
       const scope={accountId:"acct",connectedStorageId:"drive"};
@@ -39,20 +40,29 @@ describe.skipIf(!adminURL)("F08c PostgreSQL runtime recovery with a fake cloud",
       const libraryStore=new PostgresLibraryStore(pool);
       await libraryStore.importExistingMedia({accountId:"acct",connectedStorageId:"drive",title,season,episodes:[],files:[{fileId:"file",parentDirectoryId:"src",episodeCode:"S01E01"}],directories:[{directoryId:"src",parentDirectoryId:null}],now:"2026-11-14T00:00:02.000Z"});
 
-      const service=new OrganizationRuntimeService(scope,cloud as unknown as GuangYaClient,pool,"guangya:uid",fence);
+      const service=new OrganizationRuntimeService(
+        scope,
+        { storageFactory: async (roots) => { authorizedRootCalls.push([...roots]); return cloud; } },
+        pool,
+        "quark:uid",
+        fence,
+      );
       const plan=await service.preview("task",{fileIds:["file"]});
       expect(cloud.writeCount).toBe(0);
       expect(plan.operations).toHaveLength(1);
+      expect(authorizedRootCalls[0]).toEqual(["src","target"]);
       expect(await service.store.requestExecution(scope,"task",plan.operationKey,"2026-11-14T00:00:03.000Z")).toBe(true);
       const completed=await service.executeSlice("task",plan.operationKey);
       expect(completed.status).toBe("completed");
       expect(cloud.writeCount).toBe(3);
+      expect(authorizedRootCalls[1]).toEqual(["src","target"]);
       expect((await libraryStore.listPhysicalFileBindings({accountId:"acct",connectedStorageId:"drive",limit:10})).find(({fileId})=>fileId==="file")?.parentDirectoryId).toBe("dir-1");
 
       // Simulate process exit after F06 persisted verified but before F02 sync.
       await pool.query("UPDATE library_file_bindings SET parent_directory_id='src' WHERE account_id='acct' AND connected_storage_id='drive' AND file_id='file'");
       expect(await service.store.listVerifiedLocationPlanKeys(scope,10)).toEqual([{taskId:"task",operationKey:plan.operationKey}]);
       expect(await service.recoverVerifiedBindings()).toBe(1);
+      expect(authorizedRootCalls[2]).toEqual(["src","target"]);
       expect((await libraryStore.listPhysicalFileBindings({accountId:"acct",connectedStorageId:"drive",limit:10})).find(({fileId})=>fileId==="file")?.parentDirectoryId).toBe("dir-1");
       expect(cloud.writeCount).toBe(3);
       expect(await service.store.listVerifiedLocationPlanKeys(scope,10)).toEqual([]);
@@ -83,17 +93,18 @@ class TestFence {
 class FakeCloud {
   writeCount=0;
   private nextDirectory=0;
-  private readonly items=new Map<string,{fileId:string;parentId:string;fileName:string;fileSize:number;resType:number}>();
-  constructor(private readonly fence:TestFence) { this.items.set("file",{fileId:"file",parentId:"src",fileName:"raw.mkv",fileSize:10,resType:1}); }
-  async listFilesPage(parentId:string,page:number,pageSize=200) {
-    const items=[...this.items.values()].filter((item)=>item.parentId===parentId).sort((a,b)=>a.fileId.localeCompare(b.fileId));
-    const start=page*pageSize;
-    return {items:items.slice(start,start+pageSize),hasMore:start+pageSize<items.length};
+  private readonly items=new Map<string,{fileId:string;parentId:string;name:string;isDirectory:boolean}>();
+  constructor(private readonly fence:TestFence) { this.items.set("file",{fileId:"file",parentId:"src",name:"raw.mkv",isDirectory:false}); }
+  async list(parentId:string) {
+    return [...this.items.values()].filter((item)=>item.parentId===parentId);
   }
-  async createDir(parentId:string,fileName:string):Promise<string> {
+  async read(fileId:string,knownParentIds:readonly string[]) {
+    return [...this.items.values()].find((item)=>item.fileId===fileId&&knownParentIds.includes(item.parentId)) ?? null;
+  }
+  async createDir(parentId:string,name:string):Promise<string> {
     await this.fence.assertHeld(); this.writeCount+=1;
-    const fileId=`dir-${++this.nextDirectory}`; this.items.set(fileId,{fileId,parentId,fileName,fileSize:0,resType:2}); return fileId;
+    const fileId=`dir-${++this.nextDirectory}`; this.items.set(fileId,{fileId,parentId,name,isDirectory:true}); return fileId;
   }
-  async renameFile(fileId:string,fileName:string):Promise<void> { await this.fence.assertHeld(); this.writeCount+=1; const current=this.items.get(fileId)!; this.items.set(fileId,{...current,fileName}); }
-  async moveFiles(fileIds:string[],parentId:string):Promise<void> { await this.fence.assertHeld(); this.writeCount+=1; for(const id of fileIds){const current=this.items.get(id)!;this.items.set(id,{...current,parentId});} }
+  async rename(fileId:string,name:string):Promise<void> { await this.fence.assertHeld(); this.writeCount+=1; const current=this.items.get(fileId)!; this.items.set(fileId,{...current,name}); }
+  async move(fileId:string,parentId:string):Promise<void> { await this.fence.assertHeld(); this.writeCount+=1; const current=this.items.get(fileId)!;this.items.set(fileId,{...current,parentId}); }
 }

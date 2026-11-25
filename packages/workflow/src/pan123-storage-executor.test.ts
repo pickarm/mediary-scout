@@ -127,6 +127,75 @@ describe("parsePan123ShareUrl", () => {
 });
 
 describe("Pan123StorageExecutor.transfer", () => {
+  it("awaits a completed receipt for the synchronous share path and can recover it without a task id", async () => {
+    const received: Record<string, unknown>[] = [];
+    const saveShare = vi.fn<Pan123Client["saveShare"]>(async () => ({ ok: true, message: "" }));
+    const executor = makeExecutor(fakeClient({ saveShare }));
+
+    const attempt = await executor.transfer({
+      workflowRunId: "run-1",
+      directoryId: SCOPE,
+      candidate: candidate(),
+      wholePackage: true,
+      onSubmitted: async (receipt) => {
+        received.push(receipt);
+      },
+    });
+
+    expect(received).toEqual([
+      expect.objectContaining({ kind: "pan123_share", state: "completed" }),
+    ]);
+    expect(attempt.receipt).toMatchObject({ kind: "pan123_share", state: "completed" });
+    await expect(executor.getTransferStatus(attempt.receipt!)).resolves.toBe("completed");
+  });
+
+  it("persists the offline task id before polling and keeps that remote task recoverable", async () => {
+    let landed = false;
+    const order: string[] = [];
+    const getOfflineTask = vi.fn<Pan123Client["getOfflineTask"]>(async (taskId) => {
+      order.push("poll");
+      landed = true;
+      return { taskId, name: "Show", status: 2, progress: 100, size: 123 };
+    });
+    const listFiles = vi.fn<Pan123Client["listFiles"]>(async () =>
+      landed ? [file("v1", "Show.S01E01.mkv")] : [],
+    );
+    const deleteOfflineTasks = vi.fn<Pan123Client["deleteOfflineTasks"]>(async () => {});
+    const client = fakeClient({ getOfflineTask, listFiles, deleteOfflineTasks });
+    const executor = makeExecutor(client);
+    const received: Record<string, unknown>[] = [];
+
+    const attempt = await executor.transfer({
+      workflowRunId: "run-1",
+      directoryId: SCOPE,
+      candidate: candidate({
+        type: "magnet" as ResourceType,
+        providerPayload: { url: "magnet:?xt=urn:btih:deadbeef" },
+      }),
+      wholePackage: true,
+      onSubmitted: async (receipt) => {
+        order.push("callback");
+        received.push(receipt);
+      },
+    });
+
+    expect(order).toEqual(["callback", "poll"]);
+    expect(received).toEqual([
+      expect.objectContaining({
+        kind: "pan123_offline",
+        state: "running",
+        providerTaskId: "9007199254740993003",
+      }),
+    ]);
+    expect(deleteOfflineTasks).not.toHaveBeenCalled();
+    expect(attempt.receipt).toMatchObject({
+      kind: "pan123_offline",
+      state: "completed",
+      providerTaskId: "9007199254740993003",
+    });
+    await expect(executor.getTransferStatus(attempt.receipt!)).resolves.toBe("completed");
+  });
+
   it("saves a share into the scope dir and diffs landed videos (succeeded)", async () => {
     let landed = false;
     const listFiles = vi.fn<Pan123Client["listFiles"]>(async () =>

@@ -44,6 +44,7 @@ export async function queueTrackingInitialization(input: {
   accountId?: string;
   /** Owning connected storage (tree model). Omitted → null (single-drive). */
   connectedStorageId?: string | null;
+  messagingJobId?: string;
   createWorkflowRunId?: () => string;
   now?: () => string;
   staleActiveRunTimeoutMs?: number;
@@ -60,6 +61,7 @@ export async function queueTrackingInitialization(input: {
   });
 
   const reservation = await input.repository.reserveWorkflowRun({
+    ...(input.messagingJobId ? { messagingJobId: input.messagingJobId } : {}),
     ...(input.accountId ? { accountId: input.accountId } : {}),
     ...(input.connectedStorageId != null ? { connectedStorageId: input.connectedStorageId } : {}),
     title: input.title,
@@ -183,6 +185,7 @@ export async function queueSeriesInitialization(input: {
   accountId?: string;
   /** Owning connected storage (tree model). Omitted → null (single-drive). */
   connectedStorageId?: string | null;
+  messagingJobId?: string;
   createWorkflowRunId?: () => string;
   now?: () => string;
   staleActiveRunTimeoutMs?: number;
@@ -216,6 +219,7 @@ export async function queueSeriesInitialization(input: {
     ...(input.connectedStorageId != null ? { connectedStorageId: input.connectedStorageId } : {}),
     title: input.title,
     season: lockSeason,
+    ...(input.messagingJobId ? { messagingJobId: input.messagingJobId } : {}),
     workflowRun: {
       id: workflowRunId,
       kind: "type1_package_init",
@@ -274,6 +278,7 @@ export async function queueMovieAcquisition(input: {
   accountId?: string;
   /** Owning connected storage (tree model). Omitted → null (single-drive). */
   connectedStorageId?: string | null;
+  messagingJobId?: string;
   createWorkflowRunId?: () => string;
   now?: () => string;
   staleActiveRunTimeoutMs?: number;
@@ -293,6 +298,7 @@ export async function queueMovieAcquisition(input: {
     ...(input.connectedStorageId != null ? { connectedStorageId: input.connectedStorageId } : {}),
     title: input.title,
     season,
+    ...(input.messagingJobId ? { messagingJobId: input.messagingJobId } : {}),
     workflowRun: {
       id: workflowRunId,
       kind: "movie_init",

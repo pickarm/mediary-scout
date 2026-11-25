@@ -29,6 +29,18 @@ export interface DriveSpaceInfo {
   usedBytes: number;
 }
 
+export interface StorageDirectoryPage {
+  items: readonly {
+    fileId: string;
+    parentId: string;
+    name: string;
+    isDirectory: boolean;
+    sizeBytes: number | null;
+  }[];
+  nextPage: number | null;
+  nextCursor?: string;
+}
+
 /** One active drive available to a unified multi-drive acquisition run, ordered by
  *  the user's preference (`drive_order` setting, falling back to `created_at`). */
 export interface AcquisitionDriveContext {
@@ -50,6 +62,14 @@ export interface StorageExecutor {
    *  be negative when a drive is over-quota (e.g. expired SVIP). Returns null on a
    *  non-auth failure or when the fake/simulator does not implement it. */
   getSpace?(): Promise<DriveSpaceInfo | null>;
+  /** Read exactly one immediate-child page. Cursor-based providers receive both
+   *  the durable page number and their native cursor. */
+  listDirectoryPage?(input: {
+    directoryId: string;
+    page: number;
+    pageSize: number;
+    cursor?: string;
+  }): Promise<StorageDirectoryPage>;
   createDirectory(input: { name: string; parentId: string }): Promise<string>;
   listVideoFiles(directoryId: string): Promise<VerifiedFile[]>;
   /** Video files in the directory whose names expose no parseable episode code. */
@@ -60,7 +80,17 @@ export interface StorageExecutor {
     workflowRunId: string;
     directoryId: string;
     candidate: ResourceCandidate;
+    /** Keep every package entry the provider exposes, including subtitle indexes.
+     *  Default false preserves automatic acquisition's video-only behavior. */
+    wholePackage?: boolean;
+    /** Called immediately after the provider accepts a remote task, before any
+     *  long landing poll. Implementations must await persistence failures. */
+    onSubmitted?: (receipt: Record<string, unknown>) => Promise<void>;
   }): Promise<TransferAttempt>;
+  /** Query a previously persisted transfer receipt without submitting again. */
+  getTransferStatus?(receipt: Record<string, unknown>): Promise<
+    "running" | "completed" | "failed" | "unknown"
+  >;
   flattenDirectory(directoryId: string): Promise<{ moved: string[]; removed: string[] }>;
   deleteFiles(input: { directoryId: string; fileIds: string[] }): Promise<{ deleted: string[] }>;
   /** Remove an ephemeral directory (e.g. a staging dir) and everything under it.

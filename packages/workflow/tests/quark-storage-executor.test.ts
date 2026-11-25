@@ -70,6 +70,10 @@ function makeFakeClient(opts?: {
       calls.push("pollTask");
       return true;
     },
+    async getTaskStatus() {
+      calls.push("getTaskStatus");
+      return "completed";
+    },
     async deleteFiles(fids: string[]) {
       calls.push(`deleteFiles:${fids.join(",")}`);
       for (const fid of fids) files.delete(fid);
@@ -117,11 +121,17 @@ describe("QuarkStorageExecutor", () => {
       share: { items: [{ fid: "shared_mkv", share_fid_token: "t1", file_name: "Movie.2020.1080p.mkv", dir: false, size: 5_000_000_000 }] },
     });
     const exec = quarkExecutor(client);
+    const received: Record<string, unknown>[] = [];
 
     const attempt = await exec.transfer({
       workflowRunId: "run_1",
       directoryId: "STAGE",
       candidate: shareCandidate("https://pan.quark.cn/s/abc123", "pw"),
+      wholePackage: true,
+      onSubmitted: async (receipt) => {
+        calls.push("onSubmitted");
+        received.push(receipt);
+      },
     });
 
     expect(calls).toEqual(
@@ -130,11 +140,26 @@ describe("QuarkStorageExecutor", () => {
     // order: token before detail before save before poll
     expect(calls.indexOf("getShareToken")).toBeLessThan(calls.indexOf("listShareDetail"));
     expect(calls.indexOf("listShareDetail")).toBeLessThan(calls.indexOf("saveShare:STAGE"));
-    expect(calls.indexOf("saveShare:STAGE")).toBeLessThan(calls.indexOf("pollTask"));
+    expect(calls.indexOf("saveShare:STAGE")).toBeLessThan(calls.indexOf("onSubmitted"));
+    expect(calls.indexOf("onSubmitted")).toBeLessThan(calls.indexOf("pollTask"));
+    expect(received).toEqual([
+      expect.objectContaining({
+        kind: "quark_share",
+        state: "running",
+        providerTaskId: "TASK1",
+      }),
+    ]);
     expect(attempt.status).toBe("succeeded");
     expect(attempt.materializedFileIds).toEqual(["shared_mkv"]);
     expect(attempt.workflowRunId).toBe("run_1");
     expect(attempt.candidateId).toBe("cand_1");
+    expect(attempt.receipt).toMatchObject({
+      kind: "quark_share",
+      state: "completed",
+      providerTaskId: "TASK1",
+    });
+    await expect(exec.getTransferStatus(attempt.receipt!)).resolves.toBe("completed");
+    expect(calls).toContain("getTaskStatus");
   });
 
   it("transfer fails loud (status failed) on a dead share, never silent success", async () => {
@@ -150,6 +175,36 @@ describe("QuarkStorageExecutor", () => {
     expect(attempt.status).toBe("failed");
     expect(attempt.providerMessage).toContain("分享不存在");
     expect(attempt.materializedFileIds).toEqual([]);
+  });
+
+  it("propagates receipt persistence failure before the landing poll", async () => {
+    const { client, calls } = makeFakeClient({
+      share: {
+        items: [
+          {
+            fid: "shared_mkv",
+            share_fid_token: "t1",
+            file_name: "Movie.2020.mkv",
+            dir: false,
+            size: 5_000_000_000,
+          },
+        ],
+      },
+    });
+    const exec = quarkExecutor(client);
+
+    await expect(
+      exec.transfer({
+        workflowRunId: "run_1",
+        directoryId: "STAGE",
+        candidate: shareCandidate("https://pan.quark.cn/s/abc123", "pw"),
+        onSubmitted: async () => {
+          throw new Error("receipt persistence failed");
+        },
+      }),
+    ).rejects.toThrow("receipt persistence failed");
+    expect(calls).toContain("saveShare:STAGE");
+    expect(calls).not.toContain("pollTask");
   });
 
   it("transfer THROWS QUARK_NO_MAGNET for a magnet candidate", async () => {

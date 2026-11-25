@@ -35,6 +35,104 @@ function candidate(overrides: Partial<ResourceCandidate> = {}): ResourceCandidat
 const SCOPE = "scope-dir";
 
 describe("GuangYaStorageExecutor.transfer", () => {
+  it.each([
+    [0, "unknown"],
+    [1, "running"],
+    [2, "completed"],
+    [3, "failed"],
+    [4, "unknown"],
+    [5, "unknown"],
+  ] as const)(
+    "maps native list_task status %i to %s on receipt recovery",
+    async (status, expected) => {
+      const client = fakeClient({
+        listTask: vi.fn(async () => [
+          { taskId: "task-existing", status, progress: 0, fileId: "" },
+        ]),
+      });
+      const executor = new GuangYaStorageExecutor({
+        client,
+        writeScopeDirectoryIds: [SCOPE],
+      });
+
+      await expect(
+        executor.getTransferStatus({
+          kind: "guangya_offline",
+          providerTaskId: "task-existing",
+        }),
+      ).resolves.toBe(expected);
+    },
+  );
+
+  it("wholePackage keeps subtitle indexes, persists the task id before polling, and cheaply restores its status", async () => {
+    const order: string[] = [];
+    const listFiles = vi
+      .fn<GuangYaStorageClient["listFiles"]>()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { fileId: "v1", parentId: SCOPE, fileName: "movie.mkv", fileSize: 50 * 1024 * 1024, resType: 1 },
+        { fileId: "s1", parentId: SCOPE, fileName: "movie.zh.srt", fileSize: 20 * 1024, resType: 1 },
+      ]);
+    const resolveRes = vi.fn<GuangYaStorageClient["resolveRes"]>(async () => ({
+      resType: 2,
+      btResInfo: {
+        infoHash: "deadbeef",
+        fileName: "Some.Movie.2024",
+        subfiles: [
+          { fileName: "movie.mkv", fileIndex: 0, fileSize: 50 * 1024 * 1024 },
+          { fileName: "poster.jpg", fileIndex: 1, fileSize: 1024 },
+          { fileName: "movie.zh.srt", fileIndex: 2, fileSize: 20 * 1024 },
+        ],
+      },
+    }));
+    const createTask = vi.fn<GuangYaStorageClient["createTask"]>(async () => {
+      order.push("submit");
+      return "task-full";
+    });
+    const listTask = vi.fn<GuangYaStorageClient["listTask"]>(async () => {
+      order.push("poll");
+      return [{ taskId: "task-full", status: 2, progress: 100, fileId: "" }];
+    });
+    const client = fakeClient({ listFiles, resolveRes, createTask, listTask });
+    const executor = new GuangYaStorageExecutor({
+      client,
+      writeScopeDirectoryIds: [SCOPE],
+      taskPollIntervalMs: 0,
+    });
+    const received: Record<string, unknown>[] = [];
+
+    const attempt = await executor.transfer({
+      workflowRunId: "run-1",
+      directoryId: SCOPE,
+      candidate: candidate(),
+      wholePackage: true,
+      onSubmitted: async (receipt) => {
+        order.push("callback");
+        received.push(receipt);
+      },
+    });
+
+    expect(createTask.mock.calls[0]![0]).toMatchObject({
+      parentId: SCOPE,
+      fileIndexes: [0, 1, 2],
+    });
+    expect(order.slice(0, 3)).toEqual(["submit", "callback", "poll"]);
+    expect(received).toEqual([
+      expect.objectContaining({
+        kind: "guangya_offline",
+        state: "running",
+        providerTaskId: "task-full",
+        infoHash: "deadbeef",
+      }),
+    ]);
+    expect(attempt.receipt).toMatchObject({
+      kind: "guangya_offline",
+      state: "completed",
+      providerTaskId: "task-full",
+    });
+    await expect(executor.getTransferStatus(attempt.receipt!)).resolves.toBe("completed");
+  });
+
   it("offline-downloads a magnet, requests only video subfile indexes, reports succeeded", async () => {
     const listFiles = vi
       .fn<GuangYaStorageClient["listFiles"]>()

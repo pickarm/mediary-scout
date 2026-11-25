@@ -193,6 +193,8 @@ export interface TrackedSeasonState {
 }
 
 export interface ReserveWorkflowRunInput extends PersistWorkflowRunSnapshotInput {
+  /** Account-owned chat request linked inside the reservation transaction. */
+  messagingJobId?: string;
   blockIfEpisodeStatesExist?: boolean;
   /**
    * Title-level mutual exclusion: refuse the reservation if any user-visible run

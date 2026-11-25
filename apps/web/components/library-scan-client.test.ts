@@ -36,16 +36,16 @@ const configuration: LibraryScanConfiguration = {
 describe("library scan browser API", () => {
   it("loads nested directory pages using the server nextPage cursor", async () => {
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(response({ items: [{ directoryId: "d1", name: "电影", selectionToken: "ticket-1" }], nextPage: 1 }))
-      .mockResolvedValueOnce(response({ items: [{ directoryId: "d2", name: "剧集", selectionToken: "ticket-2" }], nextPage: null }));
+      .mockResolvedValueOnce(response({ items: [{ directoryId: "d1", name: "电影", selectionToken: "ticket-1" }], nextPage: 1, nextCursor: "cursor-1" }))
+      .mockResolvedValueOnce(response({ items: [{ directoryId: "d2", name: "剧集", selectionToken: "ticket-2" }], nextPage: null, nextCursor: null }));
     globalThis.fetch = fetchMock;
     const first = await loadDirectoryPage("storage_a", "parent/one", 0);
-    const second = await loadDirectoryPage("storage_a", "parent/one", first.nextPage!);
+    const second = await loadDirectoryPage("storage_a", "parent/one", first.nextPage!, first.nextCursor);
     expect(first.items[0]?.selectionToken).toBe("ticket-1");
     expect(second.items[0]?.directoryId).toBe("d2");
     expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
       "/api/library/directories?storageId=storage_a&parentId=parent%2Fone&page=0",
-      "/api/library/directories?storageId=storage_a&parentId=parent%2Fone&page=1",
+      "/api/library/directories?storageId=storage_a&parentId=parent%2Fone&page=1&cursor=cursor-1",
     ]);
   });
 

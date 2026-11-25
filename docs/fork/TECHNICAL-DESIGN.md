@@ -1,5 +1,21 @@
 # 巡影 Fork 技术设计
 
+## v1.1集成契约
+
+- 同步目标e61a7a4；当前分支feature/pickarm-v1，合并保持未提交，未获授权不commit/push。保留上游与Fork导出；关键回归后再开发新增功能。
+- 偏好单一解析器区分inherit/unlimited/text：账号own row非null时包括空串都保留，否则读全局；只有inherit读取旧high/medium。API high/medium映射新预设，any/空串清空，4K/null/未知值仍拒绝；字段省略不变，同时提供合法新旧值时新值优先。
+- 平台适配器统一使用apps/web/lib/messaging/types.ts的MessagingConnection、InboundMessage、MessageReply、MessagingSink及MessagingTransport。仅协议收发，账号来自已保存连接，不从聊天文本获取。连接配置沿用account_settings；connectionId在凭证刷新时保持稳定，bot更换才新建。
+- MessagingSink.accept(messages,cursor)必须在同一个PG事务中保存原消息及接收游标，然后才ACK/继续拉取。新增messaging_jobs唯一(connection_id,platform_message_id)，保存账号、会话、输入、阶段、候选、workflow/scan/organization关联、独立落地区、provider回执与结果。候选确认以CAS进入排队，并在原reserveWorkflowRun事务内关联消息任务，命中已有run也关联。
+- queueCandidateTracking保留Web鉴权包装，核心改为显式accountId入口。机器人只使用本人连接对应账号；查询、选择网盘和停止继续检查账号归属。每私聊新搜索淘汰旧待选，旧按钮不可再次触发。
+- 网盘目录端口提供即时子项真实ID/父ID/名称/目录标记/大小及nextPage/nativeCursor；沿用原生分页，123游标随扫描事实同事务保存到可空检查点字段。不能把首批列表当作完整目录，也不从文件路径编造目录ID。统一DirectoryReader/OrganizationStorage薄桥；扫描、识别、整理、历史读、自动整理及管理页面使用原生六盘注册表，冻结连接仍可历史读。
+- transfer最小可选扩展为完整包模式及onSubmitted回调，接到provider任务号立即保存，不等transfer返回。直转以用户给定资源为来源，不伪造搜索或成功获取；不使用自动选源删除版本逻辑。现有获取默认不变，光鸭完整包模式包含字幕索引。
+- 直转状态为待选/排队/转存中/核实中/识别中/整理中/完成/部分完成/失败/已停止。恢复先查既有回执与落地区；unknown不得重提。停止已提交任务只设置stop_requested，阻止后续识别整理，说明远端仍可能完成；不删文件。
+- 新消息worker沿用MEDIA_TRACK_INPROCESS_WORKER、MEDIA_TRACK_REHEARSAL、demo及update-hold；演练不启动真实平台连接或写网盘。光鸭直转、获取和整理使用同一现有账号写协调器。
+- 自动获取沿上游入口刷新；直转识别整理后用已核实新视频调用相同refresh helper，保留自定义Webhook；不另建刷新调度器。结果先持久化再回复，发送失败可查询，不引入outbox平台。
+- 原生Web设置组件沿用现有token/面板；凭证只写原账号设置并脱敏读取。新增依赖由主代理使用npm锁定，仅飞书官方SDK和grammY；不引入OpenClaw/MoviePilot运行时、新网盘SDK或sidecar。
+
+接口与数据变更由主代理维护；分功能所有权和测试证据见TASKS。新增消息表/游标纳入原迁移和禁写演练。部署保留单应用容器，功能默认关闭。
+
 ## 基线与架构
 基线：282ef781edf876d2c7ecbadbc8d2bd147759006e。Next.js Web + 进程内 worker，沿用 PostgreSQL 持久化和原有 Agent。新增 library 业务模块，接口依赖注入，测试不访问真实网盘。
 

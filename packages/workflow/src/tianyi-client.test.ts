@@ -95,6 +95,32 @@ describe("TianyiClient WEB face", () => {
     ]);
   });
 
+  it("listFilesPage sends the requested native page instead of always reading page-one 1000", async () => {
+    const calls: string[] = [];
+    const fetchImpl = fetchStub((url) => {
+      calls.push(url);
+      return {
+        status: 200,
+        body: { res_code: 0, fileListAO: {
+          folderList: [],
+          fileList: [{ id: "ty-page-3", name: "page-3.mkv", size: 3, md5: "M3" }],
+        } },
+      };
+    });
+    const c = new TianyiClient({ sessionKey: "SK", accessToken: "AT", refreshToken: "RT", fetchImpl });
+
+    await expect(c.listFilesPage({
+      folderId: "-11",
+      pageNum: 3,
+      pageSize: 1000,
+    })).resolves.toEqual({
+      items: [{ id: "ty-page-3", name: "page-3.mkv", size: 3, md5: "M3", isFolder: false }],
+      hasMore: false,
+    });
+    expect(calls[0]).toContain("pageNum=3");
+    expect(calls[0]).toContain("pageSize=1000");
+  });
+
   it("rejects loudly on a non-JSON HTTP-error body (must NOT collapse a 502/WAF page into [])", async () => {
     // Upstream outage / gateway HTML must fail loud, never masquerade as an empty
     // directory — the TMDB-outage-as-empty bug this codebase was burned by.
@@ -309,10 +335,20 @@ describe("TianyiClient SHARE_SAVE chain", () => {
       throw new Error("unexpected " + url);
     });
     const c = new TianyiClient({ sessionKey: "SK", accessToken: "AT", refreshToken: "RT", fetchImpl });
-    const r = await c.saveShare({ shareCode: "abc123", accessCode: "", targetFolderId: "-11" });
+    const submitted: string[] = [];
+    const r = await c.saveShare({
+      shareCode: "abc123",
+      accessCode: "",
+      targetFolderId: "-11",
+      onSubmitted: async (taskId) => {
+        seq.push("receipt");
+        submitted.push(taskId);
+      },
+    });
     expect(r.ok).toBe(true);
     expect(r.failed).toBe(0);
-    expect(seq).toEqual(["info", "list", "create", "check"]);
+    expect(submitted).toEqual(["987654321098765432"]);
+    expect(seq).toEqual(["info", "list", "create", "receipt", "check"]);
   });
 
   it("SHARE_SAVE with failedCount>0 reports partial failure (被和谐文件)", async () => {

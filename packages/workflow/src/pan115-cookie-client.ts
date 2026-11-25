@@ -106,6 +106,47 @@ export class Pan115CookieClient implements Pan115StorageApi {
     return response;
   }
 
+  async listItemsPage(input: {
+    directoryId: string;
+    offset: number;
+    limit: number;
+  }): Promise<{ items: Pan115Item[]; total: number }> {
+    if (!Number.isSafeInteger(input.offset) || input.offset < 0) {
+      throw new RangeError("offset must be a non-negative integer");
+    }
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 1_000) {
+      throw new RangeError("limit must be between 1 and 1000");
+    }
+    const response = await this.getJson(`${PAN115_WEBAPI_BASE_URL}/files`, [
+      ["aid", "1"],
+      ["cid", input.directoryId],
+      ["o", "user_ptime"],
+      ["asc", "1"],
+      ["offset", String(input.offset)],
+      ["show_dir", "1"],
+      ["limit", String(input.limit)],
+      ["snap", "0"],
+      ["natsort", "0"],
+      ["record_open_time", "1"],
+      ["format", "json"],
+      ["fc_mix", "0"],
+    ]);
+    if (!responseState(response)) {
+      throwResponseFailure(response, `PAN115_LIST_ITEMS_FAILED: ${responseMessage(response)}`);
+    }
+    if (!this.listResolvedToRequested(response, input.directoryId)) {
+      throw new Error(
+        `PAN115_DIRECTORY_NOT_FOUND: requested cid=${input.directoryId} but 115 resolved to ` +
+          `${stringValue(recordValue(response, "cid"))}. The directory was likely deleted; ` +
+          `refusing to operate on the fallback (root) directory.`,
+      );
+    }
+    return {
+      items: arrayValue(recordValue(response, "data")).filter(isRecord) as Pan115Item[],
+      total: numberValue(recordValue(response, "count")),
+    };
+  }
+
   async listItems(input: { directoryId: string }): Promise<Pan115Item[]> {
     const first = await this.listPage(input.directoryId, 0);
     // 115 silently treats a deleted/invalid cid as the account ROOT and returns

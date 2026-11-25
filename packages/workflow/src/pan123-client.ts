@@ -282,37 +282,57 @@ export class Pan123Client {
    *  只需第一页验活,存量大账号不必付至多 100 个串行签名往返。 */
   async listFiles(parentFileId: string, opts?: { maxPages?: number }): Promise<Pan123Item[]> {
     const out: Pan123Item[] = [];
-    let next = "0";
+    let cursor = "0";
     // Safety cap: a misbehaving cursor must not spin forever (100 pages × 100 = 10k items).
     for (let guard = 0; guard < 100; guard++) {
-      const resp = await this.signed("/file/list/new", {
-        method: "GET",
-        query: {
-          driveId: "0",
-          limit: "100",
-          next,
-          orderBy: "file_id",
-          orderDirection: "desc",
-          parentFileId,
-          trashed: "false",
-          Page: "1",
-        },
+      const page = await this.listFilesPage({
+        parentFileId,
+        cursor,
+        limit: 100,
       });
-      const d = (resp["data"] ?? {}) as Record<string, unknown>;
-      const infoList = Array.isArray(d["InfoList"]) ? (d["InfoList"] as unknown[]) : [];
-      for (const it of infoList) {
-        out.push(mapPan123Item(it));
-      }
-      const nextCursor = d["Next"];
-      if (isStopCursor(nextCursor)) {
+      out.push(...page.items);
+      if (page.nextCursor === undefined) {
         break;
       }
       if (guard + 1 >= (opts?.maxPages ?? Infinity)) {
         break; // cheap-read cap reached — caller only needed the first page(s)
       }
-      next = String(nextCursor);
+      cursor = page.nextCursor;
     }
     return out;
+  }
+
+  /** One native file/list/new page; `Next` remains provider-owned for durable
+   *  scanner checkpoints. Omit `nextCursor` only when the provider sent a stop sentinel. */
+  async listFilesPage(input: {
+    parentFileId: string;
+    cursor?: string;
+    limit?: number;
+  }): Promise<{ items: Pan123Item[]; nextCursor?: string }> {
+    const limit = input.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new RangeError("PAN123_LIST_PAGE_SIZE_INVALID");
+    }
+    const resp = await this.signed("/file/list/new", {
+      method: "GET",
+      query: {
+        driveId: "0",
+        limit: String(limit),
+        next: input.cursor ?? "0",
+        orderBy: "file_id",
+        orderDirection: "desc",
+        parentFileId: input.parentFileId,
+        trashed: "false",
+        Page: "1",
+      },
+    });
+    const d = (resp["data"] ?? {}) as Record<string, unknown>;
+    const infoList = Array.isArray(d["InfoList"]) ? (d["InfoList"] as unknown[]) : [];
+    const next = d["Next"];
+    return {
+      items: infoList.map(mapPan123Item),
+      ...(!isStopCursor(next) ? { nextCursor: String(next) } : {}),
+    };
   }
 
   /** 列分享目录(share/get,登录态空码穿透)。分页游标 `next`(起始 "0"),读 data.InfoList

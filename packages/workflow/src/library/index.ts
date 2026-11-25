@@ -17,3 +17,4 @@ export * from "./auto-organization.js";
 export * from "./auto-organization-store.js";
 export * from "./acquisition-bindings.js";
 export * from "./acquisition-naming.js";
+export * from "./storage-adapter.js";

@@ -69,6 +69,8 @@ interface TvV2Common {
   preferredLanguage?: string;
   /** Global quality preference ("high"/"medium"); undefined = 不限 (no guidance). */
   qualityPreference?: "high" | "medium";
+  /** User-authored standing selection preference (supersedes qualityPreference when non-empty). */
+  selectionPreference?: string;
   /** The run's drive brand ("pan115" | "quark") — selects brand-specific skill. */
   storageProvider?: string;
   /** assrt token (Settings → 字幕来源). Undefined = 字幕流程不触发。 */
@@ -103,6 +105,7 @@ function passthrough(input: TvV2Common): {
   maxSteps?: number;
   preferredLanguage?: string;
   qualityPreference?: "high" | "medium";
+  selectionPreference?: string;
   storageProvider?: string;
   assrtToken?: string;
   jevJudge?: JevJudge;
@@ -116,6 +119,7 @@ function passthrough(input: TvV2Common): {
     ...(input.maxSteps === undefined ? {} : { maxSteps: input.maxSteps }),
     ...(input.preferredLanguage === undefined ? {} : { preferredLanguage: input.preferredLanguage }),
     ...(input.qualityPreference === undefined ? {} : { qualityPreference: input.qualityPreference }),
+    ...(input.selectionPreference === undefined ? {} : { selectionPreference: input.selectionPreference }),
     ...(input.storageProvider === undefined ? {} : { storageProvider: input.storageProvider }),
     ...(input.assrtToken === undefined ? {} : { assrtToken: input.assrtToken }),
     ...(input.jevJudge === undefined ? {} : { jevJudge: input.jevJudge }),
@@ -1655,6 +1659,8 @@ async function runMovieAcquisitionV2AndPersistUncoordinated(input: {
   preferredLanguage?: string;
   /** Global quality preference ("high"/"medium"); undefined = 不限 (no guidance). */
   qualityPreference?: "high" | "medium";
+  /** User-authored standing selection preference (supersedes qualityPreference when non-empty). */
+  selectionPreference?: string;
   /** The run's drive brand ("pan115" | "quark") — selects brand-specific skill. */
   storageProvider?: string;
   /** assrt token (Settings → 字幕来源). Undefined = 字幕流程不触发。 */
@@ -1700,6 +1706,7 @@ async function runMovieAcquisitionV2AndPersistUncoordinated(input: {
     ...(input.maxSteps === undefined ? {} : { maxSteps: input.maxSteps }),
     ...(input.preferredLanguage === undefined ? {} : { preferredLanguage: input.preferredLanguage }),
     ...(input.qualityPreference === undefined ? {} : { qualityPreference: input.qualityPreference }),
+    ...(input.selectionPreference === undefined ? {} : { selectionPreference: input.selectionPreference }),
     ...(input.storageProvider === undefined ? {} : { storageProvider: input.storageProvider }),
     ...(input.assrtToken === undefined ? {} : { assrtToken: input.assrtToken }),
     ...(input.jevJudge === undefined ? {} : { jevJudge: input.jevJudge }),

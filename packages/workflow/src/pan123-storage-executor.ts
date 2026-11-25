@@ -20,6 +20,10 @@ import { episodeCodeFromFileName } from "./episode-code.js";
 import { isPan123AuthError } from "./pan123-client.js";
 import type { Pan123Client, Pan123Item, Pan123OfflineTask } from "./pan123-client.js";
 import type { StorageExecutor, UnparsedVideoFile } from "./ports.js";
+import {
+  isTransferSubmissionPersistenceError,
+  notifyTransferSubmitted,
+} from "./transfer-receipt.js";
 
 const MAX_RECURSIVE_COLLECT_DEPTH = 6;
 const DEFAULT_MIN_VIDEO_SIZE_BYTES = 10 * 1024 * 1024;
@@ -229,6 +233,41 @@ export class Pan123StorageExecutor implements StorageExecutor {
     return this.client.getSpace();
   }
 
+  async listDirectoryPage(input: {
+    directoryId: string;
+    page: number;
+    pageSize: number;
+    cursor?: string;
+  }): Promise<{
+    items: Array<{
+      fileId: string;
+      parentId: string;
+      name: string;
+      isDirectory: boolean;
+      sizeBytes: number | null;
+    }>;
+    nextPage: number | null;
+    nextCursor?: string;
+  }> {
+    const directoryId = normalizeId(input.directoryId);
+    const page = await this.client.listFilesPage({
+      parentFileId: directoryId,
+      ...(input.cursor !== undefined ? { cursor: input.cursor } : {}),
+      limit: Math.min(input.pageSize, 100),
+    });
+    return {
+      items: page.items.map((item) => ({
+        fileId: idOf(item),
+        parentId: directoryId,
+        name: nameOf(item),
+        isDirectory: isDirectory(item),
+        sizeBytes: sizeOf(item),
+      })),
+      nextPage: page.nextCursor === undefined ? null : input.page + 1,
+      ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}),
+    };
+  }
+
   async createDirectory(input: { name: string; parentId: string }): Promise<string> {
     const safeParentId = this.assertWithinWriteScope(input.parentId, "create directory");
     // Find-or-create: seasons of one title initialize at different times and must
@@ -270,6 +309,8 @@ export class Pan123StorageExecutor implements StorageExecutor {
     workflowRunId: string;
     directoryId: string;
     candidate: ResourceCandidate;
+    wholePackage?: boolean;
+    onSubmitted?: (receipt: Record<string, unknown>) => Promise<void>;
   }): Promise<TransferAttempt> {
     const url = stringValue(input.candidate.providerPayload["url"]);
     // Share https stays on saveShare; only magnet-typed / magnet:/ed2k: go offline.
@@ -282,9 +323,28 @@ export class Pan123StorageExecutor implements StorageExecutor {
     const before = new Set((await this.listVideoFiles(safe)).map((f) => f.id));
 
     let providerMessage = "";
+    let offlineTaskId: string | null = null;
+    let offlineCompleted = false;
     try {
       if (useOffline) {
-        await this.transferOfflineMagnet({ url, targetDirId: safe });
+        const offline = await this.transferOfflineMagnet({
+          url,
+          targetDirId: safe,
+          ...(input.onSubmitted === undefined
+            ? {}
+            : {
+                onSubmitted: async (taskId: string) => {
+                  offlineTaskId = taskId;
+                  await notifyTransferSubmitted(input.onSubmitted, {
+                    kind: "pan123_offline",
+                    state: "running",
+                    providerTaskId: taskId,
+                    submittedAt: new Date().toISOString(),
+                  });
+                },
+              }),
+        });
+        offlineCompleted = offline.completed;
       } else {
         const parsed = parsePan123ShareUrl(url);
         if (!parsed) {
@@ -301,9 +361,18 @@ export class Pan123StorageExecutor implements StorageExecutor {
           // ok:false with an EMPTY message must never be reclassified as
           // success/no_target_change — fall back to a loud generic reason.
           providerMessage = result.message || "转存失败(provider 未给原因)"; // dead share / 提取码错 / 空分享
+        } else {
+          await notifyTransferSubmitted(input.onSubmitted, {
+            kind: "pan123_share",
+            state: "completed",
+            submittedAt: new Date().toISOString(),
+          });
         }
       }
     } catch (error) {
+      if (isTransferSubmissionPersistenceError(error)) {
+        throw error;
+      }
       // Auth failures must surface so the worker freezes the drive — never absorbed.
       if (isPan123AuthError(error)) {
         throw error;
@@ -351,9 +420,39 @@ export class Pan123StorageExecutor implements StorageExecutor {
       status,
       providerMessage: providerMessage || (status === "no_target_change" ? emptyHint : ""),
       materializedFileIds,
+      receipt: {
+        kind: useOffline ? "pan123_offline" : "pan123_share",
+        state: providerMessage
+          ? "failed"
+          : useOffline
+            ? offlineCompleted ? "completed" : "running"
+            : "completed",
+        ...(offlineTaskId === null ? {} : { providerTaskId: offlineTaskId }),
+        submittedAt: new Date().toISOString(),
+      },
     };
     this.nextTransferNumber += 1;
     return attempt;
+  }
+
+  async getTransferStatus(
+    receipt: Record<string, unknown>,
+  ): Promise<"running" | "completed" | "failed" | "unknown"> {
+    const kind = receipt["providerKind"] ?? receipt["kind"];
+    if (kind === "pan123_share") {
+      const state = receipt["state"];
+      return state === "running" || state === "completed" || state === "failed" || state === "unknown"
+        ? state
+        : "unknown";
+    }
+    if (kind !== "pan123_offline") return "unknown";
+    const taskId = receipt["providerTaskId"];
+    if (typeof taskId !== "string" || !taskId) return "unknown";
+    const task = await this.client.getOfflineTask(taskId);
+    if (!task) return "unknown";
+    if (task.status === 2) return "completed";
+    if (task.status === 1) return "failed";
+    return "running";
   }
 
   /** Subtitle direct-link landing, single file — delegates to the batch (the
@@ -670,13 +769,18 @@ export class Pan123StorageExecutor implements StorageExecutor {
    * Returns false for a bounded timeout: this is a soft no_target_change, not a
    * dead magnet. Every submitted task is cancelled before the result is returned,
    * preventing a late landing from creating a duplicate. */
-  private async transferOfflineMagnet(input: { url: string; targetDirId: string }): Promise<boolean> {
+  private async transferOfflineMagnet(input: {
+    url: string;
+    targetDirId: string;
+    onSubmitted?: (taskId: string) => Promise<void>;
+  }): Promise<{ completed: boolean; taskId: string }> {
     const resolved = await this.client.resolveOffline(input.url);
     const taskId = await this.client.submitOffline({
       resourceId: resolved.resourceId,
       fileIds: resolved.fileIds,
       uploadDirId: input.targetDirId,
     });
+    await input.onSubmitted?.(taskId);
     // Delete both terminal and timed-out tasks even when polling throws. A timed-
     // out task must not keep downloading after the agent moves on, otherwise it
     // can land late and double the next candidate's files.
@@ -685,12 +789,14 @@ export class Pan123StorageExecutor implements StorageExecutor {
     // `cause` so triage doesn't lose it.
     let pollError: unknown;
     try {
-      return await this.pollOfflineTask(taskId);
+      return { completed: await this.pollOfflineTask(taskId), taskId };
     } catch (error) {
       pollError = error;
       throw error;
     } finally {
-      await this.deleteOfflineTaskWithRetry(taskId, pollError);
+      if (input.onSubmitted === undefined) {
+        await this.deleteOfflineTaskWithRetry(taskId, pollError);
+      }
     }
   }
 

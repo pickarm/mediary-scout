@@ -1,3 +1,6 @@
+> **pickarm Fork**: Adds existing cloud-drive library scanning/identification/template organization across all 6 supported drives, server-side pagination, optional Redis summary caching, personal messaging bots (WeChat / Feishu / Telegram), direct share/magnet link import, prebuilt `linux/amd64` NAS Docker deployment (`docker-compose.fork.yml`), and GitHub Actions auto-build workflows ([GHCR](https://github.com/pickarm/mediary-scout/pkgs/container/mediary-scout) & [Docker Hub `qicket/mediary-scout`](https://hub.docker.com/r/qicket/mediary-scout/tags)).
+> See the Chinese [README](README.md) and [Fork Deployment Guide](docs/fork/DEPLOYMENT.md) for NAS deployment, CI auto-builds, and current verification boundaries (real platform/drive live verification remains pending).
+
 <p align="center">
   <img src="docs/images/hero.svg" alt="Mediary Scout" width="600">
 </p>

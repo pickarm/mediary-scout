@@ -19,7 +19,7 @@ let pool: pg.Pool;
 let databaseName = "";
 let databaseCreated = false;
 
-async function createScope(): Promise<ScanScope> {
+async function createScope(provider = "guangya"): Promise<ScanScope> {
   const suffix = randomUUID().replaceAll("-", "");
   const accountId = `f04_acct_${suffix}`;
   const connectedStorageId = `f04_storage_${suffix}`;
@@ -28,8 +28,8 @@ async function createScope(): Promise<ScanScope> {
     [accountId,`user_${suffix}`],
   );
   await pool.query(
-    "INSERT INTO connected_storages (id,account_id,provider,provider_uid,payload,created_at) VALUES ($1,$2,'guangya',$3,'{}'::jsonb,now()::text)",
-    [connectedStorageId,accountId,`uid_${suffix}`],
+    "INSERT INTO connected_storages (id,account_id,provider,provider_uid,payload,created_at) VALUES ($1,$2,$3,$4,'{}'::jsonb,now()::text)",
+    [connectedStorageId,accountId,provider,`uid_${suffix}`],
   );
   return { accountId, connectedStorageId };
 }
@@ -392,5 +392,120 @@ integration("F04 authorized directory scanner", () => {
     expect(await store.finishTask({ scope, taskId: task.taskId, leaseId, status: "failed", message: "stale worker", now })).toBe(false);
     expect((await store.getTask(scope, task.taskId))?.status).toBe("completed");
     expect(await store.listTaskFailures(scope, task.taskId)).toEqual([]);
+  }, 30_000);
+
+  it("persists a provider cursor with the page and resumes it from a fresh scanner instance", async () => {
+    const scope = await createScope();
+    const config = makeConfig(scope);
+    const store = new PostgresScanStore(pool);
+    await store.saveConfiguration(config);
+
+    let unblock!: () => void;
+    let entered!: () => void;
+    const enteredPromise = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { unblock = resolve; });
+    const firstCalls: Array<{ page: number; cursor?: string }> = [];
+    const firstScanner = new LibraryScanner({
+      store,
+      idFactory: () => "f20-cursor-restart",
+      reader: {
+        async listPage({ directoryId, directoryPath, page, cursor }) {
+          firstCalls.push({ page, ...(cursor !== undefined ? { cursor } : {}) });
+          if (page === 0) {
+            return {
+              items: [{
+                fileId: "first-page-file",
+                parentDirectoryId: directoryId,
+                name: "First.mkv",
+                isDirectory: false,
+                sizeBytes: 1,
+                path: `${directoryPath}/First.mkv`,
+                modifiedAt: null,
+              }],
+              nextPage: 1,
+              nextCursor: "next-17",
+            };
+          }
+          entered();
+          await gate;
+          return {
+            items: [{
+              fileId: "late-file",
+              parentDirectoryId: directoryId,
+              name: "Late.mkv",
+              isDirectory: false,
+              sizeBytes: 2,
+              path: `${directoryPath}/Late.mkv`,
+              modifiedAt: null,
+            }],
+            nextPage: null,
+          };
+        },
+      },
+    });
+
+    const task = await firstScanner.start(scope, config.configId);
+    await enteredPromise;
+    expect((await firstScanner.pause(scope, task.taskId)).status).toBe("paused");
+    unblock();
+    await firstScanner.waitForIdle(scope, task.taskId);
+    expect((await store.listTaskDirectories(scope, task.taskId))[0]).toMatchObject({
+      nextPage: 1,
+      nextCursor: "next-17",
+      status: "pending",
+    });
+    expect((await store.listTaskFiles(scope, task.taskId)).map((fact) => fact.fileId)).toEqual([
+      "first-page-file",
+    ]);
+    expect(firstCalls).toEqual([
+      { page: 0 },
+      { page: 1, cursor: "next-17" },
+    ]);
+
+    const resumedCalls: Array<{ page: number; cursor?: string }> = [];
+    const resumedScanner = new LibraryScanner({
+      store,
+      reader: {
+        async listPage({ directoryId, directoryPath, page, cursor }) {
+          resumedCalls.push({ page, ...(cursor !== undefined ? { cursor } : {}) });
+          return {
+            items: [{
+              fileId: "resumed-file",
+              parentDirectoryId: directoryId,
+              name: "Resumed.mkv",
+              isDirectory: false,
+              sizeBytes: 3,
+              path: `${directoryPath}/Resumed.mkv`,
+              modifiedAt: null,
+            }],
+            nextPage: null,
+          };
+        },
+      },
+    });
+    await resumedScanner.resume(scope, task.taskId);
+    expect((await resumedScanner.waitForIdle(scope, task.taskId)).status).toBe("completed");
+    expect(resumedCalls).toEqual([{ page: 1, cursor: "next-17" }]);
+    expect((await store.listTaskFiles(scope, task.taskId)).map((fact) => fact.fileId)).toEqual([
+      "first-page-file",
+      "resumed-file",
+    ]);
+    expect((await store.listTaskDirectories(scope, task.taskId))[0]?.nextCursor).toBeUndefined();
+  }, 30_000);
+
+  it("accepts the six original storage provider names in scan scope", async () => {
+    const store = new PostgresScanStore(pool);
+    for (const provider of ["pan115", "quark", "uc", "pan123", "tianyi", "guangya"] as const) {
+      const scope = await createScope(provider);
+      const config = { ...makeConfig(scope), configId: `f20-provider-${provider}` };
+      await store.saveConfiguration(config);
+      const scanner = new LibraryScanner({
+        store,
+        idFactory: () => `f20-provider-task-${provider}`,
+        reader: { async listPage() { return { items: [], nextPage: null }; } },
+      });
+      const task = await scanner.start(scope, config.configId);
+      expect((await scanner.waitForIdle(scope, task.taskId)).status).toBe("completed");
+    }
   }, 30_000);
 });

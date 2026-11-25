@@ -207,6 +207,87 @@ describe("Storage115Executor", () => {
     ]);
   });
 
+  it("awaits the synchronous share receipt before landing verification and can restore it later", async () => {
+    const api = new FakePan115Api({
+      shareFiles: {
+        abc123: [{ fid: "file_1", n: "Show.S01E01.mkv", s: "1000000000" }],
+      },
+    });
+    const executor = new Storage115Executor({ api });
+    const received: Record<string, unknown>[] = [];
+
+    const attempt = await executor.transfer({
+      workflowRunId: "run_1",
+      directoryId: "123",
+      candidate: candidateFixture({
+        type: "115",
+        providerPayload: { url: "https://115.com/s/abc123?password=pw" },
+      }),
+      wholePackage: true,
+      onSubmitted: async (receipt) => {
+        received.push(receipt);
+        expect(api.listCalls).toHaveLength(1);
+      },
+    });
+
+    expect(received).toEqual([
+      expect.objectContaining({ kind: "115_share", state: "completed" }),
+    ]);
+    expect(attempt.receipt).toMatchObject({ kind: "115_share", state: "completed" });
+    await expect(executor.getTransferStatus(attempt.receipt!)).resolves.toBe("completed");
+  });
+
+  it("keeps an accepted 115 offline task recoverable when a submission receipt is supplied", async () => {
+    const infoHash = "0123456789abcdef0123456789abcdef01234567";
+    const api = new FakePan115Api({
+      offlineTaskList: [
+        {
+          infoHash,
+          name: "Some.Movie",
+          percentDone: 100,
+          status: 2,
+          statusText: "下载成功",
+          url: "",
+        },
+      ],
+    });
+    const executor = new Storage115Executor({
+      api,
+      offlineMaterializeAttempts: 1,
+      offlineMaterializePollMs: 0,
+      sleep: async () => {},
+    });
+    const received: Record<string, unknown>[] = [];
+
+    const attempt = await executor.transfer({
+      workflowRunId: "run_1",
+      directoryId: "123",
+      candidate: candidateFixture({
+        type: "magnet",
+        providerPayload: { url: `magnet:?xt=urn:btih:${infoHash}` },
+      }),
+      wholePackage: true,
+      onSubmitted: async (receipt) => {
+        received.push(receipt);
+      },
+    });
+
+    expect(received).toEqual([
+      expect.objectContaining({
+        kind: "115_offline",
+        state: "running",
+        infoHash,
+      }),
+    ]);
+    expect(api.removedOfflineHashes).toEqual([]);
+    expect(attempt.receipt).toMatchObject({
+      kind: "115_offline",
+      state: "completed",
+      infoHash,
+    });
+    await expect(executor.getTransferStatus(attempt.receipt!)).resolves.toBe("completed");
+  });
+
   it("lists video files by media extension, not by episode wildcard", async () => {
     // A movie file has no SxxExx/第N集 code but is still a real video. Detection
     // must key off the media extension; the episode code is optional metadata.

@@ -4,6 +4,7 @@ import {
   PostgresScanStore,
   type ScanScope,
 } from "@media-track/workflow/library";
+import { STORAGE_BRANDS } from "@media-track/workflow";
 import { isDemoMode } from "./demo-mode";
 import { getLibraryIdentificationService } from "./library-identification-runtime";
 import { getLibraryPool, getLibraryServices } from "./library-runtime";
@@ -13,6 +14,7 @@ const INTERVAL_MS = boundedEnv("MEDIA_TRACK_LIBRARY_SCAN_WORKER_POLL_MS", 15_000
 const MAX_SCOPES_PER_TICK = 4;
 const IDENTIFICATION_CONCURRENCY = 2;
 const MAX_QUEUED_IDENTIFICATION_SCOPES = 64;
+const REGISTERED_STORAGE_PROVIDERS = STORAGE_BRANDS.map(({ provider }) => provider);
 let started = false;
 let ticking = false;
 let scopeCursor: ScopeCursor | null = null;
@@ -37,7 +39,7 @@ export function startLibraryScanWorker(): void {
     try {
       await whileInFlight(async () => {
         if (isUpdateHoldActive(Date.now())) return;
-        const ordered = await listActiveGuangyaScopes();
+        const ordered = await listActiveLibraryScopes();
         for (const scope of ordered.slice(0, MAX_SCOPES_PER_TICK)) {
           if (isUpdateHoldActive(Date.now())) break;
           try { await schedulerFor(scope).tick(scope); }
@@ -54,7 +56,7 @@ export function startLibraryScanWorker(): void {
   setInterval(() => { void tick(); }, INTERVAL_MS);
 }
 
-async function listActiveGuangyaScopes(): Promise<ScanScope[]> {
+async function listActiveLibraryScopes(): Promise<ScanScope[]> {
   const pool = getLibraryPool();
   await getWorkerScanStore().ensureSchema();
   const after = scopeCursor;
@@ -93,11 +95,14 @@ interface ScopeRow { account_id: string; connected_storage_id: string }
 
 async function queryScopePage(pool: ReturnType<typeof getLibraryPool>, after: ScopeCursor | null, limit: number): Promise<ScanScope[]> {
   const cursorSql = after ? "AND (s.account_id,s.id) > ($1,$2)" : "";
-  const params = after ? [after.accountId, after.connectedStorageId, limit] : [limit];
-  const limitIndex = params.length;
+  const providerIndex = after ? 3 : 1;
+  const limitIndex = providerIndex + 1;
+  const params = after
+    ? [after.accountId, after.connectedStorageId, REGISTERED_STORAGE_PROVIDERS, limit]
+    : [REGISTERED_STORAGE_PROVIDERS, limit];
   const result = await pool.query<ScopeRow>(
     "SELECT s.account_id,s.id AS connected_storage_id FROM connected_storages s " +
-    "WHERE s.provider='guangya' AND s.status='active' " + cursorSql + " " +
+    `WHERE s.provider=ANY($${providerIndex}::text[]) AND s.status='active' ` + cursorSql + " " +
     "AND (EXISTS (SELECT 1 FROM library_scan_configs c WHERE c.account_id=s.account_id AND c.connected_storage_id=s.id) " +
     "OR EXISTS (SELECT 1 FROM library_scan_tasks t WHERE t.account_id=s.account_id AND t.connected_storage_id=s.id)) " +
     `ORDER BY s.account_id,s.id LIMIT $${limitIndex}`,

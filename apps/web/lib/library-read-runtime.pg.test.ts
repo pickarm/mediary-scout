@@ -61,15 +61,15 @@ integration("F08g read-only library runtime", () => {
     }
   }, 30_000);
 
-  it("reads owned history for frozen storage with empty credentials and rejects alien or removed storage", async () => {
+  it("reads owned history for a frozen non-GuangYa storage with empty credentials", async () => {
     const accountId = `account_${randomUUID()}`;
     const otherAccountId = `account_${randomUUID()}`;
     const storageId = `storage_${randomUUID()}`;
     await pool.query("INSERT INTO accounts(id,username,password_hash,is_owner,created_at) VALUES($1,$2,'',false,now()::text),($3,$4,'',false,now()::text)", [accountId, accountId, otherAccountId, otherAccountId]);
-    await pool.query("INSERT INTO connected_storages(id,account_id,provider,provider_uid,payload,status,created_at) VALUES($1,$2,'guangya',$3,'{}'::jsonb,'frozen',now()::text)", [storageId, accountId, `uid_${randomUUID()}`]);
+    await pool.query("INSERT INTO connected_storages(id,account_id,provider,provider_uid,payload,status,created_at) VALUES($1,$2,'quark',$3,'{}'::jsonb,'frozen',now()::text)", [storageId, accountId, `uid_${randomUUID()}`]);
     const scope = { accountId, connectedStorageId: storageId };
     mocks.accountId = accountId;
-    mocks.repository = { listConnectedStorages: async () => [{ id: storageId, accountId, provider: "guangya", providerUid: "uid", payload: {}, status: "frozen" }] };
+    mocks.repository = { listConnectedStorages: async () => [{ id: storageId, accountId, provider: "quark", providerUid: "uid", payload: {}, status: "frozen" }] };
     await expect(getLibraryServices(scope)).rejects.toMatchObject({ code: "storage_frozen" });
     const owned = await getLibraryReadServices(scope);
     const configuration = {

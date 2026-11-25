@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { STORAGE_BRANDS } from "../storage-brands.js";
 import { LIBRARY_SCAN_SCHEMA_ADVISORY_LOCK_KEY, PostgresScanStore } from "./scan-store.js";
 import { PostgresIdentificationStore } from "./identification-store.js";
 import { PostgresLibraryStore } from "./store.js";
@@ -47,6 +48,7 @@ CREATE TABLE IF NOT EXISTS library_auto_organization_items (
 CREATE INDEX IF NOT EXISTS library_auto_organization_items_batch
   ON library_auto_organization_items(account_id, connected_storage_id, task_id, batch_id, status);
 `;
+const REGISTERED_STORAGE_PROVIDERS = STORAGE_BRANDS.map(({ provider }) => provider);
 
 interface TaskRow {
   account_id: string;
@@ -119,11 +121,11 @@ export class PostgresAutoOrganizationStore implements AutoOrganizationStore {
                 JOIN connected_storages s ON s.id=t.connected_storage_id AND s.account_id=t.account_id
                WHERE t.account_id=a.account_id AND t.connected_storage_id=a.connected_storage_id AND t.task_id=a.task_id
                  AND t.config_id=a.config_id AND t.status IN ('completed','partial')
-                 AND s.provider='guangya' AND s.status='active'
+                 AND s.provider=ANY($2::text[]) AND s.status='active'
                  AND cfg.configuration->>'autoOrganize'='true'
             )
           LIMIT $1 FOR UPDATE`,
-        [page],
+        [page, REGISTERED_STORAGE_PROVIDERS],
       );
       for (const row of stale.rows) {
         await client.query(
@@ -157,14 +159,14 @@ export class PostgresAutoOrganizationStore implements AutoOrganizationStore {
          JOIN library_scan_configs cfg ON cfg.account_id=t.account_id AND cfg.connected_storage_id=t.connected_storage_id AND cfg.config_id=t.config_id
          JOIN connected_storages s ON s.id=t.connected_storage_id AND s.account_id=t.account_id
          LEFT JOIN library_auto_organization_tasks c ON c.account_id=t.account_id AND c.connected_storage_id=t.connected_storage_id AND c.task_id=t.task_id
-        WHERE s.provider='guangya' AND s.status='active'
+        WHERE s.provider=ANY($3::text[]) AND s.status='active'
           AND t.status IN ('completed','partial')
           AND cfg.configuration->>'autoOrganize'='true'
           AND (c.status IS NULL OR c.status NOT IN ('paused','failed'))
           AND (c.next_attempt_at IS NULL OR c.next_attempt_at <= $1::timestamptz)
         ORDER BY c.last_checked_at NULLS FIRST,t.account_id,t.connected_storage_id,t.task_id
         LIMIT $2`,
-      [input.now, limit],
+      [input.now, limit, REGISTERED_STORAGE_PROVIDERS],
     );
     return result.rows.map(candidateFromRow);
   }
@@ -473,9 +475,9 @@ async function isEligible(client: PoolClient, scope: OrganizationScope, taskId: 
        JOIN library_scan_configs cfg ON cfg.account_id=t.account_id AND cfg.connected_storage_id=t.connected_storage_id AND cfg.config_id=t.config_id
        JOIN connected_storages s ON s.id=t.connected_storage_id AND s.account_id=t.account_id
       WHERE t.account_id=$1 AND t.connected_storage_id=$2 AND t.task_id=$3 AND t.config_id=$4
-        AND t.status IN ('completed','partial') AND s.provider='guangya' AND s.status='active'
+        AND t.status IN ('completed','partial') AND s.provider=ANY($5::text[]) AND s.status='active'
         AND cfg.configuration->>'autoOrganize'='true'`,
-    [scope.accountId, scope.connectedStorageId, taskId, configId],
+    [scope.accountId, scope.connectedStorageId, taskId, configId, REGISTERED_STORAGE_PROVIDERS],
   );
   return result.rowCount === 1;
 }

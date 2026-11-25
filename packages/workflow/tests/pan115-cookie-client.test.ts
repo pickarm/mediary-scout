@@ -75,6 +75,27 @@ describe("Pan115CookieClient", () => {
     expect(requests.map((request) => request.method)).toEqual(["GET"]);
   });
 
+  it("returns exactly one offset page and leaves all remaining pages to the checkpoint", async () => {
+    const requests: RecordedRequest[] = [];
+    const client = new Pan115CookieClient({
+      cookie: "cookie",
+      listPageDelayMs: 0,
+      fetchJson: recordFetchFn(requests, paginatedFetch(5, "dir_1")),
+    });
+
+    await expect(client.listItemsPage({
+      directoryId: "dir_1",
+      offset: 2,
+      limit: 1,
+    })).resolves.toEqual({
+      items: [{ fid: "file_2", n: "E2.mkv", s: "1" }],
+      total: 5,
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toContain("offset=2");
+    expect(requests[0]?.url).toContain("limit=1");
+  });
+
   it("paginates a directory larger than one page (so a 335-file pack is listable)", async () => {
     const requests: RecordedRequest[] = [];
     const client = new Pan115CookieClient({
