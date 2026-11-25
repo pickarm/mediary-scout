@@ -1019,8 +1019,8 @@ describe("requireAuthenticatedAccountId (C2: refuse acct_unauthenticated writes)
     vi.doUnmock("next/headers");
   });
 
-  it("single-user → returns acct_default (unchanged)", async () => {
-    delete process.env.MEDIA_TRACK_MULTI_USER;
+  it("single-user opt-out (MEDIA_TRACK_MULTI_USER=0) → returns acct_default", async () => {
+    process.env.MEDIA_TRACK_MULTI_USER = "0";
     vi.resetModules();
     const { requireAuthenticatedAccountId } = await import("./workflow-runtime");
     expect(await requireAuthenticatedAccountId()).toBe("acct_default");

@@ -1,27 +1,39 @@
+import { isWebBootstrapDisabled } from "../../../../lib/auth-mode";
 import { isDemoMode } from "../../../../lib/demo-mode";
 import { NextResponse, type NextRequest } from "next/server";
 import {
   SESSION_COOKIE_NAME,
-  isMultiUserEnabled,
-  isCookieSecure,
-  registerAccount,
+  ensureEnvBootstrapOwner,
   getBootstrapState,
-  isRemoteRequest,
+  isCookieSecure,
+  isMultiUserEnabled,
+  isPublicRegistrationEnabled,
+  registerAccount,
 } from "../../../../lib/workflow-runtime";
 
 const SESSION_MAX_AGE = 30 * 24 * 60 * 60; // 30 days, seconds
 
-/** Register a local account → auto-login (set the session cookie). */
+/** Register a local account (or perform initial owner claim when unclaimed) → set session cookie. */
 export async function POST(request: NextRequest) {
-  if (isDemoMode()) return Response.json({ error: "演示站只读" }, { status: 403 });
+  if (isDemoMode()) return NextResponse.json({ error: "演示站只读" }, { status: 403 });
   if (!isMultiUserEnabled()) {
     return NextResponse.json({ error: "multi-user disabled" }, { status: 404 });
   }
-  // 认领（第一个用户接管 acct_default，连同已有的库和网盘）只在局域网：经隧道来的
-  // 外网访客不能抢先当站主。认领之后，家人朋友照常可以从外网注册自己的账号。
-  if (isRemoteRequest(request.headers) && (await getBootstrapState()).needsClaim) {
+  await ensureEnvBootstrapOwner();
+  const bootstrap = await getBootstrapState();
+  if (bootstrap.needsClaim) {
+    if (isWebBootstrapDisabled()) {
+      return NextResponse.json(
+        {
+          error:
+            "已禁用网页端首次初始化，请通过环境变量 MEDIA_TRACK_ADMIN_USERNAME 与 MEDIA_TRACK_ADMIN_PASSWORD 配置站主账号。",
+        },
+        { status: 403 },
+      );
+    }
+  } else if (!(await isPublicRegistrationEnabled())) {
     return NextResponse.json(
-      { error: "创建站主账号只能在局域网里完成。请在家里的网络打开这台机器的局域网地址认领。" },
+      { error: "当前站点未开放公开注册，请联系站主开启注册或创建账号。" },
       { status: 403 },
     );
   }
@@ -30,7 +42,11 @@ export async function POST(request: NextRequest) {
   const password = typeof body.password === "string" ? body.password : "";
   const result = await registerAccount(username, password);
   if (!result.ok) {
-    return NextResponse.json({ error: result.error }, { status: 400 });
+    const status =
+      result.error.includes("未开放公开注册") || result.error.includes("已禁用网页端首次初始化")
+        ? 403
+        : 400;
+    return NextResponse.json({ error: result.error }, { status });
   }
   const response = NextResponse.json({ ok: true });
   response.cookies.set(SESSION_COOKIE_NAME, result.signedCookie, {

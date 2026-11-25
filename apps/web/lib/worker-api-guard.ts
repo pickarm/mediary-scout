@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { isAccountAuthEnabled } from "./auth-mode";
 import { isDemoMode } from "./demo-mode";
 
 export function workerApiGuard(request: NextRequest): NextResponse | null {
@@ -7,7 +8,7 @@ export function workerApiGuard(request: NextRequest): NextResponse | null {
   }
 
   const secret = process.env.MEDIA_TRACK_WORKER_SECRET;
-  if ((!secret && process.env.MEDIA_TRACK_MULTI_USER === "1") ||
+  if ((!secret && isAccountAuthEnabled()) ||
       (secret && request.headers.get("x-media-track-worker-secret") !== secret)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }

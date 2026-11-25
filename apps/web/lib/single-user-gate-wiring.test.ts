@@ -17,7 +17,7 @@ const prevMultiUser = process.env.MEDIA_TRACK_MULTI_USER;
 const boot = async () => {
   process.env.MEDIA_TRACK_SQLITE_PATH = ":memory:";
   delete process.env.MEDIA_TRACK_POSTGRES_URL;
-  delete process.env.MEDIA_TRACK_MULTI_USER; // 单用户
+  process.env.MEDIA_TRACK_MULTI_USER = "0"; // 显式开启单用户兼容模式
   vi.resetModules();
   return import("./workflow-runtime");
 };

@@ -39,7 +39,14 @@ describe("/api/workflows/run-next", () => {
     expect(runNextQueuedWorkflow).not.toHaveBeenCalled();
   });
 
-  it("fails closed in multi-user mode when no worker secret is configured", async () => {
+  it("fails closed by default when no worker secret is configured", async () => {
+    const response = await POST(request("POST"));
+
+    expect(response.status).toBe(401);
+    expect(runNextQueuedWorkflow).not.toHaveBeenCalled();
+  });
+
+  it("fails closed in explicit multi-user mode when no worker secret is configured", async () => {
     vi.stubEnv("MEDIA_TRACK_MULTI_USER", "1");
 
     const response = await POST(request("POST"));
@@ -66,7 +73,8 @@ describe("/api/workflows/run-next", () => {
     expect(runNextQueuedWorkflow).toHaveBeenCalledOnce();
   });
 
-  it("preserves secretless single-user cron compatibility", async () => {
+  it("preserves secretless single-user cron compatibility when MEDIA_TRACK_MULTI_USER=0", async () => {
+    vi.stubEnv("MEDIA_TRACK_MULTI_USER", "0");
     const response = await GET(request("GET"));
 
     expect(response.status).toBe(200);

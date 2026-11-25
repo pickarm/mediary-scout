@@ -51,6 +51,7 @@ import {
   getAccountScopedSettings,
   getCurrentAccountId,
   getCurrentAccountSummary,
+  getPublicRegistrationState,
   isMultiUserEnabled,
   listManagedAccounts,
   getDailySweepTimes,
@@ -271,7 +272,10 @@ async function AccountManagementSection() {
   if (!isMultiUserEnabled()) return null;
   const me = await getCurrentAccountSummary();
   if (!me?.isOwner) return null;
-  const accounts = await listManagedAccounts(await getCurrentAccountId());
+  const [accounts, regState] = await Promise.all([
+    listManagedAccounts(await getCurrentAccountId()),
+    getPublicRegistrationState(),
+  ]);
   if (!accounts) return null;
   return (
     <section id="accounts" className="panel" style={{ maxWidth: 720, marginTop: 24 }}>
@@ -281,10 +285,16 @@ async function AccountManagementSection() {
             <Users size={16} aria-hidden style={{ verticalAlign: "-2px", marginRight: 8 }} />
             账号管理
           </h2>
-          <p className="panel-note">作为站主，你可以为忘记密码的用户重置密码（不影响他们的网盘和媒体库）</p>
+          <p className="panel-note">
+            作为站主，你可以控制是否开放公开注册、直接创建成员账号，或为忘记密码的用户重置密码（不影响他们的网盘和媒体库）
+          </p>
         </div>
       </div>
-      <AccountAdminPanel accounts={accounts} />
+      <AccountAdminPanel
+        accounts={accounts}
+        allowRegistration={regState.allowed}
+        registrationLockedByEnv={regState.lockedByEnv}
+      />
     </section>
   );
 }

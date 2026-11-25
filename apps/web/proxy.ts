@@ -1,19 +1,15 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { isAccountAuthEnabled, resolveSafeNextPath } from "./lib/auth-mode";
 
 /**
- * §7 P1 auth gate (Next 16 "proxy" convention, formerly middleware).
+ * §7 P1 + 巡影 Fork 默认强制登录门禁（Next 16 "proxy" 约定）。
  *
  * 两种门禁形态：
- *  - 多用户（`MEDIA_TRACK_MULTI_USER=1`）：处处需要 session（现状不变）。
- *  - 单用户：**凡是经隧道来的远程请求都门禁**，与是否设过密码无关；局域网直通，零摩擦。
- *
- * 远程门禁不再看 `mt_auth_required`。旧规则是 `passwordSet && isRemote`，于是一台
- * 尚未设密码的实例对公网匿名访客完全放行——这与服务端 getCurrentAccountId() 修复后的
- * 判定相矛盾：服务端会返回 acct_unauthenticated 哨兵，而 proxy 却不把人送去 /login，
- * 结果远程站主看到的是一个没有任何出口的空页面。两侧必须同规则：**远程一律要 session**。
- *
- * 未设密码的远程访客因此落到 /login，那里提供「设置访问密码」表单（app/login/page.tsx）,
- * 站主可以就地设密码并登录，不会被锁死。
+ *  - 默认强制账号密码登录（`isAccountAuthEnabled()` 为 true，含公网裸端口、普通反代与局域网）：
+ *    除认证端点与自守 API 外处处需要 session。
+ *  - 兼容单用户逃生阀（显式 `MEDIA_TRACK_MULTI_USER=0` 或桌面版默认）：
+ *    凡经 Cloudflare 隧道的远程请求需 session；局域网直通。
+ *  - 演示模式（`MEDIA_TRACK_DEMO_MODE=1`）：只读免登录放行。
  *
  * This does cheap PRESENCE gating for the redirect UX (runs on the Edge runtime,
  * no DB access). The authoritative check — signature + session row + expiry — is
@@ -43,8 +39,11 @@ function isRemoteRequest(request: NextRequest): boolean {
 }
 
 export function proxy(request: NextRequest): NextResponse {
-  const multiUser = process.env.MEDIA_TRACK_MULTI_USER === "1";
-  const gated = multiUser || isRemoteRequest(request);
+  if (process.env.MEDIA_TRACK_DEMO_MODE === "1") {
+    return NextResponse.next();
+  }
+  const accountAuth = isAccountAuthEnabled();
+  const gated = accountAuth || isRemoteRequest(request);
   if (!gated) {
     return NextResponse.next();
   }
@@ -55,9 +54,16 @@ export function proxy(request: NextRequest): NextResponse {
   if (hasSession) {
     return NextResponse.next();
   }
+  const { pathname, search } = request.nextUrl;
   const url = request.nextUrl.clone();
   url.pathname = "/login";
   url.search = "";
+  if (pathname !== "/" && !pathname.startsWith("/api/")) {
+    const nextPath = resolveSafeNextPath(`${pathname}${search ?? ""}`);
+    if (nextPath !== "/") {
+      url.searchParams.set("next", nextPath);
+    }
+  }
   return NextResponse.redirect(url);
 }
 

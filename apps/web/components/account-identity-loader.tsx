@@ -1,19 +1,28 @@
 import { connection } from "next/server";
-import { isMultiUserEnabled, getCurrentAccountSummary } from "../lib/workflow-runtime";
+import { redirect } from "next/navigation";
+import { isDemoMode } from "../lib/demo-mode";
+import {
+  getCurrentAccountId,
+  getCurrentAccountSummary,
+  isMultiUserEnabled,
+  UNAUTHENTICATED_ACCOUNT_ID,
+} from "../lib/workflow-runtime";
 import { AccountIdentity } from "./account-identity";
 
 /**
  * Async server loader for the sidebar identity block. Renders nothing in single-user
- * mode (no login) or when there's no valid session. Mounted inside <Suspense> so its
- * DB read never blocks the static sidebar shell (mirrors WorkspaceSwitcherLoader).
+ * or demo mode, redirects to /login when an expired/revoked session slips past Edge
+ * cookie-presence checks, and otherwise renders the signed-in account dropdown.
  *
- * `connection()` FIRST so cacheComponents evaluates this per-request, not at build
- * time — otherwise it'd be prerendered while multi-user is off, baked as null, and the
- * identity block would never appear in production even with multi-user on.
+ * `connection()` FIRST so cacheComponents evaluates this per-request, not at build time.
  */
 export async function AccountIdentityLoader() {
   await connection();
-  if (!isMultiUserEnabled()) return null;
+  if (!isMultiUserEnabled() || isDemoMode()) return null;
+  const accountId = await getCurrentAccountId();
+  if (accountId === UNAUTHENTICATED_ACCOUNT_ID) {
+    redirect("/login");
+  }
   const summary = await getCurrentAccountSummary();
   if (!summary) return null;
   return <AccountIdentity username={summary.username} isOwner={summary.isOwner} />;

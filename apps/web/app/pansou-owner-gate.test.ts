@@ -1,7 +1,17 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryWorkflowRepository } from "@media-track/workflow";
 
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
+
+const prevDemoMode = process.env.MEDIA_TRACK_DEMO_MODE;
+const prevMultiUser = process.env.MEDIA_TRACK_MULTI_USER;
+
+afterAll(() => {
+  if (prevDemoMode === undefined) delete process.env.MEDIA_TRACK_DEMO_MODE;
+  else process.env.MEDIA_TRACK_DEMO_MODE = prevDemoMode;
+  if (prevMultiUser === undefined) delete process.env.MEDIA_TRACK_MULTI_USER;
+  else process.env.MEDIA_TRACK_MULTI_USER = prevMultiUser;
+});
 
 /**
  * issue #366 回归：`savePanSouBaseUrlAction` 的探活是服务端向调用者给的任意地址
@@ -17,7 +27,7 @@ describe("savePanSouBaseUrlAction — owner gate (issue #366)", () => {
 
   beforeEach(async () => {
     delete process.env.MEDIA_TRACK_DEMO_MODE;
-    delete process.env.MEDIA_TRACK_MULTI_USER;
+    process.env.MEDIA_TRACK_MULTI_USER = "0";
     repo = new InMemoryWorkflowRepository();
     accountId = "acct_default";
     probeCalls = [];

@@ -1043,15 +1043,24 @@ export async function testPushNotificationAction(
   }
 }
 
-/** Self-service password change (multi-user). Verifies the current password,
+/** Self-service password change. Verifies the current password,
  *  rotates the hash, revokes all sessions (caller must re-login). */
 export async function changePasswordAction(
   current: string,
   next: string,
 ): Promise<{ ok: boolean; error?: string }> {
   assertNotDemo();
-  const { getCurrentAccountId, changeOwnPassword } = await import("../lib/workflow-runtime");
-  return changeOwnPassword(await getCurrentAccountId(), current, next);
+  const { requireAuthenticatedAccountId, changeOwnPassword, UnauthenticatedAccountError } = await import(
+    "../lib/workflow-runtime"
+  );
+  try {
+    return await changeOwnPassword(await requireAuthenticatedAccountId(), current, next);
+  } catch (error) {
+    if (error instanceof UnauthenticatedAccountError) {
+      return { ok: false, error: error.message };
+    }
+    throw error;
+  }
 }
 
 /** Owner-only reset of another account's password. The owner check is enforced
@@ -1061,8 +1070,69 @@ export async function resetUserPasswordAction(
   newPassword: string,
 ): Promise<{ ok: boolean; error?: string }> {
   assertNotDemo();
-  const { getCurrentAccountId, resetUserPassword } = await import("../lib/workflow-runtime");
-  return resetUserPassword(await getCurrentAccountId(), targetAccountId, newPassword);
+  const { requireAuthenticatedAccountId, resetUserPassword, UnauthenticatedAccountError } = await import(
+    "../lib/workflow-runtime"
+  );
+  try {
+    return await resetUserPassword(await requireAuthenticatedAccountId(), targetAccountId, newPassword);
+  } catch (error) {
+    if (error instanceof UnauthenticatedAccountError) {
+      return { ok: false, error: error.message };
+    }
+    throw error;
+  }
+}
+
+/** 站主切换是否开放公开注册（默认关闭，若由环境变量锁定则会拒绝修改）。 */
+export async function setPublicRegistrationAction(
+  enabled: boolean,
+): Promise<{ ok: boolean; allowed?: boolean; error?: string }> {
+  assertNotDemo();
+  const { requireAuthenticatedAccountId, setPublicRegistrationEnabled, UnauthenticatedAccountError } =
+    await import("../lib/workflow-runtime");
+  try {
+    const result = await setPublicRegistrationEnabled(await requireAuthenticatedAccountId(), enabled);
+    if (result.ok) {
+      revalidatePath("/settings");
+    }
+    return result;
+  } catch (error) {
+    if (error instanceof UnauthenticatedAccountError) {
+      return { ok: false, error: error.message };
+    }
+    throw error;
+  }
+}
+
+/** 站主创建普通成员账号（不开放公开注册时由站主后台开通成员账号）。 */
+export async function createManagedAccountAction(
+  username: string,
+  password: string,
+): Promise<{
+  ok: boolean;
+  account?: import("../lib/workflow-runtime").ManagedAccount;
+  error?: string;
+}> {
+  assertNotDemo();
+  const { requireAuthenticatedAccountId, createManagedAccount, UnauthenticatedAccountError } = await import(
+    "../lib/workflow-runtime"
+  );
+  try {
+    const result = await createManagedAccount(
+      await requireAuthenticatedAccountId(),
+      username,
+      password,
+    );
+    if (result.ok) {
+      revalidatePath("/settings");
+    }
+    return result;
+  } catch (error) {
+    if (error instanceof UnauthenticatedAccountError) {
+      return { ok: false, error: error.message };
+    }
+    throw error;
+  }
 }
 
 export interface ConnectLoginActionResult {

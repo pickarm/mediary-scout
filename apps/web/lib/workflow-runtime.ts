@@ -137,6 +137,16 @@ import {
 import { findDemoCandidateById, findDemoCandidateByTmdbId } from "./demo-candidates";
 import { seedDemoWorkflowRepository } from "./demo-workflow";
 import { resolveRegistration, deriveBootstrapState, canManageAccounts } from "./account-bootstrap";
+import {
+  ALLOW_PUBLIC_REGISTRATION_SETTING_KEY,
+  isAccountAuthEnabled,
+  isWebBootstrapDisabled,
+  MIN_PASSWORD_LENGTH,
+  MIN_USERNAME_LENGTH,
+  resolveEnvBootstrapOwner,
+  resolvePublicRegistrationState,
+  validateUsernameInput,
+} from "./auth-mode";
 import { isDemoMode } from "./demo-mode";
 import { isUpdateHoldActive, whileInFlight } from "./update-hold";
 import { DEFAULT_AUTO_UPDATE_TIME, isAutoUpdateTime, shouldAutoUpdate } from "./auto-update-schedule";
@@ -203,6 +213,58 @@ export async function closeWorkflowRepositoryForTests(): Promise<void> {
 }
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const envBootstrapPromises = new WeakMap<WorkflowRepository, Promise<void>>();
+const accountMutationQueues = new WeakMap<WorkflowRepository, Promise<void>>();
+
+function withAccountMutationLock<T>(repo: WorkflowRepository, fn: () => Promise<T>): Promise<T> {
+  const prev = accountMutationQueues.get(repo) ?? Promise.resolve();
+  const next = prev.catch(() => undefined).then(fn);
+  const tail = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  accountMutationQueues.set(repo, tail);
+  return next;
+}
+
+/**
+ * 在首次引导或登录前应用环境变量预置站主（MEDIA_TRACK_ADMIN_USERNAME / PASSWORD）。
+ * 仅在实例尚未认领（acct_default 尚未设置密码且所有账号密码为空）时生效，绝不覆盖已有密码。
+ */
+export async function ensureEnvBootstrapOwner(): Promise<void> {
+  if (!isAccountAuthEnabled() || isDemoMode()) {
+    return;
+  }
+  const resolved = resolveEnvBootstrapOwner();
+  if (resolved.status === "none") {
+    return;
+  }
+  const repo = getWorkflowRepository();
+  const existing = envBootstrapPromises.get(repo);
+  if (existing) {
+    return existing;
+  }
+  const task = (async () => {
+    if (resolved.status === "invalid") {
+      console.warn("[auth] 忽略无效的初始站主环境变量配置：", resolved.reason);
+      return;
+    }
+    await withAccountMutationLock(repo, async () => {
+      const accounts = await repo.listAccounts();
+      const decision = resolveRegistration(accounts);
+      if (decision.kind !== "adopt-default") {
+        return;
+      }
+      const passwordHash = await hashPassword(resolved.password);
+      await repo.adoptDefaultAccount({ username: resolved.username, passwordHash });
+    });
+  })().catch((error) => {
+    envBootstrapPromises.delete(repo);
+    throw error;
+  });
+  envBootstrapPromises.set(repo, task);
+  return task;
+}
 
 export type AuthOutcome =
   | { ok: true; accountId: string; signedCookie: string }
@@ -223,46 +285,65 @@ async function createLoginSession(accountId: string): Promise<string> {
 }
 
 /**
- * Register a local account (multi-user). v1: open registration (self-host — the
- * operator controls who can reach the instance; login exists to separate data,
- * not to defend a public endpoint). The first account created is the owner, for
- * future group/admin features. Returns a signed session cookie (auto-login).
+ * 首次初始化站主或注册本地账号。
+ * - 尚未认领时接管 acct_default（保留既有媒体库与网盘），若禁用网页初始化则拒绝。
+ * - 已认领后受公开注册策略保护，默认关闭（仅站主开启或设 MEDIA_TRACK_ALLOW_REGISTRATION=1 后允许）。
  */
 export async function registerAccount(username: string, password: string): Promise<AuthOutcome> {
   const trimmed = username.trim();
-  if (trimmed.length < 2 || password.length < 6) {
+  if (trimmed.length < MIN_USERNAME_LENGTH || password.length < MIN_PASSWORD_LENGTH) {
     return { ok: false, error: "用户名至少 2 位、密码至少 6 位。" };
   }
-  const repository = getWorkflowRepository();
-  const passwordHash = await hashPassword(password);
-  const decision = resolveRegistration(await repository.listAccounts());
-  try {
-    if (decision.kind === "adopt-default") {
-      // First user on an unclaimed instance: claim acct_default in place so the
-      // existing library + drives stay theirs (is_owner already true on seed).
-      await repository.adoptDefaultAccount({ username: trimmed, passwordHash });
-      return {
-        ok: true,
-        accountId: DEFAULT_ACCOUNT_ID,
-        signedCookie: await createLoginSession(DEFAULT_ACCOUNT_ID),
-      };
-    }
-    const account: Account = {
-      id: `acct_${randomBytes(12).toString("hex")}`,
-      username: trimmed,
-      passwordHash,
-      groupId: null,
-      isOwner: false,
-      createdAt: new Date().toISOString(),
-    };
-    await repository.createAccount(account);
-    return { ok: true, accountId: account.id, signedCookie: await createLoginSession(account.id) };
-  } catch (error) {
-    if (error instanceof DuplicateUsernameError) {
-      return { ok: false, error: "用户名已存在。" };
-    }
-    throw error;
+  const validatedUsername = validateUsernameInput(username);
+  if (!validatedUsername.ok) {
+    return { ok: false, error: validatedUsername.error };
   }
+  await ensureEnvBootstrapOwner();
+  const repository = getWorkflowRepository();
+  return withAccountMutationLock(repository, async () => {
+    const decision = resolveRegistration(await repository.listAccounts());
+    try {
+      if (decision.kind === "adopt-default") {
+        if (isWebBootstrapDisabled()) {
+          return {
+            ok: false,
+            error: "已禁用网页端首次初始化，请通过环境变量 MEDIA_TRACK_ADMIN_USERNAME 与 MEDIA_TRACK_ADMIN_PASSWORD 配置站主账号。",
+          };
+        }
+        const passwordHash = await hashPassword(password);
+        // First user on an unclaimed instance: claim acct_default in place so the
+        // existing library + drives stay theirs (is_owner already true on seed).
+        await repository.adoptDefaultAccount({ username: validatedUsername.username, passwordHash });
+        return {
+          ok: true,
+          accountId: DEFAULT_ACCOUNT_ID,
+          signedCookie: await createLoginSession(DEFAULT_ACCOUNT_ID),
+        };
+      }
+      if (!(await isPublicRegistrationEnabled())) {
+        return {
+          ok: false,
+          error: "当前站点未开放公开注册，请联系站主开启注册或创建账号。",
+        };
+      }
+      const passwordHash = await hashPassword(password);
+      const account: Account = {
+        id: `acct_${randomBytes(12).toString("hex")}`,
+        username: validatedUsername.username,
+        passwordHash,
+        groupId: null,
+        isOwner: false,
+        createdAt: new Date().toISOString(),
+      };
+      await repository.createAccount(account);
+      return { ok: true, accountId: account.id, signedCookie: await createLoginSession(account.id) };
+    } catch (error) {
+      if (error instanceof DuplicateUsernameError) {
+        return { ok: false, error: "用户名已存在。" };
+      }
+      throw error;
+    }
+  });
 }
 
 /** Authenticate username+password and start a session. Throttled against brute force. */
@@ -285,6 +366,7 @@ export async function loginAccount(
   if (!verdict.allowed) {
     return { ok: false, error: `尝试过于频繁，请 ${verdict.retryAfterSec} 秒后再试。` };
   }
+  await ensureEnvBootstrapOwner();
   // 账号缺失时也要走完整验密，否则耗时差异会泄露账号是否存在
   // （空 hash 会在 verifyPassword 的格式校验处提前 return，所以必须给一个真格式的 hash）。
   const DUMMY_HASH =
@@ -463,11 +545,94 @@ export async function listManagedAccounts(ownerAccountId: string): Promise<Manag
   return summaries;
 }
 
-/** §7 P1: multi-user mode gates the login/register UI + session enforcement.
- *  Default OFF → single-user, no login, everything is the implicit default
- *  account (P0 behavior, zero-change). */
+/** 读取当前公开注册开关状态（环境变量优先，默认关闭）。 */
+export async function getPublicRegistrationState(): Promise<{ allowed: boolean; lockedByEnv: boolean }> {
+  const dbValue = await getWorkflowRepository().getSetting(ALLOW_PUBLIC_REGISTRATION_SETTING_KEY);
+  return resolvePublicRegistrationState({
+    envValue: process.env.MEDIA_TRACK_ALLOW_REGISTRATION,
+    dbValue,
+  });
+}
+
+/** 当前是否允许匿名访客通过 /api/auth/register 注册新成员账号。 */
+export async function isPublicRegistrationEnabled(): Promise<boolean> {
+  return (await getPublicRegistrationState()).allowed;
+}
+
+/** 站主切换公开注册开关（若环境变量锁定则拒绝）。 */
+export async function setPublicRegistrationEnabled(
+  ownerAccountId: string,
+  enabled: boolean,
+): Promise<{ ok: true; allowed: boolean } | { ok: false; error: string }> {
+  const repo = getWorkflowRepository();
+  const owner = await repo.getAccountById(ownerAccountId);
+  if (!canManageAccounts(owner)) {
+    return { ok: false, error: "无权限。" };
+  }
+  const current = resolvePublicRegistrationState({
+    envValue: process.env.MEDIA_TRACK_ALLOW_REGISTRATION,
+    dbValue: await repo.getSetting(ALLOW_PUBLIC_REGISTRATION_SETTING_KEY),
+  });
+  if (current.lockedByEnv) {
+    return { ok: false, error: "公开注册开关当前由环境变量 MEDIA_TRACK_ALLOW_REGISTRATION 锁定。" };
+  }
+  await repo.setSetting(ALLOW_PUBLIC_REGISTRATION_SETTING_KEY, enabled ? "1" : "0");
+  return { ok: true, allowed: enabled };
+}
+
+/** 站主创建普通成员账号（即使关闭公开注册也可后台添加）。 */
+export async function createManagedAccount(
+  ownerAccountId: string,
+  username: string,
+  password: string,
+): Promise<{ ok: true; account: ManagedAccount } | { ok: false; error: string }> {
+  const repo = getWorkflowRepository();
+  const owner = await repo.getAccountById(ownerAccountId);
+  if (!canManageAccounts(owner)) {
+    return { ok: false, error: "无权限。" };
+  }
+  const validatedUsername = validateUsernameInput(username);
+  if (!validatedUsername.ok) {
+    return { ok: false, error: validatedUsername.error };
+  }
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    return { ok: false, error: "新密码至少 6 位。" };
+  }
+  const passwordHash = await hashPassword(password);
+  const account: Account = {
+    id: `acct_${randomBytes(12).toString("hex")}`,
+    username: validatedUsername.username,
+    passwordHash,
+    groupId: null,
+    isOwner: false,
+    createdAt: new Date().toISOString(),
+  };
+  try {
+    await repo.createAccount(account);
+  } catch (error) {
+    if (error instanceof DuplicateUsernameError) {
+      return { ok: false, error: "用户名已存在。" };
+    }
+    throw error;
+  }
+  return {
+    ok: true,
+    account: {
+      id: account.id,
+      username: account.username,
+      isOwner: account.isOwner,
+      createdAt: account.createdAt,
+      driveCount: 0,
+    },
+  };
+}
+
+/**
+ * 是否启用账号密码强制登录与按账号隔离（保持原导出名兼容既有调用点）。
+ * 默认开启；仅在演示模式、桌面非多用户或显式 MEDIA_TRACK_MULTI_USER=0 时关闭。
+ */
 export function isMultiUserEnabled(): boolean {
-  return process.env.MEDIA_TRACK_MULTI_USER === "1";
+  return isAccountAuthEnabled();
 }
 
 export const SESSION_COOKIE_NAME = "mt_session";
@@ -800,6 +965,9 @@ export function resolveSingleUserAccount(opts: {
 }
 
 export async function getCurrentAccountId(): Promise<string> {
+  if (isDemoMode()) {
+    return DEFAULT_ACCOUNT_ID;
+  }
   if (!isMultiUserEnabled()) {
     // 注意：这里**不能**因为「没设密码」就提前返回 acct_default。那正是被移除的
     // 公网洞——未设密码的实例会对隧道来的匿名访客全开放。密码状态只作为参数

@@ -1,41 +1,77 @@
 import { connection, NextResponse, type NextRequest } from "next/server";
+import { isWebBootstrapDisabled } from "../../../../lib/auth-mode";
 import {
-  isMultiUserEnabled,
+  SESSION_COOKIE_NAME,
+  ensureEnvBootstrapOwner,
   getBootstrapState,
+  getPublicRegistrationState,
   hasLoginPassword,
+  isCookieSecure,
+  isMultiUserEnabled,
   isRemoteRequest,
+  resolveSessionAccountId,
 } from "../../../../lib/workflow-runtime";
 
 /** Tells the /login page whether the instance is unclaimed (→ show the context-aware
- *  claim screen) and whether the default account already owns a library (→ "接管"
- *  copy vs "创建"). Read-only; safe before any auth.
+ *  claim screen), whether public registration is allowed, whether web bootstrap is
+ *  disabled, and whether the caller already holds a valid session.
  *
- *  `singleUser` lets the page render a password-only form: in single-user mode the
- *  account is always acct_default, so there is no username to ask an end user for.
- *
- *  `connection()` FIRST: reads runtime env (MEDIA_TRACK_MULTI_USER) + the DB at request
- *  time. Without it, cacheComponents prerenders the handler at BUILD time (multi-user
- *  off) and serves a baked {needsClaim:false} forever → the owner can never claim →
- *  locked out. (Caught in prod live e2e. `export const dynamic` is disallowed under
- *  cacheComponents, so the opt-in is connection().)
- *
- *  `remote`: the visitor came through the tunnel. First-time setup (the first access
- *  password, or claiming the instance) is LAN-only, so the page shows a notice
- *  instead of a form for remote visitors. */
+ *  `connection()` FIRST: reads runtime env + DB at request time rather than prerender. */
 export async function GET(request: NextRequest) {
   await connection();
   const remote = isRemoteRequest(request.headers);
+  const rawSessionCookie = request.cookies.get(SESSION_COOKIE_NAME)?.value;
+  let sessionAccountId: string | null = null;
+  if (rawSessionCookie) {
+    try {
+      sessionAccountId = await resolveSessionAccountId(rawSessionCookie);
+    } catch {
+      sessionAccountId = null;
+    }
+  }
+  const authenticated = Boolean(sessionAccountId);
+  const shouldClearInvalidCookie = Boolean(rawSessionCookie) && !authenticated;
+
+  const finalize = (payload: Record<string, unknown>) => {
+    const response = NextResponse.json(payload);
+    if (shouldClearInvalidCookie) {
+      response.cookies.set(SESSION_COOKIE_NAME, "", {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: isCookieSecure(request),
+        path: "/",
+        maxAge: 0,
+      });
+    }
+    return response;
+  };
+
   if (!isMultiUserEnabled()) {
-    return NextResponse.json({
+    return finalize({
       needsClaim: false,
       hasExistingLibrary: false,
       singleUser: true,
       // "unknown"（DB 读不出来）按**已设密码**上报：服务端远程读路径此时是
-      // fail-closed 的，若这里报「无需登录」，用户会被引到一条走不通的路。
-      // 宁可显示登录框（顶多多输一次密码），也不要误导。
+      // fail-closed 的，宁可显示登录框，也不要误导为无需登录。
       passwordSet: (await hasLoginPassword()) !== false,
       remote,
+      allowRegistration: false,
+      webBootstrapDisabled: false,
+      authenticated,
     });
   }
-  return NextResponse.json({ ...(await getBootstrapState()), singleUser: false, remote });
+
+  await ensureEnvBootstrapOwner();
+  const [bootstrap, regState] = await Promise.all([
+    getBootstrapState(),
+    getPublicRegistrationState(),
+  ]);
+  return finalize({
+    ...bootstrap,
+    singleUser: false,
+    remote,
+    allowRegistration: regState.allowed,
+    webBootstrapDisabled: isWebBootstrapDisabled(),
+    authenticated,
+  });
 }
