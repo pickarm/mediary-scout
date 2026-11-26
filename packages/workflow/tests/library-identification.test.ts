@@ -333,4 +333,16 @@ describe("library identification", () => {
     expect(tmdb.getTitle).toHaveBeenCalledTimes(1);
     expect(tmdb.getSeason).not.toHaveBeenCalled();
   });
+
+  it("recognizes [tmdbid=xxx] markers from default organized folders", async () => {
+    const tmdb = provider();
+    const result = await identifyScanFile({
+      file: facts("盗梦空间 (2010) - 2160p.REMUX.DV.HEVC.TrueHD.Atmos-CHD.mkv", "盗梦空间 (2010) [tmdbid=27205]"),
+      parentDirectoryName: "盗梦空间 (2010) [tmdbid=27205]",
+      mediaKind: "movie",
+    }, { tmdb });
+    expect(result.status).toBe("confirmed");
+    expect(result.evidence.some((entry) => entry.kind === "tmdb_marker" && entry.value === "generic:27205")).toBe(true);
+    expect(tmdb.search).toHaveBeenCalledWith("盗梦空间", "movie");
+  });
 });

@@ -72,9 +72,8 @@ export async function POST(request: NextRequest): Promise<Response> {
       throw new LibraryApiError(400, "未启用每日扫描时不能设置时间。");
     }
     if (body.autoOrganize !== undefined && typeof body.autoOrganize !== "boolean") throw new LibraryApiError(400, "自动整理开关无效。");
-    // Old clients omit the field entirely. Keep an explicitly enabled value instead of silently
-    // disabling automatic organization on their next save; a brand-new configuration stays off.
-    const autoOrganize = body.autoOrganize === undefined ? (previous?.autoOrganize ?? false) : body.autoOrganize;
+    // 新建配置默认启用「入库后自动整理」；若已有配置显式关闭且旧请求未传该字段，则保留原设置。
+    const autoOrganize = body.autoOrganize === undefined ? (previous?.autoOrganize ?? true) : body.autoOrganize;
     const rawTemplates = body.templates === undefined ? DEFAULT_NAMING_TEMPLATES : body.templates;
     if (!rawTemplates || typeof rawTemplates !== "object" || Array.isArray(rawTemplates) || Object.keys(rawTemplates).length !== templateKeys.length || Object.keys(rawTemplates).some((key) => !templateKeys.includes(key))) throw new LibraryApiError(400, "命名模板必须恰好包含五种模板。");
     const templates = {} as Record<(typeof templateKeys)[number], string>;

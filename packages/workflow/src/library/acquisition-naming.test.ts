@@ -379,7 +379,7 @@ describe("F14b acquisition naming decoration", () => {
     const names = (await storage.listTree({ directoryId: movieDirectory })).map((file) => file.path);
     expect(names).toHaveLength(2);
     expect(names).toEqual(expect.arrayContaining([
-      "规范电影 (2026).mkv",
+      "规范电影 (2026) - 1080p.mkv",
       "用户保留的旧版.mkv",
     ]));
   });
@@ -937,6 +937,57 @@ describe("F14b acquisition naming decoration", () => {
     expect(flattens).toBe(1);
     expect(result.moved).toEqual(["flat1"]);
     expect((await storage.listTree({ directoryId: movieDirectory })).map((file) => file.path))
-      .toEqual(["扁平电影 (2026).mkv"]);
+      .toEqual(["扁平电影 (2026) - 2160p.mkv"]);
+  });
+
+  it("extracts MoviePilot-style technical tags cleanly during acquisition transfer", async () => {
+    const movieTitle: MediaTitle = {
+      id: "tmdb_movie_693134",
+      tmdbId: 693134,
+      type: "movie",
+      title: "沙丘2",
+      originalTitle: "Dune: Part Two",
+      year: 2024,
+      aliases: [],
+    };
+    const database = new MemoryNamingDatabase();
+    const storage = new FakeStorageExecutor({
+      transferOutcomes: {
+        dune: {
+          status: "succeeded",
+          providerMessage: "",
+          files: [transferredFile("dune1", "Dune.Part.Two.2024.2160p.UHD.BluRay.REMUX.DV.HDR10+.HEVC.TrueHD.7.1.Atmos-CHD.mkv")],
+        },
+      },
+    });
+    const wrapped = withAcquisitionNaming({
+      storage,
+      database,
+      scope,
+      title: movieTitle,
+      kind: "movie",
+      categoryParentId: "movie_root",
+      seasons: [1],
+      workflowRunId: "run_dune",
+      policy: {
+        targetRootId: "movie_root",
+        kind: "movie",
+        matchedConfigIds: [],
+        templates: { ...DEFAULT_NAMING_TEMPLATES },
+      },
+    });
+    const movieDirectory = await wrapped.createDirectory({
+      name: "沙丘2 (2024) {tmdb-693134}",
+      parentId: "movie_root",
+    });
+
+    await wrapped.transfer({
+      workflowRunId: "run_dune",
+      directoryId: movieDirectory,
+      candidate: candidate("dune"),
+    });
+
+    expect((await storage.listTree({ directoryId: movieDirectory })).map((file) => file.path))
+      .toEqual(["沙丘2 (2024) - 2160p.REMUX.DV.HDR10+.HEVC.TrueHD.Atmos-CHD.mkv"]);
   });
 });

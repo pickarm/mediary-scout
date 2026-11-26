@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CircleAlert, ChevronRight, LoaderCircle, Pause, Play, RefreshCw, WandSparkles } from "lucide-react";
+import { extractMediaTechTags } from "@media-track/workflow/naming";
 import { loadIdentificationPage, type IdentificationResultItem } from "./library-identification-client";
 import { ApiRequestError } from "./library-scan-client";
 import { OrganizationPayloadError, controlOrganizationPlan, createOrganizationPreview, loadOrganizationOperations, loadOrganizationPlans, type OrganizationOperation, type OrganizationPlanSummary } from "./library-organization-client";
@@ -265,13 +266,28 @@ export function LibraryOrganization({ storageId, configId, taskId, dirty, frozen
             {selectedPlan.status !== "completed" && <div className={styles.actions}>{selectedPlan.status === "running" || isAwaitingExecution(selectedPlan) ? <button className="secondary-button" type="button" onClick={() => void controlPlan("pause")} disabled={loading || busy || dirty || frozen}><Pause size={14} />暂停</button> : <button className="primary-button" type="button" onClick={() => void controlPlan("execute")} disabled={loading || busy || dirty || frozen}><Play size={14} />{selectedPlan.status === "paused" ? "继续整理" : "开始整理"}</button>}</div>}
           </div>
           {selectedPlan.skippedFiles.length > 0 && <details className={styles.skips} open><summary>跳过的文件（{selectedPlan.skippedFiles.length}）</summary><ul>{selectedPlan.skippedFiles.map((item) => <li key={item.fileId}><code>{item.fileId}</code>：{item.reason}</li>)}</ul></details>}
-          <div className={styles.operations}>{operations.map((operation) => <article className={styles.operation} key={operation.operationId}>
-            <strong>{operationStatus(operation.status)}</strong>
-            <div><small>来源：{operation.originalParentId}/{operation.originalName}</small><small>目标：{operation.targetRootId}/{operation.targetRelativePath}</small>
-              {operation.pairedFileId !== operation.fileId && <small>配对字幕 ID：{operation.pairedFileId} → {operation.pairedVideoTargetPath}</small>}
-              {operation.error && <small className={styles.errorText}>失败：{operation.error}</small>}
-            </div>
-          </article>)}{!operations.length && !loading && <div className={styles.empty}>该清单没有操作项，跳过原因见上方。</div>}</div>
+          <div className={styles.operations}>{operations.map((operation) => {
+            const tech = extractMediaTechTags(operation.originalName);
+            const badges = [tech.resolution, tech.videoSource, tech.dynamicRange, tech.videoCodec, tech.audioCodec, tech.fps, tech.releaseGroup].filter(Boolean);
+            return (
+              <article className={styles.operation} key={operation.operationId}>
+                <strong>{operationStatus(operation.status)}</strong>
+                <div>
+                  {badges.length > 0 && (
+                    <div className={styles.techRow}>
+                      {badges.map((badge) => <span key={badge} className={styles.techChip}>{badge}</span>)}
+                    </div>
+                  )}
+                  <div className={styles.pathBox}>
+                    <small className={styles.pathOld}>来源：{operation.originalParentId}/{operation.originalName}</small>
+                    <small className={styles.pathNew}>目标：{operation.targetRootId}/{operation.targetRelativePath}</small>
+                  </div>
+                  {operation.pairedFileId !== operation.fileId && <small>配对字幕 ID：{operation.pairedFileId} → {operation.pairedVideoTargetPath}</small>}
+                  {operation.error && <small className={styles.errorText}>失败：{operation.error}</small>}
+                </div>
+              </article>
+            );
+          })}{!operations.length && !loading && <div className={styles.empty}>该清单没有操作项，跳过原因见上方。</div>}</div>
           {operationCursor && <button className="secondary-button" type="button" onClick={() => void loadMoreOperations()} disabled={loading || busy}>加载更多操作<ChevronRight size={14} /></button>}
         </div>}
       </div>

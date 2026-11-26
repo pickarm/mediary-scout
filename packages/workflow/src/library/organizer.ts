@@ -4,6 +4,7 @@ import {
   addStableCollisionSuffix,
   DEFAULT_NAMING_TEMPLATES,
   deriveSubtitlePath,
+  extractMediaTechTags,
   parseNamingTemplate,
   renderParsedNamingTemplate,
   type NamingTemplateKind,
@@ -438,8 +439,23 @@ function directoryRelativePath(directoryId: string, targetRootId: string, direct
   return current === targetRootId ? segments.join("/") : null;
 }
 function namingValues(identity: OrganizationIdentity, fileName: string): NamingValues {
-  const { extension } = stripExtension(fileName);
-  return { title:identity.title,originalTitle:identity.originalTitle,year:identity.year,tmdbId:identity.tmdbId,season:identity.season,episode:identity.episode,episodeCode:identity.episodeCode,resolution:identity.resolution,edition:identity.edition,originalName:stripExtension(fileName).stem,ext:extension };
+  const { stem, extension } = stripExtension(fileName);
+  const tech = extractMediaTechTags(fileName, {
+    resolution: identity.resolution,
+    edition: identity.edition,
+  });
+  return {
+    title: identity.title,
+    originalTitle: identity.originalTitle,
+    year: identity.year,
+    tmdbId: identity.tmdbId,
+    season: identity.season,
+    episode: identity.episode,
+    episodeCode: identity.episodeCode,
+    ...tech,
+    originalName: stem,
+    ext: extension,
+  };
 }
 function createOperation(file: OrganizationFileFact, targetRootId: string, path: string, identity: OrganizationIdentity, pairedFileId: string, pairedVideoTargetPath: string, idFactory: () => string): OrganizationOperation {
   const slash = path.lastIndexOf("/");

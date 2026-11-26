@@ -109,6 +109,7 @@ browserDescribe("library scan settings browser scope races", () => {
     storageB = options[1] ?? "";
     expect(storageA).not.toBe("");
     expect(storageB).not.toBe("");
+    await page.getByRole("tab", { name: "存量扫描与待确认" }).click();
     await page.getByRole("button", { name: "加载更多任务" }).waitFor();
     await page.getByRole("button", { name: "加载更多任务" }).click();
     await oldPage.promise;

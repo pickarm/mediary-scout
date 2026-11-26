@@ -37,7 +37,7 @@ export interface IdentifyScanFileDependencies { tmdb: IdentificationTmdbPort; su
 
 const VIDEO_EXTENSIONS = new Set(["mkv", "mp4", "m4v", "avi", "mov", "wmv", "flv", "ts", "m2ts", "mpg", "mpeg", "webm", "3gp"]);
 const SUBTITLE_EXTENSIONS = new Set(["srt", "ass", "ssa", "vtt", "sub", "idx", "sup"]);
-const NOISE = /\b(?:2160p|1080p|720p|480p|4k|8k|uhd|hdr10?(?:\+)?|dolby[ .-]?vision|dv|web[ ._-]?(?:dl|rip)|blu[ .-]?ray|brrip|bdrip|webrip|hdtv|remux|x26[45]|h\.?26[45]|hevc|av1|aac\d?(?:\.\d)?|dts(?:-hd)?|truehd|atmos|proper|repack|extended|uncut|中字|双语|国语|粤语|简体|繁体)\b/gi;
+const NOISE = /\b(?:2160p|1080p|720p|480p|4k|8k|uhd|hdr10?(?:\+)?|dolby[ .-]?vision|dv|web[ ._-]?(?:dl|rip)|blu[ .-]?ray|brrip|bdrip|webrip|hdtv|remux|x26[45]|h\.?26[45]|hevc|avc|av1|vp9|aac\d?(?:\.\d)?|ddp(?:\d\.\d)?|ac3|flac|dts(?:-hd(?:\.?ma)?|-x)?|truehd|atmos|60fps|120fps|proper|repack|extended|uncut|中字|双语|国语|粤语|简体|繁体)(?:-[A-Za-z0-9_@]{1,20})?\b/gi;
 interface ParsedName { title: string; year?: number; season?: number; eps: number[]; special: boolean; marker?: { type?: "movie" | "tv"; id: number } }
 const EPISODE_PATTERNS = [
   /\bS(\d{1,2})\s*E(\d{1,3})\s*E(\d{1,3})/i,
@@ -53,9 +53,9 @@ function stripNoise(value: string): string {
 }
 function parseName(raw: string): ParsedName {
   const m = /tmdb[_ -]?(movie|tv)[_ :\-]?(\d+)/i.exec(raw);
-  const generic = /\{tmdb-(\d+)\}|\btmdb[：:_ -](\d+)/i.exec(raw);
+  const generic = /\{tmdb-(\d+)\}|[\[{]\s*tmdbid\s*[=:\-_]\s*(\d+)\s*[\]}]|tmdb(?:id)?[：:=_\-\s](\d+)/i.exec(raw);
   const marker = m ? { type: m[1]?.toLowerCase() === "tv" ? "tv" as const : "movie" as const, id: Number(m[2]) }
-    : generic ? { id: Number(generic[1] ?? generic[2]) } : undefined;
+    : generic ? { id: Number(generic[1] ?? generic[2] ?? generic[3]) } : undefined;
   let season: number | undefined; let eps: number[] = []; let used: RegExp | undefined;
   for (const pattern of EPISODE_PATTERNS) { const hit = pattern.exec(raw); if (hit) { season = Number(hit[1]); eps = [Number(hit[2])]; if (hit[3]) eps.push(Number(hit[3])); used = pattern; break; } }
   if (season === undefined) {
@@ -67,7 +67,7 @@ function parseName(raw: string): ParsedName {
   if (!used && specialMatch) { season = 0; eps = [Number(specialMatch[1])]; if (specialMatch[2]) eps.push(Number(specialMatch[2])); special = true; }
   const specialLabel = /(?:\b(?:specials?|ova|oad|sp)\b|特典|特別篇|特别篇|番外篇)/i.test(raw);
   if (season === 0 || (!used && specialLabel)) { special = true; if (season === undefined) { season = 0; eps = [Number(/(?:OVA|OAD|SP|特典|特別篇|特别篇|番外篇)\s*0*(\d{1,3})/i.exec(raw)?.[1] ?? 1)]; } }
-  const markerless = raw.replace(/(?:tmdb[_ -]?(?:movie|tv)[_ :\-]?\d+|\{tmdb-\d+\}|\btmdb[：:_ -]\d+)/ig, " ");
+  const markerless = raw.replace(/(?:tmdb[_ -]?(?:movie|tv)[_ :\-]?\d+|\{tmdb-\d+\}|[\[{]\s*tmdbid\s*[=:\-_]\s*\d+\s*[\]}]|tmdb(?:id)?[：:=_\-\s]\d+)/ig, " ");
   const y = /(?:19|20)\d{2}/.exec(markerless); const year = y ? Number(y[0]) : undefined;
   let title = markerless;
   if (used) title = title.replace(used, " ");

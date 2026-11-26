@@ -59,6 +59,7 @@ export interface LibraryScanConfigPayload {
   mediaKind: "movie" | "tv" | "mixed";
   dailyScheduleEnabled: boolean;
   dailyScheduleTime: string | null;
+  autoOrganize?: boolean;
   templates: Readonly<Record<string, string>>;
 }
 

@@ -43,8 +43,8 @@ browserDescribe("automatic organization configuration", () => {
       const checkbox = page.getByRole("checkbox", { name: "启用自动整理", exact: true });
       await checkbox.waitFor();
       await expect.poll(() => checkbox.isChecked()).toBe(initialValue);
-      // Saving a different field must preserve a previously enabled setting.
-      await page.getByRole("checkbox", { name: "启用定时扫描", exact: true }).check();
+      // Saving a different field must preserve the previously loaded automatic organization setting.
+      await page.getByRole("radio", { name: "电影", exact: true }).check();
       await page.getByRole("button", { name: "保存配置", exact: true }).click();
       await expect.poll(() => posts.length).toBe(1);
       expect(posts[0]).toBe(initialValue);

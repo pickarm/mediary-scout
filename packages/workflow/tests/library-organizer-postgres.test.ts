@@ -102,13 +102,13 @@ describe.skipIf(!adminURL)("Postgres organization authorization (isolated databa
       // The executor must complete it and subsequent execute calls must not touch
       // the provider after the completed status has been persisted.
       await testPool.query(
-        "INSERT INTO library_scan_directories(account_id,connected_storage_id,task_id,directory_id,parent_directory_id,path,next_page,status) VALUES('acct','drive','task','film-dir','target','Library/Film (2024)',0,'done')",
+        "INSERT INTO library_scan_directories(account_id,connected_storage_id,task_id,directory_id,parent_directory_id,path,next_page,status) VALUES('acct','drive','task','film-dir','target','Library/Film (2024) [tmdbid=123]',0,'done')",
       );
       await testPool.query(
-        "INSERT INTO library_scan_files(account_id,connected_storage_id,file_id,parent_directory_id,name,is_directory,path) VALUES('acct','drive','compliant-file','film-dir','Film [2024].mkv',false,'Library/Film (2024)/Film [2024].mkv')",
+        "INSERT INTO library_scan_files(account_id,connected_storage_id,file_id,parent_directory_id,name,is_directory,path) VALUES('acct','drive','compliant-file','film-dir','Film [2024].mkv',false,'Library/Film (2024) [tmdbid=123]/Film [2024].mkv')",
       );
       await testPool.query(
-        "INSERT INTO library_scan_task_files(account_id,connected_storage_id,task_id,file_id,parent_directory_id,name,is_directory,path) VALUES('acct','drive','task','compliant-file','film-dir','Film [2024].mkv',false,'Library/Film (2024)/Film [2024].mkv')",
+        "INSERT INTO library_scan_task_files(account_id,connected_storage_id,task_id,file_id,parent_directory_id,name,is_directory,path) VALUES('acct','drive','task','compliant-file','film-dir','Film [2024].mkv',false,'Library/Film (2024) [tmdbid=123]/Film [2024].mkv')",
       );
       await new PostgresLibraryStore(testPool).importExistingMedia({
         accountId:"acct",connectedStorageId:"drive",title,season,episodes:[],
@@ -117,7 +117,7 @@ describe.skipIf(!adminURL)("Postgres organization authorization (isolated databa
       });
       const compliantInput: OrganizationPlanInput = {
         ...baseInput,operationKey:"already-compliant",
-        graph:{...baseInput.graph,directories:[...baseInput.graph.directories,{directoryId:"film-dir",parentDirectoryId:"target",name:"Film (2024)"}],files:[{fileId:"compliant-file",parentDirectoryId:"film-dir",name:"Film [2024].mkv",isDirectory:false}]},
+        graph:{...baseInput.graph,directories:[...baseInput.graph.directories,{directoryId:"film-dir",parentDirectoryId:"target",name:"Film (2024) [tmdbid=123]"}],files:[{fileId:"compliant-file",parentDirectoryId:"film-dir",name:"Film [2024].mkv",isDirectory:false}]},
         confirmedFiles:[{...baseInput.confirmedFiles[0]!,fileId:"compliant-file",parentDirectoryId:"film-dir",name:"Film [2024].mkv"}],
       };
       const noOpPlan = await new LibraryOrganizer({store,storage:{} as OrganizationStorage}).plan(compliantInput);

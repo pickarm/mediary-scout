@@ -96,7 +96,7 @@ describe("configuration source directory authorization", () => {
     }));
     expect(response.status).toBe(201);
     expect(listing).toHaveBeenCalledWith("parent-deep", 17, 200);
-    expect(saved[0]).toMatchObject({ sourceRoots: [{ directoryId: "dir-deep", name: "Season 2" }], autoAcquire: false, autoOrganize: false });
+    expect(saved[0]).toMatchObject({ sourceRoots: [{ directoryId: "dir-deep", name: "Season 2" }], autoAcquire: false, autoOrganize: true });
   });
 
   it("authorizes non-GuangYa selections from reader facts at the signed page and cursor", async () => {
@@ -201,7 +201,7 @@ describe("configuration source directory authorization", () => {
     expect(response.status).toBe(400);
   });
 
-  it("keeps an explicitly enabled automatic organization flag when legacy clients omit it", async () => {
+  it("defaults automatic organization on for new configurations while preserving explicit previous opt-outs", async () => {
     const ticket = issueDirectorySelectionTicket({
       ...scope, directoryId: "dir-deep", parentId: "parent-deep", name: "Season 2", page: 17,
     });
@@ -212,15 +212,15 @@ describe("configuration source directory authorization", () => {
 
     const first = await POST(post(body));
     expect(first.status).toBe(201);
-    expect(saved[0]).toMatchObject({ autoOrganize: false });
+    expect(saved[0]).toMatchObject({ autoOrganize: true });
 
     previous = {
       sourceRoots: [{ directoryId: "dir-deep", name: "Season 2" }],
-      movieTargetDirectoryId: null, tvTargetDirectoryId: null, autoOrganize: true,
+      movieTargetDirectoryId: null, tvTargetDirectoryId: null, autoOrganize: false,
     };
     const legacy = await POST(post({ ...body, sourceRoots: [{ directoryId: "dir-deep" }] }));
     expect(legacy.status).toBe(201);
-    expect(saved.at(-1)).toMatchObject({ autoOrganize: true });
+    expect(saved.at(-1)).toMatchObject({ autoOrganize: false });
 
     const disabled = await POST(post({ ...body, sourceRoots: [{ directoryId: "dir-deep" }], autoOrganize: false }));
     expect(disabled.status).toBe(201);

@@ -9,6 +9,7 @@ import {
   addStableCollisionSuffix,
   DEFAULT_NAMING_TEMPLATES,
   deriveSubtitlePath,
+  extractMediaTechTags,
   parseNamingTemplate,
   renderParsedNamingTemplate,
   type NamingTemplateKind,
@@ -1310,11 +1311,13 @@ export function withAcquisitionNaming(input: AcquisitionNamingDecorationInput): 
     resolution?: string,
   ): string => {
     const extension = extensionOf(sourceName);
+    const tech = extractMediaTechTags(sourceName, { resolution });
     if (kind === "movie") {
       return renderFileName(
         policy.templates.movieFile,
         {
           ...titleValues(title, 1, sourceName),
+          ...tech,
           episode: 1,
           episodeCode: "MOVIE",
           ext: extension,
@@ -1328,9 +1331,9 @@ export function withAcquisitionNaming(input: AcquisitionNamingDecorationInput): 
       policy.templates.episodeFile,
       {
         ...titleValues(title, parts.seasonNumber, sourceName),
+        ...tech,
         episode: parts.episodeNumber,
         episodeCode: code,
-        resolution,
         ext: extension,
       },
       "剧集文件",

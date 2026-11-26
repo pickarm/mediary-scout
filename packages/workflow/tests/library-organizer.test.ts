@@ -7,7 +7,7 @@ const baseGraph = () => ({
   directories:[
     {directoryId:"src",parentDirectoryId:null,name:"Source"},
     {directoryId:"target",parentDirectoryId:null,name:"Library"},
-    {directoryId:"movie-dir",parentDirectoryId:"target",name:"Film (2024)"},
+    {directoryId:"movie-dir",parentDirectoryId:"target",name:"Film (2024) [tmdbid=123]"},
     {directoryId:"season-dir",parentDirectoryId:"target",name:"Show (2024)"},
     {directoryId:"season-01",parentDirectoryId:"season-dir",name:"Season 01"},
   ],
@@ -169,7 +169,7 @@ describe("safe library organizer", () => {
         const items = parentId === "src"
           ? [{fileId:"v1",parentId:"src",fileName:"raw.mkv",fileSize:12,resType:1}]
           : parentId === "target"
-            ? [{fileId:"dir-1",parentId:"target",fileName:"Film (2024)",fileSize:0,resType:2}]
+            ? [{fileId:"dir-1",parentId:"target",fileName:"Film (2024) [tmdbid=123]",fileSize:0,resType:2}]
             : [];
         return {items,hasMore:false};
       },
@@ -206,5 +206,21 @@ describe("safe library organizer", () => {
     const [a,b] = await Promise.all([organizer.plan(args),organizer.plan(args)]);
     expect(a.operations.map(({operationId}) => operationId)).toEqual(b.operations.map(({operationId}) => operationId));
     expect(store.createCalls).toBe(1);
+  });
+
+  it("extracts Dolby Vision, Atmos and release group from filenames using default templates and pairs subtitles", () => {
+    const video = confirmed("v-dv", "src", "Film.2024.2160p.BluRay.REMUX.DV.HDR10+.HEVC.TrueHD.Atmos-CHD.mkv");
+    const graph = baseGraph();
+    graph.files.push({
+      fileId: "s-dv",
+      parentDirectoryId: "src",
+      name: "Film.2024.2160p.BluRay.REMUX.DV.HDR10+.HEVC.TrueHD.Atmos-CHD.zh-Hans.forced.ass",
+      isDirectory: false,
+    });
+    const plan = buildOrganizationPlan(input([video], graph));
+    expect(plan.operations.map((item) => item.targetRelativePath)).toEqual([
+      "Film (2024) [tmdbid=123]/Film (2024) - 2160p.REMUX.DV.HDR10+.HEVC.TrueHD.Atmos-CHD.mkv",
+      "Film (2024) [tmdbid=123]/Film (2024) - 2160p.REMUX.DV.HDR10+.HEVC.TrueHD.Atmos-CHD.zh-Hans.forced.ass",
+    ]);
   });
 });

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronLeft, ChevronRight, CircleAlert, Folder, LoaderCircle, Pause, Play, Plus, RefreshCw, Save, Square, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, CircleAlert, Folder, LoaderCircle, Pause, Play, Plus, RefreshCw, Save, Sparkles, Square, X } from "lucide-react";
 import type { NamingTemplateKind } from "@media-track/workflow/library";
 import { validateNamingTemplate } from "@media-track/workflow/naming";
 import styles from "./library-scan-settings.module.css";
@@ -26,17 +26,22 @@ type TemplateSet = Readonly<Record<NamingTemplateKind, string>>;
 type PickedRoot = LibraryScanRoot & { selectionToken?: string };
 type PickerKind = "sources" | "movie" | "tv";
 type SelectionChange = { storageId: string | null; configId: string | null; taskId: string | null; dirty: boolean };
+export type LibraryWorkspaceTab = "rules" | "history" | "pending";
 const TEMPLATE_KINDS = ["movieDirectory", "movieFile", "tvDirectory", "seasonDirectory", "episodeFile"] as const;
 
 export function LibraryScanSettings({
   storages,
   defaultTemplates,
   settingsHref,
+  activeTab = "rules",
+  onSwitchTab,
   onSelectionChange,
 }: {
   storages: readonly SafeLibraryStorage[];
   defaultTemplates: TemplateSet;
   settingsHref: string;
+  activeTab?: LibraryWorkspaceTab;
+  onSwitchTab?: (tab: LibraryWorkspaceTab) => void;
   onSelectionChange?: (selection: SelectionChange) => void;
 }) {
   const initialStorage = storages.find((storage) => storage.status === "active") ?? storages[0] ?? null;
@@ -52,9 +57,7 @@ export function LibraryScanSettings({
   const [movieTarget, setMovieTarget] = useState<PickedRoot | null>(null);
   const [tvTarget, setTvTarget] = useState<PickedRoot | null>(null);
   const [mediaKind, setMediaKind] = useState<"movie" | "tv" | "mixed">("mixed");
-  const [dailyEnabled, setDailyEnabled] = useState(false);
-  const [autoOrganize, setAutoOrganize] = useState(false);
-  const [dailyTime, setDailyTime] = useState("03:00");
+  const [autoOrganize, setAutoOrganize] = useState(true);
   const [templates, setTemplates] = useState<TemplateSet>(defaultTemplates);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -84,19 +87,15 @@ export function LibraryScanSettings({
     movieTarget: movieTarget?.directoryId ?? null,
     tvTarget: tvTarget?.directoryId ?? null,
     mediaKind,
-    dailyEnabled,
     autoOrganize,
-    dailyTime: dailyEnabled ? dailyTime : null,
   };
   const savedShape = selectedConfiguration ? {
     sourceRoots: selectedConfiguration.sourceRoots.map((root) => root.directoryId),
     movieTarget: selectedConfiguration.movieTargetDirectoryId,
     tvTarget: selectedConfiguration.tvTargetDirectoryId,
     mediaKind: selectedConfiguration.mediaKind,
-    dailyEnabled: selectedConfiguration.dailyScheduleEnabled,
     autoOrganize: selectedConfiguration.autoOrganize,
-    dailyTime: selectedConfiguration.dailyScheduleEnabled ? selectedConfiguration.dailyScheduleTime : null,
-  } : { sourceRoots: [], movieTarget: null, tvTarget: null, mediaKind: "mixed", dailyEnabled: false, autoOrganize: false, dailyTime: null };
+  } : { sourceRoots: [], movieTarget: null, tvTarget: null, mediaKind: "mixed", autoOrganize: true };
   const savedTemplates = normalizeTemplates(selectedConfiguration?.templates, defaultTemplates);
   const dirty = JSON.stringify(draftShape) !== JSON.stringify(savedShape) || !templatesEqual(templates, savedTemplates);
   const templatesInvalid = Object.values(templates).some((template) => validateNamingTemplate(template).length > 0);
@@ -117,9 +116,7 @@ export function LibraryScanSettings({
     setMovieTarget(configuration?.movieTargetDirectoryId ? { directoryId: configuration.movieTargetDirectoryId, name: configuration.movieTargetDirectoryName || "已保存电影目标目录" } : null);
     setTvTarget(configuration?.tvTargetDirectoryId ? { directoryId: configuration.tvTargetDirectoryId, name: configuration.tvTargetDirectoryName || "已保存剧集目标目录" } : null);
     setMediaKind(configuration?.mediaKind ?? "mixed");
-    setDailyEnabled(configuration?.dailyScheduleEnabled ?? false);
-    setAutoOrganize(configuration?.autoOrganize ?? false);
-    setDailyTime(configuration?.dailyScheduleTime ?? "03:00");
+    setAutoOrganize(configuration?.autoOrganize ?? true);
     setTemplates(normalizeTemplates(configuration?.templates, defaultTemplates));
   }, [defaultTemplates]);
 
@@ -297,9 +294,9 @@ export function LibraryScanSettings({
     tvTargetDirectoryId: tvTarget?.directoryId ?? null,
     ...(tvTarget?.selectionToken ? { tvTargetSelectionToken: tvTarget.selectionToken } : {}),
     mediaKind,
-    dailyScheduleEnabled: dailyEnabled,
+    dailyScheduleEnabled: false,
     autoOrganize,
-    dailyScheduleTime: dailyEnabled ? dailyTime : null,
+    dailyScheduleTime: null,
     templates,
   });
 
@@ -324,7 +321,7 @@ export function LibraryScanSettings({
     if (!signal) return;
     setSaving(true); setPageError(null);
     try { await persistConfiguration(id, scopeGeneration, signal); }
-    catch (error) { if (isCurrentScope(id, scopeGeneration, signal)) setPageError(error instanceof Error ? error.message : "保存扫描配置失败。"); }
+    catch (error) { if (isCurrentScope(id, scopeGeneration, signal)) setPageError(error instanceof Error ? error.message : "保存整理规则配置失败。"); }
     finally { if (isCurrentScope(id, scopeGeneration, signal)) setSaving(false); }
   };
 
@@ -388,112 +385,179 @@ export function LibraryScanSettings({
     <div className={styles.root}>
       {emptyStorages ? <section className={`panel ${styles.empty}`}>
         <strong>还没有连接可用网盘</strong>
-        <p>连接网盘后即可选择媒体目录并创建扫描任务。</p>
+        <p>连接网盘后即可配置入库整理目录、命名规则并整理存量媒体库。</p>
         <Link className="primary-button" href={settingsHref}>前往设置连接</Link>
       </section> : <>
+        {/* 顶部网盘切换与入库自动整理核心状态条 */}
         <section className={`panel ${styles.panel}`}>
-          <div className={styles.panelHeader}>
-            <div><h2>扫描配置</h2><p>扫描读取已选目录。自动整理需单独启用，导入新作品默认关闭自动补缺。</p></div>
-            <label className={styles.storageField}>
-              <span>当前网盘</span>
-              <select value={storageId ?? ""} onChange={(event) => changeStorage(event.target.value)} aria-label="当前网盘">
-                {storages.map((item) => <option key={item.id} value={item.id}>{item.label}{item.status === "frozen" ? "（已冻结）" : ""}</option>)}
-              </select>
-            </label>
-          </div>
-          {storage?.status === "frozen" && <div className={styles.notice}>该网盘连接已冻结，可查看已有配置和任务；恢复连接后才能修改配置或开始扫描。</div>}
-          {pageError && <div className={styles.error} role="alert"><CircleAlert size={17} /> <span>{pageError}</span><button className="secondary-button" onClick={reload}><RefreshCw size={14} />重试</button></div>}
-          {loading && configurations.length === 0 && <div className={styles.loading}><LoaderCircle size={18} className={styles.spin} />正在读取已保存配置与扫描任务…</div>}
-          <div className={styles.configSelectRow}>
-            <label className={styles.storageField}>
-              <span>已保存配置</span>
-              <select value={selectedConfigId ?? ""} onChange={(event) => selectConfiguration(event.target.value)} disabled={!configurations.length || formDisabled}>
-                {!configurations.length && <option value="">尚无保存配置</option>}
-                {configurations.map((item, index) => <option key={item.configId} value={item.configId}>扫描配置 {configurations.length - index}</option>)}
-              </select>
-            </label>
-            <button className="secondary-button" type="button" onClick={beginNewConfiguration} disabled={formDisabled}><Plus size={15} />新建配置</button>
-          </div>
-
-          <div className={styles.formGrid}>
-            <fieldset className={styles.fieldset}>
-              <legend>扫描来源目录 <span>可选 1–20 个</span></legend>
-              <div className={styles.sourceList}>
-                {sourceRoots.map((root) => <div className={styles.directoryChip} key={root.directoryId}>
-                  <Folder size={15} /><span title={root.directoryId}>{root.name}</span>
-                  <button type="button" aria-label={`移除${root.name}`} onClick={() => setSourceRoots((current) => current.filter((entry) => entry.directoryId !== root.directoryId))} disabled={formDisabled}><X size={14} /></button>
-                </div>)}
-                {sourceRoots.length === 0 && <p className={styles.hint}>从当前网盘目录中选择一个或多个来源。</p>}
+          <div className={styles.toolbar}>
+            <div className={styles.storageSwitchGroup}>
+              <div className={styles.storagePills} role="group" aria-label="快捷切换网盘">
+                {storages.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`${styles.storagePill} ${item.id === storageId ? styles.storagePillActive : ""}`}
+                    onClick={() => changeStorage(item.id)}
+                  >
+                    <span>{item.label}</span>
+                    {item.status === "frozen" && <span className={styles.pillFrozen}>已冻结</span>}
+                  </button>
+                ))}
               </div>
-              <button className="secondary-button" type="button" onClick={() => openPicker("sources")} disabled={formDisabled || sourceRoots.length >= 20}><Folder size={15} />选择来源目录</button>
-            </fieldset>
+              <label className={styles.storageField}>
+                <span>当前网盘</span>
+                <select value={storageId ?? ""} onChange={(event) => changeStorage(event.target.value)} aria-label="当前网盘">
+                  {storages.map((item) => <option key={item.id} value={item.id}>{item.label}{item.status === "frozen" ? "（已冻结）" : ""}</option>)}
+                </select>
+              </label>
+            </div>
 
-            <fieldset className={styles.fieldset}>
-              <legend>媒体类型</legend>
-              <div className={styles.radioRow}>
-                {([ ["movie", "电影"], ["tv", "剧集"], ["mixed", "电影与剧集"] ] as const).map(([value, label]) => <label key={value}><input type="radio" name="media-kind" value={value} checked={mediaKind === value} onChange={() => setMediaKind(value)} disabled={formDisabled} />{label}</label>)}
+            <div className={styles.configSelectRow}>
+              <label className={styles.storageField}>
+                <span>已保存规则</span>
+                <select value={selectedConfigId ?? ""} onChange={(event) => selectConfiguration(event.target.value)} disabled={!configurations.length || formDisabled}>
+                  {!configurations.length && <option value="">尚未保存规则（使用默认全息模板）</option>}
+                  {configurations.map((item, index) => <option key={item.configId} value={item.configId}>规则配置 {configurations.length - index}</option>)}
+                </select>
+              </label>
+              <button className="secondary-button" type="button" onClick={beginNewConfiguration} disabled={formDisabled}><Plus size={15} />新建配置</button>
+            </div>
+          </div>
+
+          <div className={`${styles.autoHero} ${autoOrganize ? "" : styles.autoHeroPaused}`} style={{ marginTop: 14 }}>
+            <div className={styles.heroLeft}>
+              <div className={styles.heroIcon}><Sparkles size={20} /></div>
+              <div className={styles.heroCopy}>
+                <div className={styles.heroTitle}>
+                  <span>{autoOrganize ? "入库自动整理已默认开启" : "当前网盘自动整理已暂停"}</span>
+                  <span className={styles.heroBadge}>{autoOrganize ? "实时自动整理" : "手动暂停中"}</span>
+                </div>
+                <p>新片获取、追更或机器人转存落盘后，将直接按下方命名规则提取清晰度 / 杜比视界 / 全景声并归档，无需定时扫描。已有老文件可在需要时手动扫描整理。</p>
               </div>
-            </fieldset>
-
-            <fieldset className={styles.fieldset}>
-              <legend>整理目标目录 <span>可留空</span></legend>
-              <TargetRow label="电影目标" value={movieTarget} onChoose={() => openPicker("movie")} onClear={() => setMovieTarget(null)} disabled={formDisabled} />
-              <TargetRow label="剧集目标" value={tvTarget} onChoose={() => openPicker("tv")} onClear={() => setTvTarget(null)} disabled={formDisabled} />
-            </fieldset>
-
-            <fieldset className={styles.fieldset}>
-              <legend>每日扫描</legend>
-              <div className={styles.scheduleRow}>
-                <label><input type="checkbox" checked={dailyEnabled} onChange={(event) => setDailyEnabled(event.target.checked)} disabled={formDisabled} />启用定时扫描</label>
-                <label className={styles.timeField}>时间（上海）<input type="time" value={dailyTime} onChange={(event) => setDailyTime(event.target.value)} disabled={formDisabled || !dailyEnabled} /></label>
-              </div>
-              <p className={styles.hint}>时区：Asia/Shanghai。启用定时扫描后由服务端按此时间运行。</p>
-            </fieldset>
-
-            <fieldset className={styles.fieldset}>
-              <legend>自动整理</legend>
-              <label><input type="checkbox" checked={autoOrganize} onChange={(event) => setAutoOrganize(event.target.checked)} disabled={formDisabled} />启用自动整理</label>
-              <p className={styles.hint}>保存启用后，按模板分批整理已确认并导入的文件，保留已有版本。关闭后不再提交新批次；已提交清单可在下方暂停。</p>
-            </fieldset>
-          </div>
-
-          <div className={styles.templateEditor}>
-            <LibraryNamingTemplates value={templates} savedValue={savedTemplates} onChange={setTemplates} disabled={formDisabled} />
-          </div>
-
-          {dirty && <div className={styles.notice} role="status">有未保存的配置或模板修改；整理预览只使用已保存的配置。</div>}
-
-          <div className={styles.actions}>
-            <button className="secondary-button" type="button" onClick={() => void save()} disabled={formDisabled || templatesInvalid || sourceRoots.length === 0}><Save size={15} />{saving ? "保存中…" : "保存配置"}</button>
-            <button className="primary-button" type="button" onClick={() => void start()} disabled={formDisabled || templatesInvalid || sourceRoots.length === 0}><Play size={15} />{starting ? "开始中…" : "保存并开始扫描"}</button>
-          </div>
-        </section>
-
-        <section className={`panel ${styles.panel}`}>
-          <div className={styles.panelHeader}>
-            <div><h2>扫描任务</h2><p>任务状态和摘要来自持久化扫描记录，页面不会自动创建任务。</p></div>
-            <button className="secondary-button" type="button" onClick={reload} disabled={loading}><RefreshCw size={14} />刷新</button>
-          </div>
-          {tasks.length === 0 && !loading ? <div className={styles.emptyTasks}>还没有扫描任务。保存配置并开始扫描后，任务会显示在这里。</div> : <div className={styles.taskList}>
-            {tasks.map((task) => <article className={`${styles.task} ${selectedTaskId === task.taskId ? styles.selectedTask : ""}`} key={task.taskId}>
-              <button type="button" className={styles.taskSelect} aria-label={`查看${statusLabel(task.status)}任务的识别结果 ${task.taskId}`} onClick={() => selectTask(task)}>
-                <span className={`${styles.statusDot} ${styles[`status_${task.status}`] ?? ""}`} />
-                <span className={styles.taskTitle}>{statusLabel(task.status)}</span>
-                <span className={styles.taskTime}>{formatDate(task.updatedAt)}</span>
+            </div>
+            <div className={styles.heroActions}>
+              <label className={styles.switchCard}>
+                <span>启用自动整理</span>
+                <input type="checkbox" checked={autoOrganize} onChange={(event) => setAutoOrganize(event.target.checked)} disabled={formDisabled} />
+              </label>
+              {onSwitchTab && activeTab !== "pending" && (
+                <button className="secondary-button" type="button" onClick={() => onSwitchTab("pending")}>
+                  存量扫描任务
+                </button>
+              )}
+              <button className="secondary-button" type="button" onClick={() => void save()} disabled={formDisabled || templatesInvalid || sourceRoots.length === 0}>
+                <Save size={15} />{saving ? "保存中…" : "保存配置"}
               </button>
-              <div className={styles.taskStats}><span>已扫描目录 <b>{task.directoriesDone}</b> / {task.directoriesDiscovered}</span><span>发现文件 <b>{task.filesDiscovered}</b></span><span>失败 <b>{task.failures.length}</b></span></div>
-              {task.failures.length > 0 && <details className={styles.failures}><summary>失败摘要（{task.failures.length}）</summary><ul>{task.failures.slice(0, 5).map((failure, index) => <li key={`${failure.directoryId}:${failure.page}:${index}`}>目录 {failure.directoryId} · 第 {failure.page + 1} 页：{failure.message}</li>)}</ul></details>}
-              <div className={styles.taskActions}>
-                {task.status === "running" && <button className="secondary-button" type="button" onClick={() => void controlTask(task, "pause")} disabled={!canEdit || busyTaskId !== null}><Pause size={14} />暂停</button>}
-                {task.status === "paused" && <button className="secondary-button" type="button" onClick={() => void controlTask(task, "resume")} disabled={!canEdit || busyTaskId !== null}><Play size={14} />继续</button>}
-                {(task.status === "running" || task.status === "queued" || task.status === "paused") && <button className="secondary-button" type="button" onClick={() => void controlTask(task, "cancel")} disabled={!canEdit || busyTaskId !== null}><Square size={13} />取消</button>}
-                {(task.status === "failed" || task.status === "partial") && <button className="secondary-button" type="button" onClick={() => void controlTask(task, "retry")} disabled={!canEdit || busyTaskId !== null}><RefreshCw size={14} />重试失败项</button>}
-                {busyTaskId === task.taskId && <span className={styles.busyLabel}><LoaderCircle size={14} className={styles.spin} />正在提交…</span>}
-              </div>
-            </article>)}
-          </div>}
-          {taskHasMore && <button className="secondary-button" type="button" onClick={() => void loadMoreTasks()} disabled={loading}>{loading ? "加载中…" : "加载更多任务"}<ChevronRight size={14} /></button>}
+              <button className="primary-button" type="button" onClick={() => void start()} disabled={formDisabled || templatesInvalid || sourceRoots.length === 0}>
+                <Play size={15} />{starting ? "开始中…" : "保存并开始扫描"}
+              </button>
+            </div>
+          </div>
+
+          {storage?.status === "frozen" && <div className={styles.notice} style={{ marginTop: 12 }}>该网盘连接已冻结，可查看已有配置和任务；恢复连接后才能修改配置或开始扫描。</div>}
+          {pageError && <div className={styles.error} role="alert" style={{ marginTop: 12 }}><CircleAlert size={17} /><span>{pageError}</span><button className="secondary-button" onClick={reload}><RefreshCw size={14} />重试</button></div>}
+          {dirty && <div className={styles.notice} role="status" style={{ marginTop: 12 }}>有未保存的配置或模板修改；整理预览只使用已保存的配置。</div>}
+          {loading && configurations.length === 0 && <div className={styles.loading}><LoaderCircle size={18} className={styles.spin} />正在读取已保存配置与扫描任务…</div>}
         </section>
+
+        {/* 标签一：目录流向映射 + 完美命名工坊 */}
+        {activeTab === "rules" && (
+          <>
+            <section className={`panel ${styles.panel}`}>
+              <div className={styles.panelHeader}>
+                <div>
+                  <h2>目录流向映射</h2>
+                  <p>设定待整理来源根目录与电影/剧集目标根目录；整理全程保留多版本与字幕语言标记，不删除原视频。</p>
+                </div>
+                <button className="secondary-button" type="button" onClick={() => openPicker("sources")} disabled={formDisabled || sourceRoots.length >= 20}>
+                  <Folder size={15} />选择来源目录
+                </button>
+              </div>
+
+              <div className={styles.dirFlowGrid}>
+                <div className={styles.dirNode}>
+                  <span className={styles.dirNodeLabel}>扫描 / 待整理来源目录（可选 1–20 个）</span>
+                  <div className={styles.sourceList}>
+                    {sourceRoots.map((root) => (
+                      <div className={styles.directoryChip} key={root.directoryId}>
+                        <Folder size={15} />
+                        <span title={root.directoryId}>{root.name}</span>
+                        <button type="button" aria-label={`移除${root.name}`} onClick={() => setSourceRoots((current) => current.filter((entry) => entry.directoryId !== root.directoryId))} disabled={formDisabled}>
+                          <X size={14} />
+                        </button>
+                      </div>
+                    ))}
+                    {sourceRoots.length === 0 && <p className={styles.hint}>请从当前网盘目录中选择一个或多个来源目录。</p>}
+                  </div>
+                </div>
+
+                <div className={styles.flowBridge}>
+                  <div className={styles.flowArrowPill}>智能识别后按模板归档 →</div>
+                  <div className={styles.mediaKindRow} role="radiogroup" aria-label="媒体类型">
+                    {([ ["movie", "电影"], ["tv", "剧集"], ["mixed", "电影与剧集"] ] as const).map(([value, label]) => (
+                      <label className={styles.mediaKindPill} key={value}>
+                        <input type="radio" name="media-kind" value={value} checked={mediaKind === value} onChange={() => setMediaKind(value)} disabled={formDisabled} />
+                        {label}
+                      </label>
+                    ))}
+                  </div>
+                  <div className={styles.flowCaps}>
+                    <span>保留字幕语言</span>
+                    <span>多版本共存</span>
+                    <span>写后自动通知</span>
+                  </div>
+                </div>
+
+                <div className={styles.dirNode}>
+                  <span className={styles.dirNodeLabel}>整理目标根目录（可留空）</span>
+                  <TargetRow label="电影目标" value={movieTarget} onChoose={() => openPicker("movie")} onClear={() => setMovieTarget(null)} disabled={formDisabled} />
+                  <TargetRow label="剧集目标" isTv value={tvTarget} onChoose={() => openPicker("tv")} onClear={() => setTvTarget(null)} disabled={formDisabled} />
+                </div>
+              </div>
+            </section>
+
+            <section className={`panel ${styles.panel}`}>
+              <LibraryNamingTemplates
+                value={templates}
+                savedValue={savedTemplates}
+                onChange={setTemplates}
+                disabled={formDisabled}
+                movieRootLabel={movieTarget?.name ?? "电影目标"}
+                tvRootLabel={tvTarget?.name ?? "剧集目标"}
+              />
+            </section>
+          </>
+        )}
+
+        {/* 标签三：存量扫描任务面板 */}
+        {activeTab === "pending" && (
+          <section className={`panel ${styles.panel}`}>
+            <div className={styles.panelHeader}>
+              <div><h2>扫描任务</h2><p>用于管理已有存量老目录的手动扫描进度；点击某个任务即可查看对应的识别结果与待确认项。</p></div>
+              <button className="secondary-button" type="button" onClick={reload} disabled={loading}><RefreshCw size={14} />刷新</button>
+            </div>
+            {tasks.length === 0 && !loading ? <div className={styles.emptyTasks}>还没有扫描任务。配置好来源目录后点击「保存并开始扫描」，任务会显示在这里。</div> : <div className={styles.taskList}>
+              {tasks.map((task) => <article className={`${styles.task} ${selectedTaskId === task.taskId ? styles.selectedTask : ""}`} key={task.taskId}>
+                <button type="button" className={styles.taskSelect} aria-label={`查看${statusLabel(task.status)}任务的识别结果 ${task.taskId}`} onClick={() => selectTask(task)}>
+                  <span className={`${styles.statusDot} ${styles[`status_${task.status}`] ?? ""}`} />
+                  <span className={styles.taskTitle}>{statusLabel(task.status)}</span>
+                  <span className={styles.taskTime}>{formatDate(task.updatedAt)}</span>
+                </button>
+                <div className={styles.taskStats}><span>已扫描目录 <b>{task.directoriesDone}</b> / {task.directoriesDiscovered}</span><span>发现文件 <b>{task.filesDiscovered}</b></span><span>失败 <b>{task.failures.length}</b></span></div>
+                {task.failures.length > 0 && <details className={styles.failures}><summary>失败摘要（{task.failures.length}）</summary><ul>{task.failures.slice(0, 5).map((failure, index) => <li key={`${failure.directoryId}:${failure.page}:${index}`}>目录 {failure.directoryId} · 第 {failure.page + 1} 页：{failure.message}</li>)}</ul></details>}
+                <div className={styles.taskActions}>
+                  {task.status === "running" && <button className="secondary-button" type="button" onClick={() => void controlTask(task, "pause")} disabled={!canEdit || busyTaskId !== null}><Pause size={14} />暂停</button>}
+                  {task.status === "paused" && <button className="secondary-button" type="button" onClick={() => void controlTask(task, "resume")} disabled={!canEdit || busyTaskId !== null}><Play size={14} />继续</button>}
+                  {(task.status === "running" || task.status === "queued" || task.status === "paused") && <button className="secondary-button" type="button" onClick={() => void controlTask(task, "cancel")} disabled={!canEdit || busyTaskId !== null}><Square size={13} />取消</button>}
+                  {(task.status === "failed" || task.status === "partial") && <button className="secondary-button" type="button" onClick={() => void controlTask(task, "retry")} disabled={!canEdit || busyTaskId !== null}><RefreshCw size={14} />重试失败项</button>}
+                  {busyTaskId === task.taskId && <span className={styles.busyLabel}><LoaderCircle size={14} className={styles.spin} />正在提交…</span>}
+                </div>
+              </article>)}
+            </div>}
+            {taskHasMore && <button className="secondary-button" type="button" style={{ marginTop: 12 }} onClick={() => void loadMoreTasks()} disabled={loading}>{loading ? "加载中…" : "加载更多任务"}<ChevronRight size={14} /></button>}
+          </section>
+        )}
       </>}
 
       {pickerKind && <div className={styles.backdrop} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPickerKind(null); }}>
@@ -517,8 +581,26 @@ export function LibraryScanSettings({
   );
 }
 
-function TargetRow({ label, value, onChoose, onClear, disabled }: { label: string; value: PickedRoot | null; onChoose: () => void; onClear: () => void; disabled: boolean }) {
-  return <div className={styles.targetRow}><span>{label}</span><span className={styles.targetValue} title={value?.directoryId}>{value?.name ?? "未选择"}</span>{value && <button type="button" className={styles.clearTarget} onClick={onClear} aria-label={`清除${label}`} disabled={disabled}><X size={14} /></button>}<button type="button" className="secondary-button" onClick={onChoose} disabled={disabled}>选择</button></div>;
+function TargetRow({ label, value, onChoose, onClear, disabled, isTv = false }: {
+  label: string;
+  value: PickedRoot | null;
+  onChoose: () => void;
+  onClear: () => void;
+  disabled: boolean;
+  isTv?: boolean;
+}) {
+  return (
+    <div className={styles.targetChipCard}>
+      <span className={`${styles.targetTag} ${isTv ? styles.targetTagTv : ""}`}>{label}</span>
+      <span className={styles.targetValue} title={value?.directoryId}>{value?.name ?? "未选择"}</span>
+      {value ? (
+        <button type="button" className={styles.clearTarget} onClick={onClear} aria-label={`清除${label}`} disabled={disabled}>
+          <X size={14} />
+        </button>
+      ) : <span />}
+      <button type="button" className="secondary-button" onClick={onChoose} disabled={disabled}>选择</button>
+    </div>
+  );
 }
 
 function statusLabel(status: LibraryScanTask["status"]): string {

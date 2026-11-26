@@ -3,6 +3,8 @@ import {
   addStableCollisionSuffix,
   DEFAULT_NAMING_TEMPLATES,
   deriveSubtitlePath,
+  extractMediaTechTags,
+  NAMING_TEMPLATE_PRESETS,
   parseNamingTemplate,
   previewNamingTemplate,
   renderParsedNamingTemplate,
@@ -10,17 +12,93 @@ import {
 } from "../src/library/naming.js";
 
 describe("library naming templates", () => {
-  it("provides the five default templates from the naming requirements", () => {
+  it("provides the five MoviePilot-style default templates and presets", () => {
     expect(DEFAULT_NAMING_TEMPLATES).toEqual({
-      movieDirectory: "{title} ({year})",
-      movieFile: "{title} ({year}){ext}",
-      tvDirectory: "{title} ({year})",
+      movieDirectory: "{title}{{ ({year})}}{{ [tmdbid={tmdbId}]}}",
+      movieFile: "{title}{{ ({year})}}{{ - {mediaTags}}}{{-{releaseGroup}}}{ext}",
+      tvDirectory: "{title}{{ ({year})}}{{ [tmdbid={tmdbId}]}}",
       seasonDirectory: "Season {season:02}",
-      episodeFile: "{title} - {episodeCode}{ext}",
+      episodeFile: "{title} - {episodeCode}{{ - {mediaTags}}}{{-{releaseGroup}}}{ext}",
+    });
+    expect(NAMING_TEMPLATE_PRESETS.map((preset) => preset.id)).toEqual(["perfect", "emby-compact", "classic"]);
+  });
+
+  it("extracts resolution, source, HDR/DV, codec, audio, fps, edition and release group cleanly", () => {
+    expect(
+      extractMediaTechTags("Dune.Part.Two.2024.2160p.UHD.BluRay.REMUX.DV.HDR10+.HEVC.TrueHD.7.1.Atmos-CHD.mkv"),
+    ).toEqual({
+      resolution: "2160p",
+      videoSource: "REMUX",
+      dynamicRange: "DV.HDR10+",
+      videoCodec: "HEVC",
+      audioCodec: "TrueHD.Atmos",
+      fps: "",
+      edition: "",
+      releaseGroup: "CHD",
+      mediaTags: "2160p.REMUX.DV.HDR10+.HEVC.TrueHD.Atmos",
+    });
+
+    expect(
+      extractMediaTechTags("Severance.S01E01.2160p.ATVP.WEB-DL.DDP5.1.Atmos.DV.H.265-NTb.mkv"),
+    ).toMatchObject({
+      resolution: "2160p",
+      videoSource: "WEB-DL",
+      dynamicRange: "DV",
+      videoCodec: "HEVC",
+      audioCodec: "DDP.Atmos",
+      releaseGroup: "NTb",
+      mediaTags: "2160p.WEB-DL.DV.HEVC.DDP.Atmos",
+    });
+
+    expect(extractMediaTechTags("The.Grand.Budapest.Hotel.2014.1080p.WEB-DL.x265.mkv")).toMatchObject({
+      resolution: "1080p",
+      videoSource: "WEB-DL",
+      videoCodec: "HEVC",
+      releaseGroup: "",
+      mediaTags: "1080p.WEB-DL.HEVC",
+    });
+
+    expect(extractMediaTechTags("奥本海默.mkv")).toEqual({
+      resolution: "",
+      videoSource: "",
+      dynamicRange: "",
+      videoCodec: "",
+      audioCodec: "",
+      fps: "",
+      edition: "",
+      releaseGroup: "",
+      mediaTags: "",
     });
   });
 
-  it("renders Chinese values, episode padding, and source extensions as supplied", () => {
+  it("renders Chinese values, episode padding, and optional groups cleanly without dangling separators", () => {
+    const duneTech = extractMediaTechTags("Dune.Part.Two.2024.2160p.UHD.BluRay.REMUX.DV.HDR10+.HEVC.TrueHD.7.1.Atmos-CHD.mkv");
+    expect(
+      previewNamingTemplate(`${DEFAULT_NAMING_TEMPLATES.movieDirectory}/${DEFAULT_NAMING_TEMPLATES.movieFile}`, {
+        title: "沙丘2",
+        year: 2024,
+        tmdbId: 693134,
+        ...duneTech,
+        ext: ".mkv",
+      }),
+    ).toEqual({
+      ok: true,
+      path: "沙丘2 (2024) [tmdbid=693134]/沙丘2 (2024) - 2160p.REMUX.DV.HDR10+.HEVC.TrueHD.Atmos-CHD.mkv",
+    });
+
+    expect(
+      previewNamingTemplate(`${DEFAULT_NAMING_TEMPLATES.movieDirectory}/${DEFAULT_NAMING_TEMPLATES.movieFile}`, {
+        title: "奥本海默",
+        year: 2023,
+        tmdbId: 872585,
+        ...extractMediaTechTags("奥本海默.mkv"),
+        ext: ".mkv",
+      }),
+    ).toEqual({
+      ok: true,
+      path: "奥本海默 (2023) [tmdbid=872585]/奥本海默 (2023).mkv",
+    });
+
     const result = previewNamingTemplate(
       "{title} ({year})/Season {season:02}/{title} - S{season:02}E{episode:02}{ext}",
       { title: "流浪地球", year: 2019, season: 2, episode: 7, ext: ".MKV" },
@@ -28,10 +106,19 @@ describe("library naming templates", () => {
     expect(result).toEqual({ ok: true, path: "流浪地球 (2019)/Season 02/流浪地球 - S02E07.MKV" });
   });
 
-  it("accepts absent optional metadata and renders it as empty text", () => {
+  it("accepts absent optional metadata for plain fields and collapses {{...}} groups", () => {
     expect(previewNamingTemplate("{title} ({year})/{title}{ext}", {
       title: "沙丘", year: null, resolution: undefined, edition: "", ext: ".mkv",
     })).toEqual({ ok: true, path: "沙丘 ()/沙丘.mkv" });
+    expect(previewNamingTemplate("{title}{{ ({year})}}/{title}{{ - {resolution}}}{{.{dynamicRange}}}{{-{releaseGroup}}}{ext}", {
+      title: "沙丘", year: null, resolution: "", dynamicRange: undefined, releaseGroup: null, ext: ".mkv",
+    })).toEqual({ ok: true, path: "沙丘/沙丘.mkv" });
+  });
+
+  it("rejects malformed optional groups while keeping single-brace diagnostics", () => {
+    expect(validateNamingTemplate("{title}{{ - }}")).toContain("可选片段必须至少包含一个模板字段");
+    expect(validateNamingTemplate("{title}{{ - {{title}}}}")).toContain("可选片段不能嵌套");
+    expect(validateNamingTemplate("{title}{{ - {year}")).toContain("模板包含未配对的 {{");
   });
 
   it("parses only known fields and the supported two digit numeric formats", () => {
