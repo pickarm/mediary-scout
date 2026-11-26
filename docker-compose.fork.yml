@@ -42,7 +42,6 @@ services:
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       NO_PROXY: ${NO_PROXY:-}
-      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
     env_file:
       - path: .env
         required: false
