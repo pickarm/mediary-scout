@@ -133,9 +133,10 @@ p {
   display: none;
 }
 
-/* 活动 lives in the footer on desktop (like 设置); its nav-list copy is for the
-   mobile top bar only. */
-.nav-activity-item {
+/* 活动与系统信息 live in the footer on desktop (like 设置); their nav-list copies
+   are for the mobile top bar only. */
+.nav-activity-item,
+.nav-system-item {
   display: none;
 }
 
@@ -1283,7 +1284,8 @@ p {
     display: block;
   }
 
-  .nav-activity-item {
+  .nav-activity-item,
+  .nav-system-item {
     display: block;
   }
 

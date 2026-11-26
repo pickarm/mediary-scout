@@ -1,6 +1,6 @@
 import { Suspense } from "react";
 import Link from "next/link";
-import { Activity, Aperture, Bell, Library, Settings } from "lucide-react";
+import { Activity, Aperture, Bell, Library, Server, Settings } from "lucide-react";
 import { resolveIsDesktop } from "../lib/workflow-runtime";
 import { globalNavHref } from "@media-track/workflow";
 import { SearchNavLink } from "./search-memory";
@@ -17,7 +17,7 @@ export function AppSidebar({
   basePath = "/",
   activeStorageId,
 }: {
-  active: "search" | "library" | "library-manage" | "notifications" | "activity" | "settings" | "none";
+  active: "search" | "library" | "library-manage" | "notifications" | "activity" | "system" | "settings" | "none";
   searchQuery?: string;
   /** Tree model: the active workspace path ("/w/<id>" or "/") so the search/library
    *  tabs keep you in the workspace you're viewing. */
@@ -95,6 +95,15 @@ export function AppSidebar({
               <ActivityNavBadge storageId={activeStorageId} />
             </Link>
           </li>
+          <li className="nav-system-item">
+            <Link
+              className={`nav-item ${active === "system" ? "is-active" : ""}`}
+              href={globalNavHref("/system", activeStorageId)}
+            >
+              <Server size={16} aria-hidden />
+              系统信息
+            </Link>
+          </li>
           <li className="nav-settings-item">
             <Link
               className={`nav-item ${active === "settings" ? "is-active" : ""}`}
@@ -121,6 +130,13 @@ export function AppSidebar({
           <Activity size={16} aria-hidden />
           活动
           <ActivityNavBadge storageId={activeStorageId} />
+        </Link>
+        <Link
+          className={`nav-item nav-secondary ${active === "system" ? "is-active" : ""}`}
+          href={globalNavHref("/system", activeStorageId)}
+        >
+          <Server size={16} aria-hidden />
+          系统信息
         </Link>
         <Link className="health-card" href={globalNavHref("/settings", activeStorageId)} style={{ textDecoration: "none", color: "inherit" }}>
           <span className="health-icon">

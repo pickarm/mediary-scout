@@ -37,6 +37,8 @@ describe("AppSidebar", () => {
     expect(html).toContain("Ctrl+K");
     expect(html).toContain('aria-label="打开快速搜索"');
     expect(html).toContain('href="/w/drive-2?tab=library"');
+    expect(html).toContain('href="/system?w=drive-2"');
+    expect(html).toContain("系统信息");
     expect(html).toContain('href="/settings?w=drive-2"');
     expect(html).toContain("网盘 · 偏好 · 更新");
     expect(html).not.toContain("远程访问");

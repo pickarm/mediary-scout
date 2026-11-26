@@ -358,3 +358,82 @@ export class PostgresSummaryCache {
     this.subscribers.clear();
   }
 }
+
+export type RedisProbeResult =
+  | { ok: true; latencyMs: number; version: string | null }
+  | { ok: false; latencyMs: number; error: string };
+
+function sanitizeRedisProbeError(error: unknown): string {
+  const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const combined = `${code} ${message}`.toUpperCase();
+  if (combined.includes("WRONGPASS") || combined.includes("NOAUTH") || combined.includes("ERR AUTH")) {
+    return "Redis 认证失败，请检查密码配置";
+  }
+  if (combined.includes("ETIMEDOUT") || combined.includes("TIMEOUT") || combined.includes("ABORT")) {
+    return "Redis 连接或响应超时";
+  }
+  if (combined.includes("ECONNREFUSED")) {
+    return "Redis 连接被拒绝，请确认服务已启动";
+  }
+  if (combined.includes("ENOTFOUND") || combined.includes("EAI_AGAIN")) {
+    return "Redis 主机域名无法解析";
+  }
+  return "Redis 连接不可用";
+}
+
+function extractRedisVersion(infoText: string): string | null {
+  const match = /^redis_version:([^\r\n]+)/m.exec(infoText);
+  const version = match?.[1]?.trim() ?? "";
+  return version ? version : null;
+}
+
+/** 轻量只读探活 Redis 连接并返回延迟与服务端版本；绝不在结果中暴露含凭证的原始 URL。 */
+export async function probeRedisConnection(
+  redisUrl: string,
+  opts?: { timeoutMs?: number },
+): Promise<RedisProbeResult> {
+  const trimmedUrl = redisUrl.trim();
+  if (!trimmedUrl) {
+    return { ok: false, latencyMs: 0, error: "Redis 连接地址为空" };
+  }
+  const rawTimeout = opts?.timeoutMs;
+  const timeout =
+    rawTimeout !== undefined && Number.isSafeInteger(rawTimeout)
+      ? Math.max(200, Math.min(5_000, rawTimeout))
+      : 1_500;
+  const startedAt = Date.now();
+  const client = createClient<{}, {}, {}, 3, {}>({
+    url: trimmedUrl,
+    name: "mediary-system-probe",
+    disableOfflineQueue: true,
+    commandOptions: { timeout },
+    socket: {
+      connectTimeout: timeout,
+      reconnectStrategy: false,
+    },
+  });
+  client.on("error", () => {});
+  try {
+    await client.connect();
+    await client.ping();
+    const latencyMs = Math.max(0, Date.now() - startedAt);
+    let version: string | null = null;
+    try {
+      const info = await client.info("server");
+      version = extractRedisVersion(info);
+    } catch {
+      // 某些受限托管 Redis 禁用了 INFO 命令，不影响连通性判定。
+    }
+    return { ok: true, latencyMs, version };
+  } catch (error) {
+    const latencyMs = Math.max(0, Date.now() - startedAt);
+    return { ok: false, latencyMs, error: sanitizeRedisProbeError(error) };
+  } finally {
+    try {
+      client.destroy();
+    } catch {
+      // 忽略释放阶段的关闭错误。
+    }
+  }
+}

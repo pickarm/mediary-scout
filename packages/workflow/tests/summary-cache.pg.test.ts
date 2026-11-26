@@ -3,7 +3,7 @@ import { createClient } from "redis";
 import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { initializeWorkflowPostgresSchema } from "../src/postgres.js";
-import { PostgresSummaryCache } from "../src/library/summary-cache.js";
+import { PostgresSummaryCache, probeRedisConnection } from "../src/library/summary-cache.js";
 import { normalizePostgresLibraryQueryInput, PostgresLibraryQuery } from "../src/library/library-query.js";
 import { normalizePostgresActivityQueryInput, PostgresActivityQuery } from "../src/library/activity-query.js";
 
@@ -310,4 +310,22 @@ integration("PostgresSummaryCache", () => {
     while (!cache.isReady() && Date.now() < recoveredBy) await new Promise((resolve) => setTimeout(resolve, 50));
     expect(cache.isReady()).toBe(true);
   }, 15_000);
+
+  it("probes live Redis version/latency and redacts secrets on unreachable endpoints", async () => {
+    if (!redisUrl) throw new Error("isolated Redis URL is required");
+    const live = await probeRedisConnection(redisUrl, { timeoutMs: 1_500 });
+    expect(live.ok).toBe(true);
+    if (live.ok) {
+      expect(live.latencyMs).toBeGreaterThanOrEqual(0);
+      expect(live.version).toMatch(/^\d+\.\d+/);
+    }
+
+    const unavailable = await probeRedisConnection("redis://user:super-secret-token@127.0.0.1:1/0", {
+      timeoutMs: 300,
+    });
+    expect(unavailable.ok).toBe(false);
+    if (!unavailable.ok) {
+      expect(unavailable.error).not.toContain("super-secret-token");
+    }
+  }, 10_000);
 });
