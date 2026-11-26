@@ -501,4 +501,62 @@ describe("LibraryPagedWall queries", () => {
     pressKey("Enter");
     expect(nav.push).not.toHaveBeenCalled();
   });
+
+  it("supports sort, direction, storage filter resets to page 1, and compact list view toggle", async () => {
+    const pagedPreviews: LibraryCategoryPreview[] = [
+      { type: "movie", page: page([item({ tmdbId: 1, title: "初始电影", posterPath: "/init.jpg", updatedAt: "2026-11-20T00:00:00Z" })], 120, 48) },
+      { type: "tv", page: page([], 0) },
+      { type: "anime", page: page([], 0) },
+    ];
+    render({
+      previews: pagedPreviews,
+      mediaType: "movie",
+      filter: "all",
+      storageId: "drive-a",
+      storages: [
+        { id: "drive-a", label: "夸克网盘" },
+        { id: "drive-b", label: "115网盘" },
+      ],
+    });
+    await respond(pending(() => true)[0]!, page([item({ tmdbId: 1, title: "初始电影", posterPath: "/init.jpg", updatedAt: "2026-11-20T00:00:00Z" })], 120, 48));
+
+    // 先翻到第 2 页
+    const nextButton = find(currentTree, (element) => element.type === "button" && (element.props as { children?: ReactNode }).children === "下一页");
+    expect(nextButton).not.toBeNull();
+    (nextButton!.props as { onClick: () => void }).onClick();
+    render(currentProps);
+    await respond(pending((url) => url.searchParams.get("page") === "2")[0]!, page([item({ tmdbId: 2, title: "第二页电影" })], 120, 48));
+    expect(html()).toContain("第 2 / 3 页");
+
+    // 切换排序为「最近更新」应默认降序并重置回第 1 页
+    const sortSelect = find(currentTree, (element) => element.type === "select" && (element.props as { "aria-label"?: string })["aria-label"] === "排序方式");
+    expect(sortSelect).not.toBeNull();
+    (sortSelect!.props as { onChange: (event: { target: { value: string } }) => void }).onChange({ target: { value: "updatedAt" } });
+    render(currentProps);
+    const updatedReq = pending((url) => url.searchParams.get("sort") === "updatedAt")[0]!;
+    expect(updatedReq.url.searchParams.get("direction")).toBe("desc");
+    expect(updatedReq.url.searchParams.get("page")).toBe("1");
+    await respond(updatedReq, page([item({ tmdbId: 3, title: "最近更新电影", posterPath: "/recent.jpg", updatedAt: "2026-11-25T10:00:00Z" })], 10, 48));
+    expect(html()).toContain("最近更新电影");
+
+    // 切换网盘筛选为「全部网盘」应去掉 storageId 参数并重置回第 1 页
+    const storageSelect = find(currentTree, (element) => element.type === "select" && (element.props as { "aria-label"?: string })["aria-label"] === "按网盘筛选");
+    expect(storageSelect).not.toBeNull();
+    (storageSelect!.props as { onChange: (event: { target: { value: string } }) => void }).onChange({ target: { value: "" } });
+    render(currentProps);
+    const allStorageReq = pending((url) => !url.searchParams.has("storageId"))[0]!;
+    expect(allStorageReq.url.searchParams.get("page")).toBe("1");
+    await respond(allStorageReq, page([item({ tmdbId: 4, title: "全盘电影", posterPath: "/all.jpg", updatedAt: "2026-11-26T00:00:00Z" })], 2, 48));
+    expect(html()).toContain("全盘电影");
+
+    // 切换为紧凑列表视图，展示 w92 缩略图与更新日期
+    const listButton = find(currentTree, (element) => element.type === "button" && renderToStaticMarkup(element).includes("紧凑列表"));
+    expect(listButton).not.toBeNull();
+    (listButton!.props as { onClick: () => void }).onClick();
+    render(currentProps);
+    const markup = html();
+    expect(markup).toContain("/api/tmdb/image/w92/all.jpg");
+    expect(markup).toContain("更新 2026-11-26");
+    expect(markup).not.toContain('class="poster-wall"');
+  });
 });

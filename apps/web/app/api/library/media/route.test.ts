@@ -3,7 +3,7 @@ import { NextRequest } from "next/server";
 
 const state = vi.hoisted(() => ({
   account: vi.fn<() => Promise<string>>(),
-  storages: vi.fn<() => Promise<Array<{ id: string; accountId: string }>>>(),
+  storages: vi.fn<() => Promise<Array<{ id: string; accountId: string; provider?: string; label?: string | null; status?: string }>>>(),
   getPage: vi.fn<(...args: never[]) => Promise<unknown>>(),
 }));
 vi.mock("../../../../lib/library-api", () => ({
@@ -45,6 +45,23 @@ describe("GET /api/library/media", () => {
     expect(state.getPage).toHaveBeenCalledWith(expect.objectContaining({
       state: "reserved", sort: "year", direction: "desc", page: 3, pageSize: 100,
     }));
+  });
+
+  it("accepts updatedAt sort and optionally returns sanitized connected storages", async () => {
+    state.storages.mockResolvedValue([
+      { id: "owned", accountId: "acct_current", provider: "quark", label: "主盘", status: "active" },
+      { id: "other", accountId: "acct_other", provider: "pan115", label: "别人的", status: "active" },
+    ]);
+    const res = await GET(req("?sort=updatedAt&direction=desc&includeStorages=1"));
+    expect(res.status).toBe(200);
+    expect(state.getPage).toHaveBeenCalledWith(expect.objectContaining({
+      sort: "updatedAt",
+      direction: "desc",
+    }));
+    const body = await res.json() as { storages?: Array<{ id: string; label: string; provider: string; status: string }> };
+    expect(body.storages).toEqual([
+      { id: "owned", provider: "quark", label: "夸克网盘（主盘）", status: "active" },
+    ]);
   });
 
   it("rejects unbounded or unsupported query values before querying", async () => {

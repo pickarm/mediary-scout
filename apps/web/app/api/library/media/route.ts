@@ -1,4 +1,5 @@
 import type { NextRequest } from "next/server";
+import { getStorageBrand, isRegisteredStorageProvider } from "@media-track/workflow";
 import { LibraryQueryInputError, normalizePostgresLibraryQueryInput, type LibraryQueryMediaType, type LibraryQuerySort, type LibraryQueryState } from "@media-track/workflow/library-query";
 import { getLibraryMediaPage } from "../../../../lib/library-media-runtime";
 import { apiErrorResponse, LibraryApiError, libraryAccount, requireString } from "../../../../lib/library-api";
@@ -6,7 +7,7 @@ import { getWorkflowRepository } from "../../../../lib/workflow-runtime";
 
 const MEDIA_TYPES: readonly LibraryQueryMediaType[] = ["movie", "tv", "anime"];
 const MEDIA_STATES: readonly LibraryQueryState[] = ["complete", "tracking", "partial", "reserved"];
-const SORTS: readonly LibraryQuerySort[] = ["title", "year", "obtainedEpisodes", "totalAiredEpisodes"];
+const SORTS: readonly LibraryQuerySort[] = ["title", "year", "obtainedEpisodes", "totalAiredEpisodes", "updatedAt"];
 
 function enumParam<T extends string>(value: string | null, values: readonly T[], label: string): T | undefined {
   if (value === null || value === "") return undefined;
@@ -28,9 +29,12 @@ export async function GET(request: NextRequest): Promise<Response> {
     const params = request.nextUrl.searchParams;
     const rawStorageId = params.get("storageId");
     const connectedStorageId = rawStorageId === null || rawStorageId === "" ? null : requireString(rawStorageId, "网盘", 200);
+    const includeStorages = params.get("includeStorages") === "1";
+    const storages = connectedStorageId !== null || includeStorages
+      ? await getWorkflowRepository().listConnectedStorages(accountId)
+      : null;
     if (connectedStorageId !== null) {
-      const storages = await getWorkflowRepository().listConnectedStorages(accountId);
-      if (!storages.some((storage) => storage.id === connectedStorageId && storage.accountId === accountId)) {
+      if (!storages?.some((storage) => storage.id === connectedStorageId && storage.accountId === accountId)) {
         throw new LibraryApiError(404, "找不到该账号的网盘连接。");
       }
     }
@@ -49,7 +53,23 @@ export async function GET(request: NextRequest): Promise<Response> {
       page: positiveInt(params.get("page"), 1, "页码", 1_000_000),
       pageSize: positiveInt(params.get("pageSize"), 48, "每页数量", 100),
     });
-    return Response.json(await getLibraryMediaPage(input));
+    const result = await getLibraryMediaPage(input);
+    if (!includeStorages) {
+      return Response.json(result);
+    }
+    const safeStorages = (storages ?? [])
+      .filter((storage) => storage.accountId === accountId && isRegisteredStorageProvider(storage.provider))
+      .map((storage) => {
+        const brand = getStorageBrand(storage.provider);
+        const customLabel = storage.label?.trim();
+        return {
+          id: storage.id,
+          provider: storage.provider,
+          label: customLabel ? `${brand.label}（${customLabel}）` : brand.label,
+          status: storage.status,
+        };
+      });
+    return Response.json({ ...result, storages: safeStorages });
   } catch (error) {
     if (error instanceof LibraryQueryInputError) return Response.json({ error: error.message }, { status: 400 });
     return apiErrorResponse(error);

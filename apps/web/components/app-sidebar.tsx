@@ -8,6 +8,8 @@ import { ActivityNavBadge } from "./activity-nav-badge";
 import { NotificationsNavBadge } from "./notifications-nav-badge";
 import { SettingsAttentionBadge } from "./settings-attention-badge";
 import { AccountIdentityLoader } from "./account-identity-loader";
+import { GlobalQuickSearch } from "./global-quick-search";
+import styles from "./app-sidebar.module.css";
 
 export function AppSidebar({
   active,
@@ -43,6 +45,10 @@ export function AppSidebar({
           <AccountIdentityLoader />
         </div>
       </Suspense>
+
+      <div className={styles.quickSearchSlot}>
+        <GlobalQuickSearch storageId={activeStorageId} basePath={basePath} />
+      </div>
 
       <nav aria-label="主导航">
         <ul className="nav-list">

@@ -1,0 +1,10 @@
+.quickSearchSlot {
+  padding: 0 4px;
+}
+
+@media (max-width: 760px) {
+  .quickSearchSlot {
+    padding: 0;
+    margin-left: auto;
+  }
+}

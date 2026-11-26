@@ -44,4 +44,26 @@ describe("LibraryPagedWall", () => {
     expect(html).toContain("获取中");
     expect(html).not.toContain("/show/73?from=library&amp;t=movie");
   });
+
+  it("renders tmdbImageUrl proxy paths, toolbar controls and summary bar", () => {
+    const previews: LibraryCategoryPreview[] = [
+      { type: "movie", page: page([{ ...item("movie", "complete"), posterPath: "/poster-movie.jpg" }], 12) },
+      { type: "tv", page: page([{ ...item("tv", "tracking"), posterPath: "https://evil.example/x.jpg" }], 5) },
+      { type: "anime", page: page([], 0) },
+    ];
+    const html = renderToStaticMarkup(createElement(LibraryPagedWall, {
+      previews,
+      mediaType: null,
+      filter: "all",
+      storages: [{ id: "drive-a", label: "夸克网盘" }],
+    }));
+    expect(html).toContain("/api/tmdb/image/w342/poster-movie.jpg");
+    expect(html).not.toContain("image.tmdb.org");
+    expect(html).not.toContain("evil.example");
+    expect(html).toContain("共 17 部");
+    expect(html).toContain("最近更新");
+    expect(html).toContain("夸克网盘");
+    expect(html).toContain("海报墙");
+    expect(html).toContain("紧凑列表");
+  });
 });
