@@ -1,24 +1,61 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { proxy } from "./proxy";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NextRequest } from "next/server";
+import { _resetLoginThrottleForTest } from "./lib/login-throttle";
 
-const prevMultiUser = process.env.MEDIA_TRACK_MULTI_USER;
-const prevDemoMode = process.env.MEDIA_TRACK_DEMO_MODE;
-const prevDesktop = process.env.MEDIA_TRACK_DESKTOP;
+const CRYPTO_TIMEOUT_MS = 30_000;
 
-beforeEach(() => {
+const ENV_KEYS = [
+  "MEDIA_TRACK_SQLITE_PATH",
+  "MEDIA_TRACK_POSTGRES_URL",
+  "MEDIA_TRACK_MULTI_USER",
+  "MEDIA_TRACK_DEMO_MODE",
+  "MEDIA_TRACK_DESKTOP",
+] as const;
+
+const savedEnv = new Map<string, string | undefined>(ENV_KEYS.map((k) => [k, process.env[k]]));
+
+let activeRuntime: typeof import("./lib/workflow-runtime") | null = null;
+let activeProxy: typeof import("./proxy").proxy | null = null;
+
+function restoreEnv(): void {
+  for (const key of ENV_KEYS) {
+    const prev = savedEnv.get(key);
+    if (prev === undefined) delete process.env[key];
+    else process.env[key] = prev;
+  }
+}
+
+async function boot(envOverrides?: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>>) {
+  process.env.MEDIA_TRACK_SQLITE_PATH = ":memory:";
+  delete process.env.MEDIA_TRACK_POSTGRES_URL;
   delete process.env.MEDIA_TRACK_MULTI_USER;
   delete process.env.MEDIA_TRACK_DEMO_MODE;
   delete process.env.MEDIA_TRACK_DESKTOP;
+  if (envOverrides) {
+    for (const [key, val] of Object.entries(envOverrides)) {
+      if (val === undefined) delete process.env[key];
+      else process.env[key] = val;
+    }
+  }
+  _resetLoginThrottleForTest();
+  vi.resetModules();
+  activeRuntime = await import("./lib/workflow-runtime");
+  activeProxy = (await import("./proxy")).proxy;
+  return { rt: activeRuntime, proxy: activeProxy };
+}
+
+beforeEach(() => {
+  restoreEnv();
 });
 
-afterAll(() => {
-  if (prevMultiUser !== undefined) process.env.MEDIA_TRACK_MULTI_USER = prevMultiUser;
-  else delete process.env.MEDIA_TRACK_MULTI_USER;
-  if (prevDemoMode !== undefined) process.env.MEDIA_TRACK_DEMO_MODE = prevDemoMode;
-  else delete process.env.MEDIA_TRACK_DEMO_MODE;
-  if (prevDesktop !== undefined) process.env.MEDIA_TRACK_DESKTOP = prevDesktop;
-  else delete process.env.MEDIA_TRACK_DESKTOP;
+afterEach(async () => {
+  if (activeRuntime) {
+    await activeRuntime.closeWorkflowRepositoryForTests();
+    activeRuntime = null;
+  }
+  activeProxy = null;
+  vi.resetModules();
+  restoreEnv();
 });
 
 const makeRequest = (opts: {
@@ -26,19 +63,23 @@ const makeRequest = (opts: {
   search?: string;
   cf?: boolean;
   staleAuthCookie?: boolean;
-  session?: boolean;
+  sessionValue?: string;
 }): NextRequest => {
   const headers = new Headers();
   if (opts.cf) headers.set("cf-ray", "8f3abc-LAX");
   const cookies = new Map<string, { name: string; value: string }>();
-  if (opts.staleAuthCookie)
+  if (opts.staleAuthCookie) {
     cookies.set("mt_auth_required", { name: "mt_auth_required", value: "1" });
-  if (opts.session) cookies.set("mt_session", { name: "mt_session", value: "sess.sig" });
+  }
+  if (opts.sessionValue !== undefined) {
+    cookies.set("mt_session", { name: "mt_session", value: opts.sessionValue });
+  }
   const url = new URL(`http://localhost:3000${opts.path ?? "/"}${opts.search ?? ""}`);
   return {
     headers,
     cookies: { get: (name: string) => cookies.get(name) },
     nextUrl: {
+      protocol: url.protocol,
       pathname: url.pathname,
       search: url.search,
       clone: () => new URL(url.toString()),
@@ -46,98 +87,166 @@ const makeRequest = (opts: {
   } as unknown as NextRequest;
 };
 
-const redirectsToLogin = (req: NextRequest): boolean => {
-  const res = proxy(req);
-  return res.status >= 300 && res.status < 400 && (res.headers.get("location") ?? "").includes("/login");
-};
+const isRedirectToLogin = (res: Response): boolean =>
+  res.status >= 300 && res.status < 400 && (res.headers.get("location") ?? "").includes("/login");
 
-describe("proxy gate — default forced login mode", () => {
-  it("redirects unauthenticated requests even without Cloudflare headers (bare IP / reverse proxy / LAN)", () => {
-    const res = proxy(makeRequest({ path: "/settings", search: "?tab=account" }));
-    expect(res.status).toBe(307);
-    const location = res.headers.get("location");
-    expect(location).toBeTruthy();
-    const target = new URL(location!);
-    expect(target.pathname).toBe("/login");
-    expect(target.searchParams.get("next")).toBe("/settings?tab=account");
-  });
+describe("proxy gate — default forced login & authoritative session verification", () => {
+  it(
+    "redirects unauthenticated requests even without Cloudflare headers and rejects stale/forged cookies",
+    async () => {
+      const { proxy } = await boot();
 
-  it("does not attach /api/* paths into ?next= query on redirect", () => {
-    const res = proxy(makeRequest({ path: "/api/update/status" }));
-    expect(res.status).toBe(307);
-    const target = new URL(res.headers.get("location")!);
-    expect(target.pathname).toBe("/login");
-    expect(target.searchParams.get("next")).toBeNull();
-  });
+      const res = await proxy(makeRequest({ path: "/settings", search: "?tab=account" }));
+      expect(res.status).toBe(307);
+      const target = new URL(res.headers.get("location")!);
+      expect(target.pathname).toBe("/login");
+      expect(target.searchParams.get("next")).toBe("/settings?tab=account");
+      expect(res.headers.get("set-cookie")).toBeNull();
 
-  it("allows requests carrying mt_session cookie and handler-guarded API prefixes", () => {
-    expect(redirectsToLogin(makeRequest({ path: "/settings", session: true }))).toBe(false);
-    for (const path of ["/api/health", "/api/workflows/run", "/api/agent/step", "/api/update/busy", "/api/update/hold"]) {
-      expect(redirectsToLogin(makeRequest({ path }))).toBe(false);
-    }
-  });
+      // 老镜像/旧容器遗留的无效 mt_session Cookie：必须拦截跳转并清掉失效 Cookie
+      for (const path of ["/", "/settings", "/library-demo", "/api/activity"]) {
+        const staleRes = await proxy(makeRequest({ path, sessionValue: "stale.oldsess" }));
+        expect(isRedirectToLogin(staleRes)).toBe(true);
+        const setCookie = staleRes.headers.get("set-cookie") ?? "";
+        expect(setCookie).toContain("mt_session=;");
+        expect(setCookie).toContain("Max-Age=0");
+      }
+    },
+    CRYPTO_TIMEOUT_MS,
+  );
 
-  it("allows MEDIA_TRACK_DEMO_MODE=1 without session", () => {
-    process.env.MEDIA_TRACK_DEMO_MODE = "1";
-    expect(redirectsToLogin(makeRequest({ cf: true, path: "/" }))).toBe(false);
-  });
+  it(
+    "rejects even an unexpired DB session when the account password_hash is empty (migrated unclaimed instance)",
+    async () => {
+      const { rt, proxy } = await boot();
+      const { signSession } = await import("@media-track/workflow");
+      const repo = rt.getWorkflowRepository();
+      // 模拟老库/异常状态：acct_default 尚未设置密码，但 sessions 表里已有未过期记录
+      const acct = await repo.getAccountById("acct_default");
+      expect(acct?.passwordHash).toBe("");
+      await repo.createSession({
+        id: "sess_unclaimed",
+        accountId: "acct_default",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        expiresAt: "2099-01-01T00:00:00.000Z",
+      });
+      const signed = signSession("sess_unclaimed", await rt.getSessionSecret());
+
+      const res = await proxy(makeRequest({ path: "/", sessionValue: signed }));
+      expect(isRedirectToLogin(res)).toBe(true);
+      expect(res.headers.get("set-cookie") ?? "").toContain("Max-Age=0");
+    },
+    CRYPTO_TIMEOUT_MS,
+  );
+
+  it(
+    "does not attach /api/* paths into ?next= query on redirect",
+    async () => {
+      const { proxy } = await boot();
+      const res = await proxy(makeRequest({ path: "/api/update/status" }));
+      expect(res.status).toBe(307);
+      const target = new URL(res.headers.get("location")!);
+      expect(target.pathname).toBe("/login");
+      expect(target.searchParams.get("next")).toBeNull();
+    },
+    CRYPTO_TIMEOUT_MS,
+  );
+
+  it(
+    "allows valid signed DB session for claimed owner and revokes immediately after password change or logout",
+    async () => {
+      const { rt, proxy } = await boot();
+      const claim = await rt.registerAccount("owner", "secret-123");
+      expect(claim.ok).toBe(true);
+      if (!claim.ok) return;
+
+      expect(isRedirectToLogin(await proxy(makeRequest({ path: "/settings", sessionValue: claim.signedCookie })))).toBe(false);
+      expect(isRedirectToLogin(await proxy(makeRequest({ path: "/library-demo", sessionValue: claim.signedCookie })))).toBe(false);
+
+      // 改密会吊销旧会话：携带旧 Cookie 必须立即 307 跳转 /login 并清除 Cookie
+      const changed = await rt.changeOwnPassword("acct_default", "secret-123", "new-secret-456");
+      expect(changed).toEqual({ ok: true });
+      const afterChange = await proxy(makeRequest({ path: "/", sessionValue: claim.signedCookie }));
+      expect(isRedirectToLogin(afterChange)).toBe(true);
+      expect(afterChange.headers.get("set-cookie") ?? "").toContain("Max-Age=0");
+    },
+    CRYPTO_TIMEOUT_MS,
+  );
+
+  it(
+    "allows handler-guarded API prefixes, demo mode, and local desktop mode without session",
+    async () => {
+      const { proxy } = await boot();
+      for (const path of ["/api/health", "/api/workflows/run", "/api/agent/step", "/api/update/busy", "/api/update/hold"]) {
+        expect(isRedirectToLogin(await proxy(makeRequest({ path })))).toBe(false);
+      }
+
+      process.env.MEDIA_TRACK_DEMO_MODE = "1";
+      expect(isRedirectToLogin(await proxy(makeRequest({ cf: true, path: "/" })))).toBe(false);
+      delete process.env.MEDIA_TRACK_DEMO_MODE;
+
+      process.env.MEDIA_TRACK_DESKTOP = "1";
+      expect(isRedirectToLogin(await proxy(makeRequest({ path: "/" })))).toBe(false);
+    },
+    CRYPTO_TIMEOUT_MS,
+  );
 });
 
 describe("proxy gate — single-user opt-out mode (MEDIA_TRACK_MULTI_USER=0)", () => {
-  beforeAll(() => {
-    process.env.MEDIA_TRACK_MULTI_USER = "0";
-  });
+  it(
+    "forces redirect to /login on LAN and remote when no password is set yet (migrated or fresh)",
+    async () => {
+      const { rt, proxy } = await boot({ MEDIA_TRACK_MULTI_USER: "0" });
+      expect(await rt.hasLoginPassword()).toBe(false);
 
-  beforeEach(() => {
-    process.env.MEDIA_TRACK_MULTI_USER = "0";
-  });
+      // 未设密码前：局域网无 CF 头与外网一样都必须先去 /login 设置密码
+      expect(isRedirectToLogin(await proxy(makeRequest({ path: "/" })))).toBe(true);
+      expect(isRedirectToLogin(await proxy(makeRequest({ cf: true, path: "/" })))).toBe(true);
 
-  it("局域网（无 CF 头）→ 直通，零摩擦（任何 cookie 状态下都一样）", () => {
-    expect(redirectsToLogin(makeRequest({}))).toBe(false);
-    expect(redirectsToLogin(makeRequest({ staleAuthCookie: true }))).toBe(false);
-  });
+      const staleRes = await proxy(makeRequest({ path: "/settings", sessionValue: "stale.cookie" }));
+      expect(isRedirectToLogin(staleRes)).toBe(true);
+      expect(staleRes.headers.get("set-cookie") ?? "").toContain("Max-Age=0");
+    },
+    CRYPTO_TIMEOUT_MS,
+  );
 
-  it("未设密码 + 远程 → 仍要重定向到 /login（那里给的是设置密码表单）", () => {
-    expect(redirectsToLogin(makeRequest({ cf: true }))).toBe(true);
-  });
+  it(
+    "once password is set in MEDIA_TRACK_MULTI_USER=0, allows LAN while requiring verified acct_default session on remote",
+    async () => {
+      const { rt, proxy } = await boot({ MEDIA_TRACK_MULTI_USER: "0" });
+      await rt.setSingleUserPassword("secret-123");
 
-  it("远程 + 无 session → 重定向到登录（残留 cookie 不得放行）", () => {
-    expect(redirectsToLogin(makeRequest({ staleAuthCookie: true, cf: true }))).toBe(true);
-  });
+      // 已设密码：局域网直通
+      expect(isRedirectToLogin(await proxy(makeRequest({})))).toBe(false);
+      expect(isRedirectToLogin(await proxy(makeRequest({ staleAuthCookie: true })))).toBe(false);
 
-  it("远程 + 有 session → 直通（残留 cookie 不影响）", () => {
-    expect(redirectsToLogin(makeRequest({ staleAuthCookie: true, cf: true, session: true }))).toBe(false);
-    expect(redirectsToLogin(makeRequest({ cf: true, session: true }))).toBe(false);
-  });
+      // 远程（含 CF 头）：伪造或无 session 一律拦截，且清理失效 Cookie
+      expect(isRedirectToLogin(await proxy(makeRequest({ cf: true })))).toBe(true);
+      const forged = await proxy(makeRequest({ cf: true, sessionValue: "forged.sig" }));
+      expect(isRedirectToLogin(forged)).toBe(true);
+      expect(forged.headers.get("set-cookie") ?? "").toContain("Max-Age=0");
 
-  it("三个 CF 头任一存在都算远程", () => {
-    for (const header of ["cf-ray", "cdn-loop", "cf-connecting-ip"]) {
-      const req = makeRequest({});
-      req.headers.set(header, "x");
-      expect(redirectsToLogin(req)).toBe(true);
-    }
-  });
+      // 远程携带真实 acct_default 会话：放行
+      const login = await rt.loginAccount("", "secret-123");
+      expect(login.ok).toBe(true);
+      if (!login.ok) return;
+      expect(isRedirectToLogin(await proxy(makeRequest({ cf: true, sessionValue: login.signedCookie })))).toBe(false);
 
-  it("handler 自守的 API 前缀不被重定向（否则会把 JSON 端点变成 HTML 跳转）", () => {
-    for (const path of ["/api/health", "/api/workflows/run", "/api/agent/step"]) {
-      expect(redirectsToLogin(makeRequest({ cf: true, path }))).toBe(false);
-    }
-  });
-});
+      // 清密后恢复未设密态：局域网再次被强制跳转 /login 设置密码
+      await rt.clearSingleUserPassword();
+      expect(isRedirectToLogin(await proxy(makeRequest({ path: "/" })))).toBe(true);
+    },
+    CRYPTO_TIMEOUT_MS,
+  );
 
-describe("proxy gate — explicit multi-user mode (MEDIA_TRACK_MULTI_USER=1)", () => {
-  it("多用户：无 session 一律重定向，与来源和任何残留 cookie 无关", () => {
-    process.env.MEDIA_TRACK_MULTI_USER = "1";
-    expect(redirectsToLogin(makeRequest({}))).toBe(true);
-    expect(redirectsToLogin(makeRequest({ cf: true }))).toBe(true);
-    expect(redirectsToLogin(makeRequest({ staleAuthCookie: true }))).toBe(true);
-    expect(redirectsToLogin(makeRequest({ session: true }))).toBe(false);
-  });
-
-  it("多用户、无 session：/api/update/busy 与 /api/update/hold 放行，/api/update/status 仍重定向", () => {
-    process.env.MEDIA_TRACK_MULTI_USER = "1";
-    expect(redirectsToLogin(makeRequest({ path: "/api/update/busy" }))).toBe(false);
-    expect(redirectsToLogin(makeRequest({ path: "/api/update/hold" }))).toBe(false);
-    expect(redirectsToLogin(makeRequest({ path: "/api/update/status" }))).toBe(true);
-  });
+  it(
+    "handler-guarded API prefixes pass in MEDIA_TRACK_MULTI_USER=0",
+    async () => {
+      const { proxy } = await boot({ MEDIA_TRACK_MULTI_USER: "0" });
+      for (const path of ["/api/health", "/api/workflows/run", "/api/agent/step"]) {
+        expect(isRedirectToLogin(await proxy(makeRequest({ cf: true, path })))).toBe(false);
+      }
+    },
+    CRYPTO_TIMEOUT_MS,
+  );
 });

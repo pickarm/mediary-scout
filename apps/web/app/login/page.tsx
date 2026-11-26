@@ -137,7 +137,7 @@ export default function LoginPage() {
   const note = singleUser
     ? bootstrap?.passwordSet
       ? "这台实例已设置访问密码。局域网内无需登录，从外网访问需要输入密码。"
-      : "给这台实例设一个访问密码。局域网内依旧免登录；以后从外网打开时，要输入这个密码才能进来。"
+      : "当前尚未设置访问密码。请先设置一个访问密码后再进入巡影（至少 6 位）。"
     : claiming
       ? bootstrap?.hasExistingLibrary
         ? "这台实例已有媒体库。设置站主用户名与密码来接管它——你的库与网盘将原样保留；完成后将自动锁定初始化入口，默认不开放公开注册。"

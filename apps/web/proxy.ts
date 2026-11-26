@@ -1,20 +1,16 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { isAccountAuthEnabled, resolveSafeNextPath } from "./lib/auth-mode";
+import { evaluateProxyAuth, isCookieSecure } from "./lib/proxy-auth";
 
 /**
- * §7 P1 + 巡影 Fork 默认强制登录门禁（Next 16 "proxy" 约定）。
+ * §7 P1 + 巡影 Fork 默认强制登录门禁（Next 16 "proxy" 约定，运行于 Node.js 运行时）。
  *
- * 两种门禁形态：
- *  - 默认强制账号密码登录（`isAccountAuthEnabled()` 为 true，含公网裸端口、普通反代与局域网）：
- *    除认证端点与自守 API 外处处需要 session。
- *  - 兼容单用户逃生阀（显式 `MEDIA_TRACK_MULTI_USER=0` 或桌面版默认）：
- *    凡经 Cloudflare 隧道的远程请求需 session；局域网直通。
- *  - 演示模式（`MEDIA_TRACK_DEMO_MODE=1`）：只读免登录放行。
- *
- * This does cheap PRESENCE gating for the redirect UX (runs on the Edge runtime,
- * no DB access). The authoritative check — signature + session row + expiry — is
- * server-side in getCurrentAccountId(), which returns a no-data sentinel for an
- * invalid/expired cookie, so reads fail closed even if a stale cookie slips past.
+ * 门禁策略：
+ *  - 演示模式（`MEDIA_TRACK_DEMO_MODE=1`）与本地桌面单用户（`MEDIA_TRACK_DESKTOP=1` 且未开多用户）：放行；
+ *  - 默认强制账号密码登录（`isAccountAuthEnabled()` 为 true）：除认证端点与自守 API 外，
+ *    处处权威核验 `mt_session` 签名、数据库会话有效期及对应账号已设密码状态；无效则清除旧 Cookie 并跳转 `/login`；
+ *  - 单用户兼容模式（显式 `MEDIA_TRACK_MULTI_USER=0`）：若尚未设置任何访问密码（含从老镜像迁移后密码为空），
+ *    无论局域网还是外网均强制跳转 `/login` 先设密码；已设密码后局域网直通、经 Cloudflare 头转发的远程请求需有效会话。
  */
 const SESSION_COOKIE_NAME = "mt_session";
 // /api/update/busy and /api/update/hold are called by the updater. It has no session
@@ -28,8 +24,7 @@ const HANDLER_GUARDED_API_PREFIXES = [
   "/api/update/hold",
 ];
 
-/** 经隧道的远程请求判定。与 workflow-runtime.isRemoteRequest() 保持一致：
- *  用 cf-ray/cdn-loop 而非仅 cf-connecting-ip（后者可被 zone 规则删除 → fail-open）。 */
+/** 经代理/隧道的远程请求判定。 */
 function isRemoteRequest(request: NextRequest): boolean {
   return (
     request.headers.has("cf-ray") ||
@@ -38,22 +33,27 @@ function isRemoteRequest(request: NextRequest): boolean {
   );
 }
 
-export function proxy(request: NextRequest): NextResponse {
+export async function proxy(request: NextRequest): Promise<NextResponse> {
   if (process.env.MEDIA_TRACK_DEMO_MODE === "1") {
-    return NextResponse.next();
-  }
-  const accountAuth = isAccountAuthEnabled();
-  const gated = accountAuth || isRemoteRequest(request);
-  if (!gated) {
     return NextResponse.next();
   }
   if (HANDLER_GUARDED_API_PREFIXES.some((prefix) => request.nextUrl.pathname.startsWith(prefix))) {
     return NextResponse.next();
   }
-  const hasSession = Boolean(request.cookies.get(SESSION_COOKIE_NAME)?.value);
-  if (hasSession) {
+  if (process.env.MEDIA_TRACK_DESKTOP === "1" && process.env.MEDIA_TRACK_MULTI_USER !== "1") {
     return NextResponse.next();
   }
+
+  const rawSessionCookie = request.cookies.get(SESSION_COOKIE_NAME)?.value;
+  const decision = await evaluateProxyAuth({
+    rawSessionCookie,
+    isRemote: isRemoteRequest(request),
+    accountAuthEnabled: isAccountAuthEnabled(),
+  });
+  if (decision.allow) {
+    return NextResponse.next();
+  }
+
   const { pathname, search } = request.nextUrl;
   const url = request.nextUrl.clone();
   url.pathname = "/login";
@@ -64,10 +64,20 @@ export function proxy(request: NextRequest): NextResponse {
       url.searchParams.set("next", nextPath);
     }
   }
-  return NextResponse.redirect(url);
+  const response = NextResponse.redirect(url);
+  if (decision.clearCookie) {
+    response.cookies.set(SESSION_COOKIE_NAME, "", {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: isCookieSecure(request),
+      path: "/",
+      maxAge: 0,
+    });
+  }
+  return response;
 }
 
 export const config = {
   // Gate pages; exclude the auth API, the login page, Next internals and assets.
-  matcher: ["/((?!api/auth|login|_next/static|_next/image|favicon.ico).*)"],
+  matcher: ["/((?!api/auth|login|_next/static|_next/image|favicon.ico|icon.svg).*)"],
 };

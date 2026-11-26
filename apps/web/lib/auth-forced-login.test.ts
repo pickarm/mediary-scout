@@ -259,4 +259,37 @@ describe("forced account authentication & bootstrap policy", () => {
     expect(activeRuntime.isMultiUserEnabled()).toBe(false);
     expect(await activeRuntime.getCurrentAccountId()).toBe("acct_default");
   });
+
+  it(
+    "rejects lingering session rows for accounts with empty passwordHash and detects migrated drives in bootstrap",
+    async () => {
+      const rt = await boot();
+      const { signSession } = await import("@media-track/workflow");
+      const repo = rt.getWorkflowRepository();
+
+      await repo.upsertConnectedStorage({
+        id: "cs_migrated",
+        accountId: "acct_default",
+        provider: "quark",
+        providerUid: "u1",
+        label: "老镜像网盘",
+        payload: { cookie: "ck" },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      expect(await rt.getBootstrapState()).toEqual({
+        needsClaim: true,
+        hasExistingLibrary: true,
+      });
+
+      await repo.createSession({
+        id: "sess_empty_pw",
+        accountId: "acct_default",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        expiresAt: "2099-01-01T00:00:00.000Z",
+      });
+      const signed = signSession("sess_empty_pw", await rt.getSessionSecret());
+      expect(await rt.resolveSessionAccountId(signed)).toBeNull();
+    },
+    CRYPTO_TIMEOUT_MS,
+  );
 });

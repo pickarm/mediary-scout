@@ -494,9 +494,12 @@ export async function resetUserPassword(
  *  the default account already own a library (→ "接管" vs "创建" copy). */
 export async function getBootstrapState(): Promise<{ needsClaim: boolean; hasExistingLibrary: boolean }> {
   const repo = getWorkflowRepository();
-  const accounts = await repo.listAccounts();
-  const library = await repo.listTrackedSeasonStates(DEFAULT_ACCOUNT_ID);
-  return deriveBootstrapState(accounts, library.length);
+  const [accounts, library, storages] = await Promise.all([
+    repo.listAccounts(),
+    repo.listTrackedSeasonStates(DEFAULT_ACCOUNT_ID),
+    repo.listConnectedStorages(DEFAULT_ACCOUNT_ID),
+  ]);
+  return deriveBootstrapState(accounts, library.length + storages.length);
 }
 
 /** Current account's display summary for the sidebar identity block — NEVER the
@@ -744,15 +747,20 @@ export async function getSessionSecret(): Promise<string> {
 }
 
 /** Resolve a signed session cookie value to its account id, or null if the
- *  signature is bad, the session is unknown, or it has expired. */
+ *  signature is bad, the session is unknown/expired, or the account has no password. */
 export async function resolveSessionAccountId(signedCookie: string): Promise<string | null> {
   const secret = await getSessionSecret();
   const sessionId = verifySession(signedCookie, secret);
   if (!sessionId) {
     return null;
   }
-  const session = await getWorkflowRepository().getSession(sessionId);
+  const repository = getWorkflowRepository();
+  const session = await repository.getSession(sessionId);
   if (!session || isSessionExpired(session.expiresAt, new Date().toISOString())) {
+    return null;
+  }
+  const account = await repository.getAccountById(session.accountId);
+  if (!account || account.passwordHash.length === 0) {
     return null;
   }
   return session.accountId;

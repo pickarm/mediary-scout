@@ -52,7 +52,7 @@ Fork 已彻底移除内置远程访问与 Cloudflare Tunnel 组件，默认启�
   - 若在 `.env` 中设置了 `MEDIA_TRACK_ALLOW_REGISTRATION=1` 或 `0`，则由环境变量强制锁定，设置页开关禁用。
 - **HTTP / HTTPS 会话 Cookie 兼容**：
   - `MEDIA_TRACK_COOKIE_SECURE` 留空时自动依据客户端协议与 `x-forwarded-proto` 判定；直接通过 HTTP 访问公网 IP `:3000` 不会写入 `Secure` 标记，可正常保留登录态；若使用反代且未透传 `x-forwarded-proto`，可显式设为 `1` 或 `0`。
-- **兼容逃生开关**：显式设置 `MEDIA_TRACK_MULTI_USER=0` 可退回旧版单用户局域网免登录模式。
+- **兼容逃生开关**：显式设置 `MEDIA_TRACK_MULTI_USER=0` 可退回单用户模式；即使开启该模式，只要当前实例（含从老镜像迁移）尚未设置访问密码，访问任意页面仍会强制跳转 `/login` 先设密码。
 - **忘记密码重置**：在部署主机执行以下命令直接重置指定账号密码：
   ```sh
   docker compose -f docker-compose.fork.yml exec web node scripts/reset-password.mjs <用户名>
