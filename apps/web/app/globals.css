@@ -5940,3 +5940,187 @@ select.setting-control {
   padding: 28px 0;
   color: var(--text-muted);
 }
+
+/* ---------- 搜索结果筛选胶囊 ---------- */
+
+.search-results-heading {
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.search-filter-pills {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+button.filter-pill {
+  border: 0;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+/* ---------- 热门卡片库内状态徽章 ---------- */
+
+.trending-poster .trending-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  max-width: calc(100% - 54px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background-color: rgba(18, 18, 18, 0.84);
+  backdrop-filter: blur(6px);
+}
+
+/* ---------- 详情页评分、类型标签、演职员横条与单集信息 ---------- */
+
+.hub-rating-badge {
+  color: #ffd479;
+  background: rgba(255, 180, 50, 0.14);
+  border: 1px solid rgba(255, 180, 50, 0.45);
+  font-variant-numeric: tabular-nums;
+}
+
+.hub-genre-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.hub-genre-tag {
+  font-size: 11.5px;
+  color: var(--text-soft);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-pill);
+  padding: 2px 10px;
+}
+
+.hub-cast {
+  margin-top: 18px;
+}
+
+.hub-cast-heading {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-soft);
+}
+
+.hub-cast-strip {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+  scrollbar-width: thin;
+}
+
+.hub-cast-card {
+  flex: 0 0 84px;
+  width: 84px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 5px;
+  padding: 8px 6px;
+  border-radius: var(--radius-card);
+  background: var(--bg-surface);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.hub-cast-card:hover {
+  background: var(--bg-card);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.hub-cast-avatar {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--bg-raised);
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.hub-cast-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.hub-cast-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hub-cast-role {
+  font-size: 11px;
+  color: var(--text-muted);
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hub-episode-grid {
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+}
+
+.hub-episode-grid .episode-cell {
+  align-items: flex-start;
+  padding: 8px 10px;
+  gap: 3px;
+  min-width: 0;
+}
+
+.episode-cell-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+
+.episode-cell-state {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.episode-cell-title {
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+.episode-cell-date {
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 860px) {
+  .hub-genre-tags {
+    justify-content: center;
+  }
+}

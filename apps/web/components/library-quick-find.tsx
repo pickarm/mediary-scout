@@ -8,6 +8,7 @@ import { CalendarClock, CheckCircle2, Clock3, LoaderCircle, Search, TriangleAler
 // drags pg/postgres into the client bundle (see request-state.tsx).
 import { showHref } from "@media-track/workflow/scope";
 import type { InProgressTitle, LibraryWallEntry } from "../lib/title-hub";
+import { tmdbImageUrl } from "../lib/tmdb-image";
 
 /** Mirror of page.tsx's workspaceBasePath: "/" is the account's primary drive,
  *  "/w/<id>" a specific drive. Library links must route within the workspace. */
@@ -270,12 +271,13 @@ function InProgressRow({ titles }: { titles: InProgressTitle[] }) {
 }
 
 function InProgressCard({ title }: { title: InProgressTitle }) {
+  const posterUrl = tmdbImageUrl(title.posterPath, "w342");
   return (
     <div className="wall-card is-loading" aria-disabled title="获取中，完成后可进入">
       <span className="wall-poster">
-        {title.posterPath ? (
+        {posterUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={`https://image.tmdb.org/t/p/w342${title.posterPath}`} alt="" loading="lazy" />
+          <img src={posterUrl} alt="" loading="lazy" />
         ) : (
           <span className="poster-fallback">{title.title.slice(0, 4)}</span>
         )}
@@ -308,12 +310,13 @@ function PosterCard({ entry, activeStorageId }: { entry: LibraryWallEntry; activ
               ...(entry.airing ? [{ tone: "indigo", icon: Clock3, label: "追更中" }] : []),
             ];
 
+  const posterUrl = tmdbImageUrl(entry.posterPath, "w342");
   return (
     <Link className="wall-card" href={showHref(entry.tmdbId, "library", activeStorageId, entry.type)}>
       <span className="wall-poster">
-        {entry.posterPath ? (
+        {posterUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={`https://image.tmdb.org/t/p/w342${entry.posterPath}`} alt="" loading="lazy" />
+          <img src={posterUrl} alt="" loading="lazy" />
         ) : (
           <span className="poster-fallback">{entry.title.slice(0, 4)}</span>
         )}

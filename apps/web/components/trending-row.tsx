@@ -1,21 +1,28 @@
 import Link from "next/link";
 import { Film, RefreshCw, Search } from "lucide-react";
-import { getTrending, TRENDING_KINDS, TRENDING_KIND_ORDER, type TrendingKind } from "../lib/trending";
+import { showHref } from "@media-track/workflow/scope";
+import { tmdbImageUrl } from "../lib/tmdb-image";
+import {
+  getTrending,
+  getTrendingLibraryBadges,
+  trendingIdentityKey,
+  TRENDING_KINDS,
+  TRENDING_KIND_ORDER,
+  type TrendingKind,
+} from "../lib/trending";
 
-const POSTER = "https://image.tmdb.org/t/p/w342";
-
-/** The search page's empty-state discovery row. When getTrending yields []
- *  (proxy/network down) it falls back to the original "输入目标名称" placeholder,
- *  so the empty state is never blank and search is never blocked. Poster clicks
- *  navigate to `?q=<title>` so the pick lands in the normal results flow where the
- *  user explicitly chooses 获取. `basePath` is `/` or `/w/<id>` (never carries a
- *  query), so `?` is always the correct separator. */
+/**
+ * 搜索页空态「近期热门」发现区。点击卡片使用 showHref + t 参数直达详情页
+ * （保留当前工作区 ?w），并叠加当前账号/工作区已入库/追更状态徽章。
+ */
 export async function TrendingRow({
   activeKind,
   basePath,
+  storageId,
 }: {
   activeKind: TrendingKind;
   basePath: string;
+  storageId?: string | undefined;
 }) {
   const cards = await getTrending(activeKind);
   if (cards.length === 0) {
@@ -27,6 +34,7 @@ export async function TrendingRow({
       </div>
     );
   }
+  const badges = await getTrendingLibraryBadges(cards, storageId);
   return (
     <section className="trending" aria-label="近期热门">
       <div className="trending-head">
@@ -47,27 +55,37 @@ export async function TrendingRow({
         </span>
       </div>
       <div className="trending-grid">
-        {cards.map((card, index) => (
-          <Link
-            key={`${card.mediaType}_${card.tmdbId}`}
-            className="trending-card"
-            href={`${basePath}?q=${encodeURIComponent(card.title)}`}
-          >
-            <div className="trending-poster">
-              {card.posterPath ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={`${POSTER}${card.posterPath}`} alt="" loading="lazy" />
-              ) : (
-                <Film size={24} aria-hidden />
-              )}
-              <span className="trending-rank">#{index + 1}</span>
-            </div>
-            <span className="trending-title">{card.title}</span>
-            <span className="trending-meta">
-              {card.year ?? "—"} · {activeKind === "anime" ? "动漫" : card.mediaType === "movie" ? "电影" : "剧集"}
-            </span>
-          </Link>
-        ))}
+        {cards.map((card, index) => {
+          const posterUrl = tmdbImageUrl(card.posterPath, "w342");
+          const badge = badges.get(trendingIdentityKey(card.mediaType, card.tmdbId));
+          const detailType = activeKind === "anime" ? "anime" : card.mediaType;
+          return (
+            <Link
+              key={`${card.mediaType}_${card.tmdbId}`}
+              className="trending-card"
+              href={showHref(card.tmdbId, "search", storageId, detailType)}
+            >
+              <div className="trending-poster">
+                {posterUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={posterUrl} alt="" loading="lazy" />
+                ) : (
+                  <Film size={24} aria-hidden />
+                )}
+                <span className="trending-rank">#{index + 1}</span>
+                {badge ? (
+                  <span className={`trending-badge hub-badge tone-${badge.tone}`}>
+                    {badge.label}
+                  </span>
+                ) : null}
+              </div>
+              <span className="trending-title">{card.title}</span>
+              <span className="trending-meta">
+                {card.year ?? "—"} · {activeKind === "anime" ? "动漫" : card.mediaType === "movie" ? "电影" : "剧集"}
+              </span>
+            </Link>
+          );
+        })}
       </div>
     </section>
   );

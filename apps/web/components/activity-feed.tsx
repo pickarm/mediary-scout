@@ -29,8 +29,8 @@ import type {
   PostgresActivityPage,
 } from "@media-track/workflow/activity-query";
 import { useLibraryProgress, useLibraryProgressRefresh } from "./library-progress-provider";
+import { tmdbImageUrl } from "../lib/tmdb-image";
 
-const POSTER = "https://image.tmdb.org/t/p/w185";
 const EMPTY_SEEN: ReadonlySet<string> = new Set<string>();
 
 /**
@@ -461,9 +461,10 @@ export function ActivityFeed({
 }
 
 function poster(posterPath: string | null, title: string, tone: string) {
-  return posterPath ? (
+  const posterUrl = tmdbImageUrl(posterPath, "w185");
+  return posterUrl ? (
     // eslint-disable-next-line @next/next/no-img-element
-    <img className="act-poster" src={`${POSTER}${posterPath}`} alt="" loading="lazy" />
+    <img className="act-poster" src={posterUrl} alt="" loading="lazy" />
   ) : (
     <span className={`act-poster act-poster-fallback tone-${tone}`}>{title.slice(0, 2)}</span>
   );

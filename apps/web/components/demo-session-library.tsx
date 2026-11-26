@@ -3,6 +3,7 @@
 import { Check, LoaderCircle } from "lucide-react";
 import { isDemoModeClient } from "../lib/demo-mode";
 import { demoInProgressLibraryCards } from "../lib/demo-session";
+import { tmdbImageUrl } from "../lib/tmdb-image";
 import { useDemoAcquisitions, useDemoInProgress } from "../lib/use-demo-session";
 
 /**
@@ -39,7 +40,9 @@ function DemoSessionLibraryInner() {
             <h2>获取中 {acquiring.length}</h2>
           </div>
           <div className="poster-row">
-            {acquiring.map((e) => (
+            {acquiring.map((e) => {
+              const posterUrl = tmdbImageUrl(e.posterPath, "w342");
+              return (
               <div
                 className="wall-card is-loading"
                 aria-disabled
@@ -47,9 +50,9 @@ function DemoSessionLibraryInner() {
                 title="获取中，完成后可进入"
               >
                 <span className="wall-poster">
-                  {e.posterPath ? (
+                  {posterUrl ? (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img src={`https://image.tmdb.org/t/p/w342${e.posterPath}`} alt="" loading="lazy" />
+                    <img src={posterUrl} alt="" loading="lazy" />
                   ) : (
                     <span className="poster-fallback">{e.title.slice(0, 4)}</span>
                   )}
@@ -63,7 +66,8 @@ function DemoSessionLibraryInner() {
                   <span>{e.year} · 正在获取</span>
                 </span>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       ) : null}
@@ -73,12 +77,14 @@ function DemoSessionLibraryInner() {
             <h2>本次演示获取 {entries.length}</h2>
           </div>
           <div className="poster-row">
-            {entries.map((e) => (
+            {entries.map((e) => {
+              const posterUrl = tmdbImageUrl(e.posterPath, "w342");
+              return (
           <div className="wall-card" key={`${e.type}_${e.tmdbId}`} title="本次演示获取（仅本次浏览）">
             <span className="wall-poster">
-              {e.posterPath ? (
+              {posterUrl ? (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={`https://image.tmdb.org/t/p/w342${e.posterPath}`} alt="" loading="lazy" />
+                <img src={posterUrl} alt="" loading="lazy" />
               ) : (
                 <span className="poster-fallback">{e.title.slice(0, 4)}</span>
               )}
@@ -93,7 +99,8 @@ function DemoSessionLibraryInner() {
               <span>{e.year} · 已获取</span>
             </span>
           </div>
-        ))}
+              );
+            })}
           </div>
         </div>
       ) : null}

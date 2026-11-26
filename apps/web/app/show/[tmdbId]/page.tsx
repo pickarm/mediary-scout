@@ -1,8 +1,13 @@
 import Link from "next/link";
 import { connection } from "next/server";
 import { Suspense, cache, type ReactNode } from "react";
-import { TriangleAlert } from "lucide-react";
-import { formatByteSize, isMovieUnreleased, type EpisodeDisplayState } from "@media-track/workflow";
+import { Star, TriangleAlert, User } from "lucide-react";
+import {
+  formatByteSize,
+  isMovieUnreleased,
+  type EpisodeDisplayState,
+  type TmdbCastMember,
+} from "@media-track/workflow";
 import { AcquiringPoller } from "../../../components/acquiring-poller";
 import { AcquisitionLockProvider } from "../../../components/acquisition-lock";
 import { AppSidebar } from "../../../components/app-sidebar";
@@ -21,6 +26,7 @@ import { AgentMemoryNotes } from "../../../components/agent-memory-panel";
 import { UserMessageThread } from "../../../components/user-message-thread";
 import { isDemoMode } from "../../../lib/demo-mode";
 import type { DemoAcquisitionEntry } from "../../../lib/demo-session";
+import { tmdbImageUrl } from "../../../lib/tmdb-image";
 import {
   getDetailView,
   type MovieHubView,
@@ -183,6 +189,20 @@ function TvHub({
   backHref: string;
 }) {
   const badge = aggregateBadge[view.aggregate];
+  const backdropUrl = tmdbImageUrl(view.backdropPath, "w1280");
+  const posterUrl = tmdbImageUrl(view.posterPath, "w342");
+  const ratingLabel =
+    typeof view.voteAverage === "number" && view.voteAverage > 0
+      ? view.voteAverage.toFixed(1)
+      : null;
+  const tvAttributes = [
+    `${view.seasons.length} 季`,
+    view.runtime ? `单集约 ${view.runtime} 分钟` : null,
+    view.originalTitle && view.originalTitle !== view.title ? view.originalTitle : null,
+    view.creators && view.creators.length > 0 ? `主创：${view.creators.join(" / ")}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   // The message card's episode picker: every episode of a tracked season in the library.
   const libraryEpisodes = view.seasons
     .filter((season) => season.tracked)
@@ -194,20 +214,20 @@ function TvHub({
     <section className="title-hub title-hub-immersive">
       {/* Backdrop clipped to hub-hero only — seasons stay on plain page bg. */}
       <div className="hub-hero">
-        {view.backdropPath ? (
+        {backdropUrl ? (
           <div
             className="hub-backdrop"
-            style={{ backgroundImage: `url(https://image.tmdb.org/t/p/w1280${view.backdropPath})` }}
+            style={{ backgroundImage: `url(${backdropUrl})` }}
             aria-hidden
           />
         ) : null}
         <BackLink label={backLabel} fallbackHref={backHref} />
       <header className="hub-header">
         <div className="hub-poster">
-          {view.posterPath ? (
+          {posterUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
-              src={`https://image.tmdb.org/t/p/w342${view.posterPath}`}
+              src={posterUrl}
               alt={`${view.title} 海报`}
             />
           ) : (
@@ -218,24 +238,33 @@ function TvHub({
           {/* 缺集 and 在更 are orthogonal: a partial title whose latest season is
               still releasing shows 追更中 alongside 部分入库 (斗破苍穹) — side by
               side in a row, not stacked. */}
-          {badge ? (
+          {badge || ratingLabel ? (
             <div className="hub-badges">
-              <span className={`hub-badge tone-${badge.tone}`}>{badge.label}</span>
-              {view.airing && view.aggregate === "partial" ? (
+              {badge ? <span className={`hub-badge tone-${badge.tone}`}>{badge.label}</span> : null}
+              {badge && view.airing && view.aggregate === "partial" ? (
                 <span className="hub-badge tone-indigo">追更中</span>
               ) : null}
-              <SwapBadge tmdbId={view.tmdbId} mediaType="tv" storageId={storageId} />
+              {badge ? <SwapBadge tmdbId={view.tmdbId} mediaType="tv" storageId={storageId} /> : null}
+              {ratingLabel ? (
+                <span className="hub-badge hub-rating-badge" title="TMDB 评分">
+                  <Star size={11} aria-hidden /> {ratingLabel}
+                </span>
+              ) : null}
             </div>
           ) : null}
           <h1>
             {view.title} <span className="hub-year">({view.year})</span>
           </h1>
-          <p className="hub-attributes">
-            {view.seasons.length} 季
-            {view.originalTitle && view.originalTitle !== view.title
-              ? ` · ${view.originalTitle}`
-              : ""}
-          </p>
+          <p className="hub-attributes">{tvAttributes}</p>
+          {view.genreNames && view.genreNames.length > 0 ? (
+            <div className="hub-genre-tags">
+              {view.genreNames.map((genre) => (
+                <span className="hub-genre-tag" key={genre}>
+                  {genre}
+                </span>
+              ))}
+            </div>
+          ) : null}
           <div className="hub-actions">
             {/* Single-season titles get their button on the season row. */}
             {view.untrackedSeasonNumbers.length > 0 && view.seasons.length > 1 ? (
@@ -267,6 +296,7 @@ function TvHub({
 
       <div className="hub-body">
         {view.overview ? <MovieSynopsis overview={view.overview} /> : null}
+        <CastStrip cast={view.cast} basePath={basePath} />
       </div>
 
       <section className="hub-seasons" aria-label="季列表">
@@ -313,6 +343,19 @@ function MovieHub({
   backHref: string;
 }) {
   const meta = movieStateMeta[view.state];
+  const backdropUrl = tmdbImageUrl(view.backdropPath, "w1280");
+  const posterUrl = tmdbImageUrl(view.posterPath, "w342");
+  const ratingLabel =
+    typeof view.voteAverage === "number" && view.voteAverage > 0
+      ? view.voteAverage.toFixed(1)
+      : null;
+  const movieAttributes = [
+    "电影",
+    view.runtime ? `${view.runtime} 分钟` : null,
+    view.directors && view.directors.length > 0 ? `导演：${view.directors.join(" / ")}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   const activityHref = storageId ? `/activity?w=${encodeURIComponent(storageId)}` : "/activity";
   const nowIso = new Date().toISOString();
   const unreleased =
@@ -336,6 +379,10 @@ function MovieHub({
     }
   }
   if (view.releaseDate) chips.push({ label: "上映", value: formatMovieDate(view.releaseDate) });
+  if (view.runtime) chips.push({ label: "片长", value: `${view.runtime} 分钟` });
+  if (view.directors && view.directors.length > 0) {
+    chips.push({ label: "导演", value: view.directors.join(" / ") });
+  }
   if (view.originalTitle && view.originalTitle !== view.title) {
     chips.push({ label: "原名", value: view.originalTitle });
   }
@@ -348,19 +395,19 @@ function MovieHub({
       <section className="title-hub title-hub-immersive">
         {/* Backdrop lives inside hub-hero only — must NOT cover synopsis body. */}
         <div className="hub-hero">
-          {view.backdropPath ? (
+          {backdropUrl ? (
             <div
               className="hub-backdrop"
-              style={{ backgroundImage: `url(https://image.tmdb.org/t/p/w1280${view.backdropPath})` }}
+              style={{ backgroundImage: `url(${backdropUrl})` }}
               aria-hidden
             />
           ) : null}
           <BackLink label={backLabel} fallbackHref={backHref} />
           <header className="hub-header">
             <div className="hub-poster">
-              {view.posterPath ? (
+              {posterUrl ? (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={`https://image.tmdb.org/t/p/w342${view.posterPath}`} alt={`${view.title} 海报`} />
+                <img src={posterUrl} alt={`${view.title} 海报`} />
               ) : (
                 <span className="poster-fallback">{view.title.slice(0, 4)}</span>
               )}
@@ -371,11 +418,25 @@ function MovieHub({
                 {view.state !== "untracked" ? (
                   <SwapBadge tmdbId={view.tmdbId} mediaType="movie" storageId={storageId} />
                 ) : null}
+                {ratingLabel ? (
+                  <span className="hub-badge hub-rating-badge" title="TMDB 评分">
+                    <Star size={11} aria-hidden /> {ratingLabel}
+                  </span>
+                ) : null}
               </div>
               <h1>
                 {view.title} <span className="hub-year">({view.year})</span>
               </h1>
-              <p className="hub-attributes">电影</p>
+              <p className="hub-attributes">{movieAttributes}</p>
+              {view.genreNames && view.genreNames.length > 0 ? (
+                <div className="hub-genre-tags">
+                  {view.genreNames.map((genre) => (
+                    <span className="hub-genre-tag" key={genre}>
+                      {genre}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
               <div className="hub-actions">
                 {view.state === "untracked" ? (
                   <RequestTrackButton
@@ -413,6 +474,7 @@ function MovieHub({
               ))}
             </div>
           ) : null}
+          <CastStrip cast={view.cast} basePath={basePath} />
         </div>
         {view.state !== "untracked" ? (
           <TitleMessageSection tmdbId={view.tmdbId} mediaType="movie" storageId={storageId} hasFile={view.obtained} episodes={[]} />
@@ -421,6 +483,41 @@ function MovieHub({
       </section>
     </SwapKeepProvider>
     </AcquisitionLockProvider>
+  );
+}
+
+function CastStrip({ cast, basePath }: { cast?: TmdbCastMember[] | undefined; basePath: string }) {
+  if (!cast || cast.length === 0) {
+    return null;
+  }
+  return (
+    <section className="hub-cast" aria-label="演职员">
+      <h2 className="hub-cast-heading">演职员</h2>
+      <div className="hub-cast-strip">
+        {cast.map((member) => {
+          const avatarUrl = tmdbImageUrl(member.profilePath, "w185");
+          return (
+            <Link
+              key={member.id}
+              className="hub-cast-card"
+              href={`${basePath}?q=${encodeURIComponent(member.name)}`}
+              title={member.character ? `${member.name} · 饰 ${member.character}` : member.name}
+            >
+              <span className="hub-cast-avatar">
+                {avatarUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={avatarUrl} alt={member.name} loading="lazy" />
+                ) : (
+                  <User size={22} aria-hidden />
+                )}
+              </span>
+              <strong className="hub-cast-name">{member.name}</strong>
+              {member.character ? <span className="hub-cast-role">{member.character}</span> : null}
+            </Link>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -545,7 +642,8 @@ function SeasonRow({
             const firstDrive = episode.driveBadges?.[0];
             const stateLabel =
               episode.obtained && firstDrive ? `${baseLabel} · ${firstDrive.label}` : baseLabel;
-            const tooltip =
+            const epCode = episode.episodeCode.replace(/^S\d+/, "");
+            const driveInfo =
               episode.obtained && episode.driveBadges && episode.driveBadges.length > 0
                 ? episode.driveBadges
                     .map((d) =>
@@ -558,14 +656,22 @@ function SeasonRow({
                         .join(" · "),
                     )
                     .join(" / ")
-                : undefined;
+                : null;
+            const tooltip =
+              [epCode, episode.name ?? null, episode.airDate ?? null, driveInfo]
+                .filter(Boolean)
+                .join(" · ") || undefined;
             // A 待换 cell is a client piece: 「不换了」 on the message card restores it at once.
             return swap.has(episode.episodeCode) ? (
               <SwapEpisodeCell key={episode.episodeCode} code={episode.episodeCode} stateClass={stateClass} stateLabel={stateLabel} />
             ) : (
               <div className={`episode-cell ${stateClass}`} key={episode.episodeCode} title={tooltip}>
-                <strong>{episode.episodeCode.replace(/^S\d+/, "")}</strong>
-                <span>{stateLabel}</span>
+                <div className="episode-cell-head">
+                  <strong>{epCode}</strong>
+                  <span className="episode-cell-state">{stateLabel}</span>
+                </div>
+                {episode.name ? <span className="episode-cell-title">{episode.name}</span> : null}
+                {episode.airDate ? <span className="episode-cell-date">{episode.airDate}</span> : null}
               </div>
             );
           })}

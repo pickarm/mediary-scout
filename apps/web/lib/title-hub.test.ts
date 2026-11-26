@@ -117,3 +117,179 @@ describe("getInProgressTitles", () => {
     expect(inProgress.find((t) => t.tmdbId === 7)).toMatchObject({ title: "Fresh", posterPath: "/p7.jpg" });
   });
 });
+
+describe("getDetailView 定向查询与扩展元数据透传", () => {
+  let repo: InMemoryWorkflowRepository;
+
+  beforeEach(() => {
+    repo = new InMemoryWorkflowRepository();
+    vi.resetModules();
+  });
+
+  it("电影详情优先按主限定向查询，不触发全表 listTrackedSeasonStates", async () => {
+    const movieTitle: MediaTitle = {
+      id: "tmdb_movie_27205",
+      tmdbId: 27205,
+      type: "movie",
+      title: "盗梦空间",
+      originalTitle: "Inception",
+      year: 2010,
+      aliases: [],
+      posterPath: "/m.jpg",
+      backdropPath: "/mb.jpg",
+      releaseDate: "2010-07-16",
+    };
+    const movieSeason: TrackedSeason = {
+      id: "tmdb_movie_27205_movie",
+      mediaTitleId: movieTitle.id,
+      seasonNumber: 1,
+      status: "completed",
+      qualityPreference: "4K",
+      storageDirectoryId: "dir_m",
+      totalEpisodes: 1,
+      latestAiredEpisode: 1,
+      latestAiredSource: "metadata",
+    };
+    await saveRun(repo, movieTitle, movieSeason, {
+      id: "run_m",
+      kind: "movie_init",
+      status: "succeeded",
+      obtained: true,
+    });
+
+    const listSpy = vi.spyOn(repo, "listTrackedSeasonStates");
+    const getSpy = vi.spyOn(repo, "getTrackedSeasonState");
+
+    vi.doMock("./workflow-runtime", async () => {
+      const actual = await vi.importActual<typeof import("./workflow-runtime")>("./workflow-runtime");
+      return {
+        ...actual,
+        getWorkflowRepository: () => repo,
+        getActiveWorkspaceScope: async () => scope,
+        movieTargetFromTmdbId: async () => ({
+          title: movieTitle,
+          keyword: "盗梦空间",
+          voteAverage: 8.8,
+          genreNames: ["科幻", "动作"],
+          runtime: 148,
+          cast: [{ id: 1, name: "莱昂纳多", character: "Cobb", profilePath: "/leo.jpg" }],
+          directors: ["克里斯托弗·诺兰"],
+        }),
+      };
+    });
+
+    const hub = await import("./title-hub");
+    const view = await hub.getDetailView(27205, "cs_primary", "movie");
+
+    expect(listSpy).not.toHaveBeenCalled();
+    expect(getSpy).toHaveBeenCalledWith("tmdb_movie_27205_movie", scope);
+    expect(view).toMatchObject({
+      kind: "movie",
+      tmdbId: 27205,
+      state: "acquired",
+      voteAverage: 8.8,
+      genreNames: ["科幻", "动作"],
+      runtime: 148,
+      directors: ["克里斯托弗·诺兰"],
+      cast: [{ id: 1, name: "莱昂纳多", character: "Cobb", profilePath: "/leo.jpg" }],
+    });
+  });
+
+  it("剧集详情在有 TMDB 季元数据与单盘 scope 时定向查季，并透传演职员与单集标题日期", async () => {
+    const prevProvider = process.env.MEDIA_TRACK_SEARCH_PROVIDER;
+    process.env.MEDIA_TRACK_SEARCH_PROVIDER = "tmdb";
+    try {
+      const tvTitle: MediaTitle = {
+        id: "tmdb_tv_1396",
+        tmdbId: 1396,
+        type: "tv",
+        title: "绝命毒师",
+        originalTitle: "Breaking Bad",
+        year: 2008,
+        aliases: ["Breaking Bad"],
+        posterPath: "/bb.jpg",
+        backdropPath: "/bbb.jpg",
+      };
+      await saveRun(repo, tvTitle, season(tvTitle, 1), {
+        id: "run_bb",
+        kind: "type2_init",
+        status: "succeeded",
+        obtained: true,
+      });
+
+      const listSpy = vi.spyOn(repo, "listTrackedSeasonStates");
+      const getSpy = vi.spyOn(repo, "getTrackedSeasonState");
+
+      vi.doMock("./tmdb-cache", async () => {
+        const actual = await vi.importActual<typeof import("./tmdb-cache")>("./tmdb-cache");
+        return {
+          ...actual,
+          PostgresMediaSearchCache: class extends actual.InMemoryJsonCache {
+            override async getJson<T>(key: string): Promise<T | null> {
+              if (key === "series-target:1396") {
+                return {
+                  title: tvTitle,
+                  keyword: "绝命毒师",
+                  voteAverage: 9.5,
+                  genreNames: ["剧情", "犯罪"],
+                  runtime: 47,
+                  cast: [{ id: 17419, name: "布莱恩·科兰斯顿", character: "Walter White", profilePath: "/ww.jpg" }],
+                  creators: ["文斯·吉里根"],
+                  seasons: [
+                    {
+                      seasonNumber: 1,
+                      totalEpisodes: 2,
+                      latestAiredEpisode: 2,
+                      episodes: [
+                        { episodeNumber: 1, name: "试播集", airDate: "2008-01-20" },
+                        { episodeNumber: 2, name: "袋中猫", airDate: "2008-01-27" },
+                      ],
+                    },
+                  ],
+                } as T;
+              }
+              return null;
+            }
+          },
+        };
+      });
+      vi.doMock("./workflow-runtime", async () => {
+        const actual = await vi.importActual<typeof import("./workflow-runtime")>("./workflow-runtime");
+        return {
+          ...actual,
+          postgresConnectionString: () => "postgres://test:test@localhost:5432/test",
+          getWorkflowRepository: () => repo,
+          getActiveWorkspaceScope: async () => scope,
+        };
+      });
+
+      const hub = await import("./title-hub");
+      const view = await hub.getDetailView(1396, "cs_primary", "tv");
+
+      expect(listSpy).not.toHaveBeenCalled();
+      expect(getSpy).toHaveBeenCalledWith("tmdb_tv_1396_s1", scope);
+      expect(view).toMatchObject({
+        kind: "tv",
+        tmdbId: 1396,
+        voteAverage: 9.5,
+        genreNames: ["剧情", "犯罪"],
+        runtime: 47,
+        creators: ["文斯·吉里根"],
+        cast: [{ id: 17419, name: "布莱恩·科兰斯顿", character: "Walter White", profilePath: "/ww.jpg" }],
+      });
+      if (view?.kind === "tv") {
+        expect(view.seasons[0]?.episodes[0]).toMatchObject({
+          episodeCode: "S01E01",
+          name: "试播集",
+          airDate: "2008-01-20",
+        });
+      }
+    } finally {
+      if (prevProvider === undefined) {
+        delete process.env.MEDIA_TRACK_SEARCH_PROVIDER;
+      } else {
+        process.env.MEDIA_TRACK_SEARCH_PROVIDER = prevProvider;
+      }
+    }
+  });
+});

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { LoaderCircle } from "lucide-react";
 import type { ActivityActiveRunSummary, PostgresActivityPage } from "@media-track/workflow/activity-query";
 import type { LibraryProgressMediaType } from "../lib/library-progress-client";
+import { tmdbImageUrl } from "../lib/tmdb-image";
 
 export interface LibraryAcquiringTitle {
   type: LibraryProgressMediaType;
@@ -105,11 +106,12 @@ export function LibraryAcquiringRow({
 }
 
 function LibraryAcquiringCard({ title }: { title: LibraryAcquiringTitle }) {
+  const posterUrl = tmdbImageUrl(title.posterPath, "w342");
   return <div className="wall-card is-loading" aria-disabled="true" title="获取中，完成后可进入">
     <span className="wall-poster">
-      {title.posterPath ? (
+      {posterUrl ? (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={`https://image.tmdb.org/t/p/w342${title.posterPath}`} alt="" loading="lazy" />
+        <img src={posterUrl} alt="" loading="lazy" />
       ) : <span className="poster-fallback">{title.title.slice(0, 4)}</span>}
       <span className="wall-loading-overlay">
         <LoaderCircle size={20} className="spin" aria-hidden />

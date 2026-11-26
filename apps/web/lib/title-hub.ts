@@ -1,16 +1,21 @@
 import {
   createTmdbMetadataProvider,
+  episodeNumberFromCode,
   getStorageBrand,
   getTrackedSeasonStatusView,
   isMovieUnreleased,
   isRegisteredStorageProvider,
   isUserVisibleWorkflowKind,
+  prepareMovieTarget,
   prepareSeriesTarget,
   queueSeriesInitialization,
   queueTrackingInitialization,
   type EpisodeStatusCell,
   type MediaTitle,
+  type PreparedMovieTarget,
   type PreparedSeriesTarget,
+  type TmdbCastMember,
+  type TrackedSeasonState,
 } from "@media-track/workflow";
 import { findDemoCandidateByTmdbId } from "./demo-candidates";
 import {
@@ -45,6 +50,12 @@ export interface EpisodeDriveBadge {
   quality: string | null;
 }
 
+export interface TitleHubEpisode extends EpisodeStatusCell {
+  driveBadges?: EpisodeDriveBadge[];
+  name?: string | null;
+  airDate?: string | null;
+}
+
 export interface TitleHubSeason {
   seasonNumber: number;
   totalEpisodes: number;
@@ -55,7 +66,7 @@ export interface TitleHubSeason {
   obtainedCount: number;
   missingAiredCount: number;
   trackedSeasonId: string | null;
-  episodes: Array<EpisodeStatusCell & { driveBadges?: EpisodeDriveBadge[] }>;
+  episodes: TitleHubEpisode[];
 }
 
 export type { TitleAggregateState };
@@ -69,6 +80,11 @@ export interface TitleHubView {
   overview: string;
   posterPath: string | null;
   backdropPath: string | null;
+  voteAverage?: number | null;
+  genreNames?: string[];
+  runtime?: number | null;
+  cast?: TmdbCastMember[];
+  creators?: string[];
   aggregate: TitleAggregateState;
   /** Orthogonal to `aggregate`: any tracked season still airing. A partial title
    *  that is also airing shows BOTH 部分入库 and 追更中. */
@@ -90,6 +106,11 @@ export interface MovieHubView {
   posterPath: string | null;
   backdropPath: string | null;
   releaseDate: string | null;
+  voteAverage?: number | null;
+  genreNames?: string[];
+  runtime?: number | null;
+  cast?: TmdbCastMember[];
+  directors?: string[];
   /** acquired=已入库, reserved=未上映已预定, acquiring=获取中, missing=已上映未获取, untracked=未追踪. */
   state: "acquired" | "reserved" | "acquiring" | "missing" | "untracked";
   acquiring: boolean;
@@ -124,6 +145,30 @@ function getDurableTargetCache(): DurableJsonCache {
   return durableTargetCache;
 }
 
+async function loadTargetWithCache<T>(
+  cacheKey: string,
+  logLabel: string,
+  durable: DurableJsonCache,
+  fetchTarget: () => Promise<T | null>,
+): Promise<T | null> {
+  const fromDb = await durable.getJson<T>(cacheKey);
+  if (fromDb) return fromDb;
+  let value: T | null;
+  try {
+    value = await fetchTarget();
+  } catch {
+    return null;
+  }
+  try {
+    await durable.setJson(cacheKey, value, SERIES_TARGET_TTL_MS);
+  } catch (error) {
+    console.error(
+      `[media-track] ${logLabel} cache write failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  return value;
+}
+
 /** Live TMDB read, then a best-effort durable write. A write failure is logged
  *  and the prepared target is still returned, so the in-process memo can keep it. */
 export async function loadSeriesTargetWithCache(
@@ -131,22 +176,12 @@ export async function loadSeriesTargetWithCache(
   durable: DurableJsonCache,
   fetchTarget: (tmdbId: number) => Promise<PreparedSeriesTarget | null>,
 ): Promise<PreparedSeriesTarget | null> {
-  const fromDb = await durable.getJson<PreparedSeriesTarget>(`series-target:${tmdbId}`);
-  if (fromDb) return fromDb;
-  let value: PreparedSeriesTarget | null;
-  try {
-    value = await fetchTarget(tmdbId);
-  } catch {
-    return null;
-  }
-  try {
-    await durable.setJson(`series-target:${tmdbId}`, value, SERIES_TARGET_TTL_MS);
-  } catch (error) {
-    console.error(
-      `[media-track] series-target cache write failed for ${tmdbId}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  return value;
+  return loadTargetWithCache(
+    `series-target:${tmdbId}`,
+    `series-target(${tmdbId})`,
+    durable,
+    () => fetchTarget(tmdbId),
+  );
 }
 
 async function loadSeriesTarget(tmdbId: number): Promise<PreparedSeriesTarget | null> {
@@ -155,7 +190,22 @@ async function loadSeriesTarget(tmdbId: number): Promise<PreparedSeriesTarget | 
       tmdbId: id,
       qualityPreference: "4K",
       metadataProvider: createTmdbMetadataProvider(await getTmdbAccesses(getAccountScopedSettings(await getCurrentAccountId()))),
+      includeEpisodes: true,
     }),
+  );
+}
+
+async function loadMovieTarget(tmdbId: number): Promise<PreparedMovieTarget | null> {
+  return loadTargetWithCache(
+    `movie-target:${tmdbId}`,
+    `movie-target(${tmdbId})`,
+    getDurableTargetCache(),
+    async () =>
+      prepareMovieTarget({
+        tmdbId,
+        qualityPreference: "4K",
+        metadataProvider: createTmdbMetadataProvider(await getTmdbAccesses(getAccountScopedSettings(await getCurrentAccountId()))),
+      }),
   );
 }
 
@@ -164,6 +214,19 @@ const seriesTargetMemo = createTtlMemo<PreparedSeriesTarget>({
   failureTtlMs: SERIES_TARGET_MISS_TTL_MS,
   load: loadSeriesTarget,
 });
+
+const movieTargetMemo = createTtlMemo<PreparedMovieTarget>({
+  successTtlMs: SERIES_TARGET_TTL_MS,
+  failureTtlMs: SERIES_TARGET_MISS_TTL_MS,
+  load: loadMovieTarget,
+});
+
+async function movieTargetFor(tmdbId: number): Promise<PreparedMovieTarget | null> {
+  if (process.env.MEDIA_TRACK_SEARCH_PROVIDER === "tmdb") {
+    return movieTargetMemo(tmdbId);
+  }
+  return movieTargetFromTmdbId(tmdbId);
+}
 
 /**
  * Season metadata + artwork for a title, independent of tracking state.
@@ -222,11 +285,24 @@ export async function getTitleHubView(tmdbId: number, storageId?: string): Promi
   const repository = getWorkflowRepository();
   const scope = await getActiveWorkspaceScope(storageId);
   await ensureDemoSeeded(repository);
-  const trackedStates = (await repository.listTrackedSeasonStates(scope)).filter(
-    // tv AND anime are season-shaped detail pages; only movies are excluded.
-    (state) => state.title.tmdbId === tmdbId && state.title.type !== "movie",
-  );
   const target = await seriesTargetFor(tmdbId);
+  // 有已知分季列表且处于单盘作用域时，按分季主键定向查库，避免无关作品全表扫描。
+  const trackedStates =
+    target !== null && target.seasons.length > 0 && scope.connectedStorageId !== null
+      ? (
+          await Promise.all(
+            target.seasons.map((season) =>
+              repository.getTrackedSeasonState(`tmdb_tv_${tmdbId}_s${season.seasonNumber}`, scope),
+            ),
+          )
+        ).filter(
+          (state): state is TrackedSeasonState =>
+            state !== null && state.title.tmdbId === tmdbId && state.title.type !== "movie",
+        )
+      : (await repository.listTrackedSeasonStates(scope)).filter(
+          // tv AND anime are season-shaped detail pages; only movies are excluded.
+          (state) => state.title.tmdbId === tmdbId && state.title.type !== "movie",
+        );
   if (trackedStates.length === 0 && target === null) {
     return null;
   }
@@ -244,6 +320,11 @@ export async function getTitleHubView(tmdbId: number, storageId?: string): Promi
     overview: dbTitle?.overview ?? target?.title.overview ?? "",
     posterPath: dbTitle?.posterPath ?? target?.title.posterPath ?? null,
     backdropPath: dbTitle?.backdropPath ?? target?.title.backdropPath ?? null,
+    voteAverage: target?.voteAverage ?? null,
+    genreNames: target?.genreNames ?? [],
+    runtime: target?.runtime ?? null,
+    cast: target?.cast ?? [],
+    creators: target?.creators ?? [],
   };
 
   // Deduplicate tracked states by seasonNumber: when multiple drives track the same
@@ -271,6 +352,9 @@ export async function getTitleHubView(tmdbId: number, storageId?: string): Promi
   for (const seasonNumber of seasonNumbers) {
     const tracked = trackedBySeason.get(seasonNumber);
     const targetSeason = target?.seasons.find((season) => season.seasonNumber === seasonNumber);
+    const episodeMetaByNumber = new Map(
+      (targetSeason?.episodes ?? []).map((ep) => [ep.episodeNumber, ep]),
+    );
     if (tracked) {
       const seasonGroup = statesBySeason.get(seasonNumber) ?? [tracked];
       const view = await getTrackedSeasonStatusView({
@@ -278,7 +362,7 @@ export async function getTitleHubView(tmdbId: number, storageId?: string): Promi
         trackedSeasonId: tracked.season.id,
         scope,
       });
-      const episodesWithBadges = (view?.episodes ?? []).map((ep) => {
+      const episodesWithBadges: TitleHubEpisode[] = (view?.episodes ?? []).map((ep) => {
         const driveBadges: EpisodeDriveBadge[] = (ep.drives ?? []).map((d) => {
           const metaInfo = storageMetaById.get(d.storageId);
           return {
@@ -288,7 +372,13 @@ export async function getTitleHubView(tmdbId: number, storageId?: string): Promi
             quality: d.quality,
           };
         });
-        return driveBadges.length > 0 ? { ...ep, driveBadges } : ep;
+        const epNum = episodeNumberFromCode(ep.episodeCode);
+        const epMeta = epNum !== null ? episodeMetaByNumber.get(epNum) : undefined;
+        return {
+          ...ep,
+          ...(driveBadges.length > 0 ? { driveBadges } : {}),
+          ...(epMeta ? { name: epMeta.name, airDate: epMeta.airDate } : {}),
+        };
       });
       const totalEpisodes = tracked.season.totalEpisodes;
       const latestAiredEpisode = tracked.season.latestAiredEpisode;
@@ -356,20 +446,40 @@ export async function getDetailView(
   storageId?: string,
   typeHint?: "movie" | "tv" | "anime",
 ): Promise<DetailView | null> {
+  // 明确传入 tv/anime 时直接走剧集视图，避免先做一次无关的电影查询或全表扫描。
+  if (typeHint === "tv" || typeHint === "anime") {
+    return getTitleHubView(tmdbId, storageId);
+  }
+
   const repository = getWorkflowRepository();
   const scope = await getActiveWorkspaceScope(storageId);
   await ensureDemoSeeded(repository);
   const now = new Date().toISOString();
 
-  const trackedForTitle = (await repository.listTrackedSeasonStates(scope)).filter(
-    (state) => state.title.tmdbId === tmdbId,
-  );
-  const movieStates = trackedForTitle.filter((state) => state.title.type === "movie");
+  const movieTrackedSeasonId = `tmdb_movie_${tmdbId}_movie`;
+  const canTargetedMovieLookup =
+    scope.connectedStorageId !== null || typeof repository.obtainedEpisodesForSeason === "function";
+  const movieStates = canTargetedMovieLookup
+    ? await repository
+        .getTrackedSeasonState(movieTrackedSeasonId, scope)
+        .then((state) => (state && state.title.type === "movie" ? [state] : []))
+    : (await repository.listTrackedSeasonStates(scope)).filter(
+        (state) => state.title.tmdbId === tmdbId && state.title.type === "movie",
+      );
+
   if (movieStates.length > 0) {
     const movieState = movieStates[0]!;
-    const acquiring = (await repository.listActiveWorkflowRuns(scope)).some(
-      (snapshot) => snapshot.title.tmdbId === tmdbId && isUserVisibleWorkflowKind(snapshot.workflowRun.kind),
-    );
+    const [acquiring, movieTarget] = await Promise.all([
+      repository
+        .listActiveWorkflowRuns(scope)
+        .then((runs) =>
+          runs.some(
+            (snapshot) =>
+              snapshot.title.tmdbId === tmdbId && isUserVisibleWorkflowKind(snapshot.workflowRun.kind),
+          ),
+        ),
+      movieTargetFor(tmdbId),
+    ]);
     let obtained = movieStates.some((s) => s.episodes.some((episode) => episode.obtained));
     const driveBadges: EpisodeDriveBadge[] = [];
     if (repository.obtainedEpisodesForSeason) {
@@ -398,7 +508,14 @@ export async function getDetailView(
     }
     const reserved = isMovieUnreleased(movieState.title.releaseDate, now);
     const state = acquiring ? "acquiring" : reserved ? "reserved" : obtained ? "acquired" : "missing";
-    return movieHubViewFromTitle(movieState.title, state, acquiring, obtained, driveBadges);
+    return movieHubViewFromTitle(
+      movieState.title,
+      state,
+      acquiring,
+      obtained,
+      driveBadges,
+      movieTarget,
+    );
   }
 
   // Untracked title: TMDB's movie/tv id namespaces collide (movie 278 ≠ tv 278).
@@ -406,19 +523,16 @@ export async function getDetailView(
   // movie, resolve the MOVIE namespace FIRST — otherwise the season-shaped hub's
   // TMDB tv lookup spuriously matches an unrelated show with the same numeric id.
   const untrackedMovie = async (): Promise<DetailView | null> => {
-    const movieTarget = await movieTargetFromTmdbId(tmdbId);
+    const movieTarget = await movieTargetFor(tmdbId);
     if (!movieTarget) {
       return null;
     }
     // Untracked stays untracked even if unreleased — `reserved` means tracked + waiting.
-    return movieHubViewFromTitle(movieTarget.title, "untracked", false, false);
+    return movieHubViewFromTitle(movieTarget.title, "untracked", false, false, undefined, movieTarget);
   };
 
   if (typeHint === "movie") {
-    const movie = await untrackedMovie();
-    if (movie) {
-      return movie;
-    }
+    return untrackedMovie();
   }
 
   // Season-shaped (tv/anime) hub — same drive scope. Covers tracked tv + TMDB tv target.
@@ -437,6 +551,7 @@ function movieHubViewFromTitle(
   acquiring: boolean,
   obtained: boolean,
   driveBadges?: EpisodeDriveBadge[],
+  movieTarget?: PreparedMovieTarget | null,
 ): MovieHubView {
   return {
     kind: "movie",
@@ -448,6 +563,11 @@ function movieHubViewFromTitle(
     posterPath: title.posterPath ?? null,
     backdropPath: title.backdropPath ?? null,
     releaseDate: title.releaseDate ?? null,
+    voteAverage: movieTarget?.voteAverage ?? null,
+    genreNames: movieTarget?.genreNames ?? [],
+    runtime: movieTarget?.runtime ?? null,
+    cast: movieTarget?.cast ?? [],
+    directors: movieTarget?.directors ?? [],
     state,
     acquiring,
     obtained,
