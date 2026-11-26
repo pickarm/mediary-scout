@@ -46,6 +46,7 @@ integration("native preparation discovery and consume", () => {
     process.env.MEDIA_TRACK_STORAGE_ADAPTER = "115";
     process.env.PANSOU_BASE_URL = "https://pansou.invalid";
     pool = new pg.Pool({ connectionString: databaseUrl });
+    pool.on("error", () => {});
     await initializeWorkflowPostgresSchema(pool);
     await pool.query("INSERT INTO accounts(id,username,password_hash,is_owner,created_at) VALUES($1,$2,'',false,now()::text),($3,$4,'',false,now()::text)", [accountId, `runtime_${suffix}`, noGuangYaAccountId, `runtime_none_${suffix}`]);
     await insertStorage({ id: firstStorageId, accountId, provider: "guangya", providerUid: `ga1_${suffix}`, createdAt: "2026-11-01T00:00:00.000Z", payload: snakeStoragePayload("generation-1"), roots: true });

@@ -54,6 +54,7 @@ integration("PostgresMessagingStore", () => {
     const databaseUrl = new URL(adminConnectionString);
     databaseUrl.pathname = `/${databaseName}`;
     pool = new pg.Pool({ connectionString: databaseUrl.toString(), max: 4 });
+    pool.on("error", () => {});
     await pool.query(
       "CREATE TABLE account_settings (account_id text NOT NULL, key text NOT NULL, value text NOT NULL, PRIMARY KEY(account_id,key))",
     );

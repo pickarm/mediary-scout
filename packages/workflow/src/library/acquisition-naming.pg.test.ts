@@ -32,6 +32,7 @@ integration("F14b acquisition naming SQL", () => {
     const databaseUrl = new URL(adminConnectionString);
     databaseUrl.pathname = `/${databaseName}`;
     pool = new pg.Pool({ connectionString: databaseUrl.toString() });
+    pool.on("error", () => {});
     await initializeWorkflowPostgresSchema(pool);
     scanStore = new PostgresScanStore(pool);
   }, 30_000);

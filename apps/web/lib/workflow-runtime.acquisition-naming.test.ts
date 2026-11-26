@@ -151,6 +151,7 @@ integration("F14b runtime → runner → native guangya executor", () => {
     url.pathname = `/${databaseName}`;
     databaseUrl = url.toString();
     pool = new pg.Pool({ connectionString: databaseUrl });
+    pool.on("error", () => {});
     await initializeWorkflowPostgresSchema(pool);
     scanStore = new PostgresScanStore(pool);
     process.env.MEDIA_TRACK_POSTGRES_URL = databaseUrl;

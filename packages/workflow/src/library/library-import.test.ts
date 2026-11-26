@@ -26,6 +26,7 @@ integration("PostgresLibraryStore existing-media import", () => {
     const databaseUrl = new URL(adminConnectionString);
     databaseUrl.pathname = `/${databaseName}`;
     pool = new pg.Pool({ connectionString: databaseUrl.toString() });
+    pool.on("error", () => {});
     store = new PostgresLibraryStore(pool);
     await initializeWorkflowPostgresSchema(pool);
   }, 30_000);

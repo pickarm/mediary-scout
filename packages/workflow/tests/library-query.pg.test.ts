@@ -32,6 +32,7 @@ integration("PostgresLibraryQuery", () => {
     const databaseUrl = new URL(adminConnectionString);
     databaseUrl.pathname = `/${databaseName}`;
     pool = new pg.Pool({ connectionString: databaseUrl.toString() });
+    pool.on("error", () => {});
     await initializeWorkflowPostgresSchema(pool);
     await initializePostgresLibraryQueryIndexes(pool);
     await initializePostgresLibraryQueryIndexes(pool);

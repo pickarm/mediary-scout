@@ -10,6 +10,7 @@ export function getLibraryDatabasePool(): Pool {
       throw new Error("MEDIA_TRACK_POSTGRES_URL is required (the SQLite dev DB has been retired)");
     }
     pool = new Pool({ connectionString, max: 4, application_name: "mediary-library-api" });
+    pool.on("error", () => {});
   }
   return pool;
 }

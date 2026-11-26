@@ -22,6 +22,7 @@ describe.skipIf(!adminUrl)("message-to-native reservation transaction", () => {
     await admin.query(`CREATE DATABASE ${database}`);
     const url = new URL(adminUrl!); url.pathname = `/${database}`;
     pool = new pg.Pool({ connectionString: url.toString() });
+    pool.on("error", () => {});
     await initializeWorkflowPostgresSchema(pool);
     repository = new PostgresWorkflowRepository(pool);
     store = new PostgresMessagingStore(pool);

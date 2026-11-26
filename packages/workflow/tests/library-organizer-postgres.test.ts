@@ -19,6 +19,7 @@ describe.skipIf(!adminURL)("Postgres organization authorization (isolated databa
       const url = new URL(adminURL!);
       url.pathname = `/${dbName}`;
       testPool = new Pool({ connectionString:url.toString() });
+      testPool.on("error", () => {});
 
       // Use the provider registry and native connected_storages shape, then let
       // F04/F02 initialize their real schemas and foreign keys.

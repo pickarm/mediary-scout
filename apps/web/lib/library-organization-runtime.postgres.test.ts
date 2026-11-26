@@ -19,6 +19,7 @@ describe.skipIf(!adminURL)("F08c PostgreSQL runtime recovery with a fake cloud",
       await adminPool.query(`CREATE DATABASE ${dbName}`);
       const url=new URL(adminURL!); url.pathname=`/${dbName}`;
       pool=new Pool({connectionString:url.toString()});
+      pool.on("error", () => {});
       const provider=getStorageBrand("quark").provider;
       const scanStore=new PostgresScanStore(pool); await scanStore.ensureSchema();
       await pool.query("INSERT INTO connected_storages(id,account_id,provider,provider_uid,payload,created_at) VALUES('drive','acct',$1,'uid','{}'::jsonb,'now')",[provider]);

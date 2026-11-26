@@ -162,6 +162,7 @@ integration("F16 migration rehearsal and switch tooling", () => {
     copy.pathname = `/${databaseName}`;
     copyUrl = copy.toString();
     pool = new pg.Pool({ connectionString: copyUrl, application_name: "fork-migration-fixture" });
+    pool.on("error", () => {});
     await initializeWorkflowPostgresSchema(pool);
     await new PostgresMessagingStore(pool).ensureSchema();
     await seedFixture(pool, accountId, storageId);

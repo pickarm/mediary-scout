@@ -18,6 +18,7 @@ integration("PostgresActivityQuery", () => {
     await admin.query(`CREATE DATABASE "${dbName}"`);
     const dbUrl = new URL(adminUrl); dbUrl.pathname = `/${dbName}`;
     pool = new pg.Pool({ connectionString: dbUrl.toString() });
+    pool.on("error", () => {});
     await initializeWorkflowPostgresSchema(pool);
     await initializePostgresActivityQueryIndexes(pool);
     query = new PostgresActivityQuery(pool);

@@ -88,6 +88,7 @@ integration("F04 authorized directory scanner", () => {
     const databaseUrl = new URL(adminConnectionString);
     databaseUrl.pathname = `/${databaseName}`;
     pool = new pg.Pool({ connectionString: databaseUrl.toString(), max: 4 });
+    pool.on("error", () => {});
     await initializeWorkflowPostgresSchema(pool);
   }, 30_000);
 

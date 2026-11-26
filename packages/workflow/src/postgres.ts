@@ -440,7 +440,9 @@ export async function createPostgresWorkflowRepository(options: {
 export function createPostgresWorkflowRepositorySync(options: {
   connectionString: string;
 }): PostgresWorkflowRepository {
-  return new PostgresWorkflowRepository(new pg.Pool({ connectionString: options.connectionString }));
+  const pool = new pg.Pool({ connectionString: options.connectionString });
+  pool.on("error", () => {});
+  return new PostgresWorkflowRepository(pool);
 }
 
 export class PostgresWorkflowRepository implements WorkflowRepository {

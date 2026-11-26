@@ -31,6 +31,7 @@ integration("F14a acquisition bindings from the real library schema", () => {
     const databaseUrl = new URL(adminConnectionString);
     databaseUrl.pathname = `/${databaseName}`;
     pool = new pg.Pool({ connectionString: databaseUrl.toString() });
+    pool.on("error", () => {});
     await initializeWorkflowPostgresSchema(pool);
     store = new PostgresLibraryStore(pool);
   }, 30_000);

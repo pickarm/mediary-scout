@@ -152,6 +152,7 @@ export function getGuangYaWriteCoordinator(
   const existing = coordinators.byConnectionString.get(connectionString);
   if (existing) return existing;
   const pool = new Pool({ connectionString, max: 4, idleTimeoutMillis: 30_000 });
+  pool.on("error", () => {});
   const coordinator = new GuangYaWriteCoordinator(pool);
   coordinators.byConnectionString.set(connectionString, coordinator);
   return coordinator;

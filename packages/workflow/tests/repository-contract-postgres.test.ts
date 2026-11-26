@@ -116,10 +116,12 @@ if (reachable) {
       u.pathname = `/${dbName}`;
       return u.toString();
     })();
+    const resetPool = new pg.Pool({ connectionString: dbUrl });
+    resetPool.on("error", () => {});
     harness = {
       dbName,
       repository: createPostgresWorkflowRepositorySync({ connectionString: dbUrl }),
-      resetPool: new pg.Pool({ connectionString: dbUrl }),
+      resetPool,
     };
   } catch (error) {
     setupError = error instanceof Error ? error.message : String(error);

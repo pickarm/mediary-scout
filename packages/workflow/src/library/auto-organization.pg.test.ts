@@ -27,6 +27,7 @@ integration("PostgresLibraryAutoOrganizationScheduler", () => {
     await adminPool.query(`CREATE DATABASE "${databaseName}"`);
     const databaseUrl = new URL(adminConnectionString); databaseUrl.pathname = `/${databaseName}`;
     pool = new pg.Pool({ connectionString: databaseUrl.toString() });
+    pool.on("error", () => {});
     await initializeWorkflowPostgresSchema(pool);
   }, 30_000);
 
@@ -196,6 +197,7 @@ integration("PostgresLibraryAutoOrganizationScheduler", () => {
     await adminPool.query(`CREATE DATABASE "${freshName}"`);
     const freshUrl = new URL(adminConnectionString!); freshUrl.pathname = `/${freshName}`;
     const freshPool = new pg.Pool({ connectionString: freshUrl.toString() });
+    freshPool.on("error", () => {});
     try {
       // Only the native workflow schema exists at process start. Scan/identification/F02/F08c
       // schemas are not created by a prior page render or by another worker.

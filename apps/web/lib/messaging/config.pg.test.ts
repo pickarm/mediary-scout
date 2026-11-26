@@ -10,6 +10,7 @@ describe.skipIf(!adminUrl)("atomic messaging configuration", () => {
   beforeAll(async () => {
     admin = new pg.Pool({ connectionString: adminUrl }); await admin.query(`CREATE DATABASE ${database}`);
     const url = new URL(adminUrl!); url.pathname = `/${database}`; pool = new pg.Pool({ connectionString: url.toString() });
+    pool.on("error", () => {});
     await initializeWorkflowPostgresSchema(pool); repository = new PostgresWorkflowRepository(pool);
     for (const id of ["alice", "bob"]) await repository.createAccount({ id, username: id, passwordHash: "test-hash", groupId: null, isOwner: false, createdAt: "2026-11-17T00:00:00.000Z" });
   });

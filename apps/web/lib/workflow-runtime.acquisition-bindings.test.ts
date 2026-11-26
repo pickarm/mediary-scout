@@ -139,6 +139,7 @@ integration("F14a runtime → runner acquisition bindings", () => {
     url.pathname = `/${databaseName}`;
     databaseUrl = url.toString();
     pool = new pg.Pool({ connectionString: databaseUrl });
+    pool.on("error", () => {});
     await initializeWorkflowPostgresSchema(pool);
     store = new PostgresLibraryStore(pool);
     process.env.MEDIA_TRACK_STORAGE_ADAPTER = "fake";
