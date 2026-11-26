@@ -78,7 +78,24 @@ describe("CI workflow", () => {
     const run = text(pgStep?.run);
     expect(run).toContain("git ls-files '*.pg.test.ts'");
     expect(run).toContain("'*.postgres.test.ts'");
+    expect(run).toContain("'*-postgres.test.ts'");
+    expect(run).toContain("library-import.test.ts");
+    expect(run).toContain("fork-migration.test.ts");
     expect(run).toContain("--no-file-parallelism");
+  });
+
+  it("isolates Non-PostgreSQL unit suites from Postgres/Redis env and serializes contract/schema init", () => {
+    const unitStep = steps.find((step) => step.name === "Non-PostgreSQL unit suites");
+    expect(unitStep).toBeDefined();
+    const unitEnv = obj(unitStep?.env);
+    expect(unitEnv.MEDIA_TRACK_POSTGRES_URL).toBe("");
+    expect(unitEnv.MEDIA_TRACK_CI_REQUIRE_POSTGRES).toBe("");
+    expect(text(unitStep?.run)).toContain("'**/*-postgres.test.ts'");
+    expect(text(unitStep?.run)).toContain("'packages/workflow/src/library/library-import.test.ts'");
+
+    const contractStep = steps.find((step) => text(step.run).includes("repository-contract-postgres.test.ts"));
+    expect(contractStep).toBeDefined();
+    expect(text(contractStep?.run)).toContain("--no-file-parallelism");
   });
 
   it("boots the image against an isolated database with fake adapters and no worker", () => {

@@ -67,18 +67,44 @@ jobs:
       - run: npm run build:web
         env:
           MEDIA_TRACK_POSTGRES_URL: ""
-      - run: npx vitest run --exclude '**/*.pg.test.ts' --exclude '**/*.postgres.test.ts'
+      - name: Non-PostgreSQL unit suites
+        env:
+          MEDIA_TRACK_POSTGRES_URL: ""
+          MEDIA_TRACK_TEST_POSTGRES_ADMIN_URL: ""
+          MEDIA_TRACK_CI_REQUIRE_POSTGRES: ""
+          MEDIA_TRACK_TEST_REDIS_URL: ""
+          MEDIA_TRACK_CI_REQUIRE_REDIS: ""
+        run: >-
+          npx vitest run
+          --exclude '**/*.pg.test.ts'
+          --exclude '**/*.postgres.test.ts'
+          --exclude '**/*-postgres.test.ts'
+          --exclude 'packages/workflow/src/postgres-schema-init.test.ts'
+          --exclude 'packages/workflow/src/library/library-import.test.ts'
+          --exclude 'packages/workflow/src/library-scanner.test.ts'
+          --exclude 'packages/workflow/tests/fork-migration.test.ts'
+          --exclude 'apps/web/lib/workflow-runtime.acquisition-bindings.test.ts'
+          --exclude 'apps/web/lib/workflow-runtime.acquisition-naming.test.ts'
       # Every PostgreSQL suite in the repo, wherever it lives. Run files serially to
       # prevent test-only DDL/DML deadlocks while still proving each suite executes.
       - name: PostgreSQL integration suites (all locations)
         shell: bash
         run: |
-          mapfile -t pg_tests < <(git ls-files '*.pg.test.ts' '*.postgres.test.ts')
+          mapfile -t pg_tests < <(
+            git ls-files '*.pg.test.ts' '*.postgres.test.ts' '*-postgres.test.ts' \
+              packages/workflow/src/library/library-import.test.ts \
+              packages/workflow/src/library-scanner.test.ts \
+              packages/workflow/tests/fork-migration.test.ts \
+              apps/web/lib/workflow-runtime.acquisition-bindings.test.ts \
+              apps/web/lib/workflow-runtime.acquisition-naming.test.ts \
+              | grep -vxF 'packages/workflow/tests/repository-contract-postgres.test.ts' \
+              | sort -u
+          )
           printf 'PG suites: %s\n' "${#pg_tests[@]}"
           npx vitest run --no-file-parallelism "${pg_tests[@]}"
       # MEDIA_TRACK_CI_REQUIRE_POSTGRES=1 makes the contract hard-fail if it cannot
       # reach/provision Postgres (vitest alone exits 0 on pure describe.skip).
-      - run: npx vitest run packages/workflow/tests/repository-contract-postgres.test.ts packages/workflow/src/postgres-schema-init.test.ts
+      - run: npx vitest run --no-file-parallelism packages/workflow/tests/repository-contract-postgres.test.ts packages/workflow/src/postgres-schema-init.test.ts
 
   image-smoke:
     needs: build-and-test
