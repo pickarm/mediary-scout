@@ -47,12 +47,16 @@ describe("docker-compose.fork.yml", () => {
     expect(web.platform).toBe("linux/amd64");
   });
 
-  it("uses external PostgreSQL, Redis and PanSou, and marks the image distribution", () => {
+  it("uses external PostgreSQL, Redis and PanSou, and forwards the tracked GHCR image vars", () => {
     const environment = obj(web.environment);
     expect(text(environment.MEDIA_TRACK_POSTGRES_URL)).toContain("MEDIA_TRACK_POSTGRES_URL");
     expect(text(environment.REDIS_URL)).toContain("REDIS_URL");
     expect(text(environment.PANSOU_BASE_URL)).toContain("PANSOU_BASE_URL");
     expect(environment.MEDIA_TRACK_DISTRIBUTION).toBe("fork-image");
+    expect(environment.MEDIA_TRACK_IMAGE).toBe("${MEDIA_TRACK_IMAGE:-ghcr.io/pickarm/mediary-scout}");
+    expect(environment.MEDIA_TRACK_IMAGE_TAG).toBe("${MEDIA_TRACK_IMAGE_TAG:-latest}");
+    expect(composeText).not.toContain("TUNNEL_TOKEN");
+    expect(composeText).not.toContain("cloudflared");
     expect(web.env_file).toBeDefined();
   });
 });

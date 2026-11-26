@@ -39,12 +39,12 @@
 
 | 模块 | 上游基础能力 | pickarm Fork 新增与增强 |
 |---|---|---|
-| **默认强制登录与安全** | 默认无登录拦截（仅远程经 Cloudflare Tunnel 才拦截），多用户需手动开启且开放自由注册 | **默认全站强制账号密码登录**（覆盖公网裸端口、Nginx/Caddy 反代与局域网）；未认领时自动引导或由 `.env` 初始化站主并接管已有媒体库；**默认关闭公开注册**，支持站主在「设置 → 账号」切换注册开关、直接新建成员账号与重置密码；延续原生暗黑绿 UI 风格 |
-| **自动搜片与追更** | 自然语言/片名搜片、Agent 选源转存、落盘回读验证、定时补缺、通用选源偏好与影视库刷新 | 沿用原有获取/追更/选源/刷新链路，新获取资源统一应用可自定义命名模板，保持原获取沙箱根保护与账号隔离 |
-| **已有库扫描与整理** | 主要管理巡影自身获取落盘的作品 | 完整支持 **夸克 / UC / 115 / 123 / 光鸭 / 天翼** 六盘已有目录分页扫描、TMDB 身份识别、安全导入（默认关闭自动补缺）、模板预览/整理、多版本共存与字幕语言/`forced` 标记配对 |
+| **默认强制登录与安全** | 默认无登录拦截（多用户需手动开启且开放自由注册） | **默认全站强制账号密码登录**（覆盖公网裸端口、Nginx/Caddy/Lucky 反代与局域网）；未认领时自动引导或由 `.env` 初始化站主并接管已有媒体库；**默认关闭公开注册**，支持站主在「设置 → 账号」切换注册开关、直接新建成员账号与重置密码；已彻底移除内置远程访问与隧道组件，延续原生暗黑绿 UI 风格 |
+| **自动搜片与追更** | 自然语言/片名搜片、Agent 选源转存、落盘回读验证、定时补缺、通用选源偏好与影视库刷新 | TMDB 搜索支持分页并发拉取**最多 40 条**结果并带 5 分钟失效线路熔断与详情并发加载；内置 **`/api/tmdb/image` 图片代理与缓存**（支持 `TMDB_IMAGE_BASE_URL` 自定义反代域名，直连超时自动冷却回退）；沿用原有获取/追更/选源/刷新链路并统一应用自定义命名模板 |
+| **已有库扫描与整理** | 主要管理巡影自身获取落盘的作品 | 完整支持 **夸克 / UC / 115 / 123 / 光鸭 / 天翼** 六盘已有目录分页扫描、TMDB 身份识别、安全导入（默认关闭自动补缺）、模板预览/整理、多版本共存、字幕语言/`forced` 标记配对及按最近更新（`updatedAt`）排序 |
 | **大规模性能与缓存** | 直接读取 PostgreSQL 快照与列表 | 媒体墙与任务队列服务端有界分页，新增独立非网盘准备并发，支持 **可选 Redis 摘要缓存**（故障自动降级回 PG，不丢任务）及单页共享 SSE 进度流 |
 | **消息机器人与直转** | Web 界面与 Agent API | 内置 **个人微信（iLink 扫码/PIN）/ 飞书（官方长连接卡片）/ Telegram（grammY 按钮）** 本人私聊入口，支持搜片、选盘、查进度、停止，以及**六盘分享链（含提取码）与 115/123/光鸭磁力直转** |
-| **GHCR 自动构建与 NAS 部署** | 仓库内 `docker compose up` 本地编译 + Desktop 应用 | 提供免源码构建的 [`docker-compose.fork.yml`](docker-compose.fork.yml)，零密钥推送 `linux/amd64` 镜像至 **GHCR（`ghcr.io/pickarm/mediary-scout`）**，并支持环境变量自定义镜像源 |
+| **GHCR 自动构建与镜像更新检测** | 仓库内 `docker compose up` 本地编译 + Desktop 应用 | 提供免源码构建的 [`docker-compose.fork.yml`](docker-compose.fork.yml)，零密钥推送 `linux/amd64` 镜像至 **GHCR（`ghcr.io/pickarm/mediary-scout`）**；**设置页直接探测 GHCR 远端镜像构建提交并提示容器升级** |
 
 ---
 
@@ -92,7 +92,11 @@ docker compose -f docker-compose.fork.yml ps
   - 若未配置 `MEDIA_TRACK_ADMIN_*`，首次访问将引导**创建站主账号**（已有单用户媒体库与网盘绑定会被自动接管保留），完成后立即锁定初始化入口。
   - 若已通过 `.env` 预置站主，直接使用该用户名和密码登录即可；进入后前往 **设置 → 网盘** 绑定你的网盘。
 
-### 3. 日常更新与版本核验
+### 3. 日常更新与容器镜像检测
+
+容器版默认启用 **GHCR 镜像更新检测**（即使不通过 `docker-compose.fork.yml` 额外设置 `MEDIA_TRACK_DISTRIBUTION`，直接拉取容器镜像部署也会自动生效）：
+- **设置 → 更新** 与侧栏徽章会直接探测 `MEDIA_TRACK_IMAGE:MEDIA_TRACK_IMAGE_TAG`（默认 `ghcr.io/pickarm/mediary-scout:latest`）在远端 Registry 的最新构建提交（`org.opencontainers.image.revision`）与构建时间，并与当前容器内置 `BUILD_COMMIT` 比对；即使 `main` 自动构建尚未打 `v*` Release，也能及时提示「检测到新镜像，请更新容器」并提供差异对比外链与一键复制更新命令。
+- 如需立即探测，可在 **设置 → 更新** 点击「检查更新」强制刷新缓存（15 秒冷却防刷）。
 
 ```bash
 # 拉取最新或指定标签镜像并重建容器
@@ -109,10 +113,10 @@ docker compose -f docker-compose.fork.yml exec -T web cat BUILD_COMMIT BUILD_VER
 
 ## 登录验证与访问安全
 
-Fork 将访问控制改为**默认安全（Fail-Closed）**模型，适合直接部署在公网 VPS 端口、Nginx/Caddy/Lucky 反向代理后或局域网 NAS 上：
+Fork 将访问控制改为**默认安全（Fail-Closed）**模型，适合直接部署在公网 VPS 端口、Nginx/Caddy/Lucky 反向代理后或局域网 NAS 上（已彻底移除内置远程访问与 Cloudflare Tunnel 组件）：
 
 - **默认处处需要登录**：除 `/login`、`/api/auth/*`、健康检查 `/api/health` 与带自身令牌守卫的 `/api/workflows/*`、`/api/agent/*`、`/api/update/*` 外，其余所有页面与接口均需持有有效的签名会话 Cookie（`mt_session`）；未登录访问会自动携带站内安全回跳路径重定向至 `/login`。
-- **协议自适应 Cookie**：`MEDIA_TRACK_COOKIE_SECURE` 留空时自动按客户端协议决定 `Secure` 标记——纯 HTTP 访问公网 IP `:3000` 或局域网不加 `Secure`，HTTPS 反代/隧道下自动启用 `Secure`，开箱不掉登录态。
+- **协议自适应 Cookie**：`MEDIA_TRACK_COOKIE_SECURE` 留空时自动按客户端协议决定 `Secure` 标记——纯 HTTP 访问公网 IP `:3000` 或局域网不加 `Secure`，HTTPS 反向代理下自动启用 `Secure`，开箱不掉登录态。
 - **默认关闭公开注册**：仅首位用户可认领成为站主；之后任何陌生人访问 `/login` 仅看到登录框，请求 `/api/auth/register` 将被返回 `403`。站主可在 **设置 → 账号** 中按需临时开启/关闭公开注册、直接后台添加成员账号或重置他人密码。
 - **无效/过期会话自动重登**：失效 Cookie 会在引导查询与服务端壳层中自动清理并引导重新登录。
 
@@ -125,7 +129,7 @@ Fork 将访问控制改为**默认安全（Fail-Closed）**模型，适合直接
 | `MEDIA_TRACK_DISABLE_WEB_BOOTSTRAP` | 空 | 设为 `1` 时禁止网页端 `/login` 匿名首次认领，强制要求通过上方环境变量初始化 |
 | `MEDIA_TRACK_ALLOW_REGISTRATION` | 空 | 留空由站主在 **设置 → 账号** 动态切换（默认关闭）；`1` 强制开放、`0` 强制关闭并锁定 |
 | `MEDIA_TRACK_COOKIE_SECURE` | 空 | 留空按 `x-forwarded-proto` / 请求协议自动判定；无完整透传反代时可显式设 `1` 或 `0` |
-| `MEDIA_TRACK_MULTI_USER` | 空（默认开启） | 兼容开关：设为 `0` 时可退回旧版单用户局域网免登模式（仅拦截 Cloudflare Tunnel 请求） |
+| `MEDIA_TRACK_MULTI_USER` | 空（默认开启） | 兼容开关：设为 `0` 时可退回旧版单用户局域网免登模式（仍拦截经反向代理转发的外网请求，不建议在公网开启） |
 
 ### 忘记密码重置（容器 CLI 逃生口）
 

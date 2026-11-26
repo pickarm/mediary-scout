@@ -28,11 +28,19 @@ docker compose -f docker-compose.fork.yml ps
 docker compose -f docker-compose.fork.yml logs --tail=100 web
 ```
 
-应用以 `/api/health` 检查数据库读取是否可用。镜像使用 Fork 更新来源，设置页展示 `pull` 和 `--force-recreate` 命令；不启用原来依赖本地源码构建的 updater。
+应用以 `/api/health` 检查数据库读取是否可用。预构建镜像默认启用 **GHCR 镜像更新检测**（即使未使用 `docker-compose.fork.yml` 显式传入 `MEDIA_TRACK_DISTRIBUTION=fork-image` 也会默认按镜像模式运行；仅显式设置 `MEDIA_TRACK_DISTRIBUTION=local-source` 时才启用旧源码自更新器）：
+- 服务端直接请求 `MEDIA_TRACK_IMAGE:MEDIA_TRACK_IMAGE_TAG`（由 `docker-compose.fork.yml` 透传进容器，默认 `ghcr.io/pickarm/mediary-scout:latest`）的 OCI/GHCR Registry v2 manifest 与 config blob，读取 `org.opencontainers.image.revision`、版本号与构建时间，并与容器内 `/app/BUILD_COMMIT` 比对；
+- 检测到新构建提交时（含 `main` 推送触发的 `latest`/`edge` 自动构建，不依赖 `v*` Release），设置侧栏徽章与「设置 → 更新」页提示「检测到新镜像，请更新容器」，展示当前/远端提交、构建时间、摘要、差异对比外链及一键复制 `pull && up -d --force-recreate` 命令；
+- 缓存按状态分级 TTL（成功 30 分钟、网络不可达 5 分钟、401/404 10 分钟），页面点击「检查更新」可 15 秒冷却内强制刷新；若为私有 GHCR 包返回 401，请将 GitHub Packages 可见性设为 Public。
+
+## 内置 TMDB 图片代理与搜索性能增强
+
+- **内置 TMDB 图片代理（`/api/tmdb/image/[size]/[...path]`）**：内置尺寸与文件名白名单校验、内存与临时磁盘缓存。默认优先直连 `https://image.tmdb.org`（失败/劫持自动进入 5 分钟冷却并回退至内置 TMDB 代理 `/img/t/p/...`）；如需使用自建图片反代域名，可在 `.env` 配置 `TMDB_IMAGE_BASE_URL`（填写根域名即可，程序会自动拼接 `/t/p/<size>/<file>`）。
+- **并发搜索与库墙查询增强**：TMDB 搜索分页并发拉取最多 40 条候选结果并带 5 分钟失效线路熔断与剧集详情/演职员并发加载；媒体库分页查询支持按最近更新（`updatedAt`）排序，改善大库浏览体验。
 
 ## 登录与访问控制配置
 
-Fork 默认启用**全站强制账号密码登录**，无论是直接暴露公网 IP 端口、走反向代理还是局域网访问，未持有有效 `mt_session` 会话都会重定向至 `/login`（仅 `/api/health`、`/api/auth/*` 及自带令牌守卫的 `/api/workflows/*`、`/api/agent/*`、`/api/update/busy`、`/api/update/hold` 例外）。
+Fork 已彻底移除内置远程访问与 Cloudflare Tunnel 组件，默认启用**全站强制账号密码登录**，无论是直接暴露公网 IP 端口、走反向代理还是局域网访问，未持有有效 `mt_session` 会话都会重定向至 `/login`（仅 `/api/health`、`/api/auth/*` 及自带令牌守卫的 `/api/workflows/*`、`/api/agent/*`、`/api/update/busy`、`/api/update/hold` 例外）。
 
 - **首次初始化方式**：
   1. **网页端一次性认领（默认开启）**：首次打开 `http://<HOST_IP>:3000/login` 设置站主用户名与密码（若原库已有 `acct_default` 数据和绑定网盘会自动接管保留），设置完成后初始化入口自动锁定。

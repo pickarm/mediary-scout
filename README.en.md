@@ -26,11 +26,12 @@
 
 Maintained on top of upstream [fancydirty/mediary-scout](https://github.com/fancydirty/mediary-scout) (synced through `#379`), keeping full movie/TV/anime search, agent source picking, transfer verification, daily scheduled gap-fill, multi-account isolation, and Emby/Jellyfin/Plex/webhook refreshes while adding:
 
-- **Default Forced Login & Owner Controls**: All Web routes and user APIs enforce `mt_session` authentication out of the box (over bare public VPS ports, reverse proxies, and LAN). Unclaimed instances adopt any seeded `acct_default` library on initial setup (either via `/login` or `MEDIA_TRACK_ADMIN_USERNAME` + `MEDIA_TRACK_ADMIN_PASSWORD`) and lock public self-registration by default.
+- **Default Forced Login & Owner Controls**: All Web routes and user APIs enforce `mt_session` authentication out of the box (over bare public VPS ports, reverse proxies, and LAN). Unclaimed instances adopt any seeded `acct_default` library on initial setup (either via `/login` or `MEDIA_TRACK_ADMIN_USERNAME` + `MEDIA_TRACK_ADMIN_PASSWORD`) and lock public self-registration by default. Built-in remote-access/Cloudflare Tunnel components have been removed.
+- **TMDB Search Expansion, Image Proxy & Library Enhancements**: Paginated concurrent TMDB search returns up to **40 candidates** with a 5-minute dead-access circuit breaker and concurrent TV detail/cast loading; built-in **`/api/tmdb/image/[size]/[...path]` proxy & cache** (configurable via `TMDB_IMAGE_BASE_URL` with automatic cooldown fallback) keeps posters reliable; library queries support `updatedAt` sorting.
 - **6-Drive Existing Library Scan & Organization**: Paginated directory scan, TMDB identification, safe import (`autoAcquire` off by default), template preview & non-destructive rename/organize preserving multi-version files and subtitle language/`forced` flags across **Quark, UC, 115, 123, GuangYaPan (光鸭), and Tianyi (天翼)**.
 - **Scale & Caching**: Server-side paginated library/activity views, independent non-drive preparation workers, optional Redis summary cache (gracefully degrades back to PostgreSQL on Redis failure), and shared SSE progress streams.
 - **Messaging Bots & Direct Share/Magnet Import**: Built-in **WeChat (iLink QR/PIN), Feishu (long connection cards), and Telegram (grammY)** private chat bots for searching, choosing seasons/drives, querying/stopping jobs, and importing share links or magnet URLs into isolated landing directories.
-- **Zero-Secret GHCR `linux/amd64` Auto-Build**: Prebuilt single-container image (`web` + in-process worker) automatically built, smoke-tested, and pushed to `ghcr.io/pickarm/mediary-scout` without external Docker Hub secrets.
+- **Zero-Secret GHCR Auto-Build & Image Update Detection**: Prebuilt single-container `linux/amd64` image (`web` + in-process worker) pushed to `ghcr.io/pickarm/mediary-scout`; **Settings → 更新** directly checks the tracked GHCR/OCI Registry tag (`MEDIA_TRACK_IMAGE` / `MEDIA_TRACK_IMAGE_TAG`) against `/app/BUILD_COMMIT` and surfaces one-click `pull && up -d --force-recreate` upgrade commands.
 
 > **Verification Boundary Note**: Static type checks, ESLint, database-free Web build, unit/contract tests, and isolated Linux/PostgreSQL/Redis suites have been run. Before migrating an existing database, always run a dry-run on an isolated PostgreSQL clone (`MEDIA_TRACK_REHEARSAL=1`) and validate real WeChat/Feishu/Telegram messaging and cloud-drive writes against a dedicated test folder. See [Fork Deployment Guide (Chinese)](docs/fork/DEPLOYMENT.md) and [Migration Guide (Chinese)](docs/fork/MIGRATION.md).
 
@@ -68,19 +69,29 @@ docker compose -f docker-compose.fork.yml up -d web
 docker compose -f docker-compose.fork.yml ps
 ```
 
-Open `http://<HOST_IP>:3000` (health check at `/api/health`) to create or log in as the owner account and connect your cloud drives in **Settings**. For source-built all-in-one Docker (`docker-compose.yml`) or the upstream desktop app, see [`docs/deploy.md`](docs/deploy.md) and [upstream releases](https://github.com/fancydirty/mediary-scout/releases/latest).
+Open `http://<HOST_IP>:3000` (health check at `/api/health`) to create or log in as the owner account and connect your cloud drives in **Settings**.
+
+Container deployments default to **GHCR image update detection** (even without setting `MEDIA_TRACK_DISTRIBUTION` explicitly): **Settings → 更新** and the sidebar badge query the tracked `MEDIA_TRACK_IMAGE:MEDIA_TRACK_IMAGE_TAG` manifest/config on GHCR/OCI Registry (`org.opencontainers.image.revision` + build timestamp) against the running container's `BUILD_COMMIT`, alerting you when a newer `main` or tagged build is available and providing copy-ready upgrade commands:
+
+```bash
+docker compose -f docker-compose.fork.yml pull web
+docker compose -f docker-compose.fork.yml up -d --force-recreate web
+docker compose -f docker-compose.fork.yml exec -T web cat BUILD_COMMIT BUILD_VERSION
+```
+
+For source-built all-in-one Docker (`docker-compose.yml`) or the upstream desktop app, see [`docs/deploy.md`](docs/deploy.md) and [upstream releases](https://github.com/fancydirty/mediary-scout/releases/latest).
 
 ---
 
 ## Authentication & Access Control
 
-- **Default Protected Gate**: Unlike the legacy single-user mode that trusted non-Cloudflare requests, every Web page and session-scoped API requires a signed `mt_session` cookie by default (`/api/health`, `/api/workflows/*` guarded by `MEDIA_TRACK_WORKER_SECRET`, `/api/agent/*` guarded by Agent Bearer token, and `/api/update/{busy,hold}` remain handler-guarded; `MEDIA_TRACK_DEMO_MODE=1` stays read-only/unauthenticated).
+- **Default Protected Gate**: Unlike the legacy single-user mode, every Web page and session-scoped API requires a signed `mt_session` cookie by default (`/api/health`, `/api/workflows/*` guarded by `MEDIA_TRACK_WORKER_SECRET`, `/api/agent/*` guarded by Agent Bearer token, and `/api/update/{busy,hold}` remain handler-guarded; `MEDIA_TRACK_DEMO_MODE=1` stays read-only/unauthenticated). Built-in remote-access/tunnel features have been removed in favor of standard reverse proxies with forced login.
 - **HTTP & HTTPS Safe Cookie**: Leaving `MEDIA_TRACK_COOKIE_SECURE` unset detects HTTPS automatically from `x-forwarded-proto` or request protocol, while working out of the box on plain HTTP IP ports.
 - **Key Environment Variables**:
   - `MEDIA_TRACK_ADMIN_USERNAME` / `MEDIA_TRACK_ADMIN_PASSWORD`: Optional pair to pre-provision the owner while unclaimed.
   - `MEDIA_TRACK_DISABLE_WEB_BOOTSTRAP=1`: Disables first-time owner creation through `/login` so initialization only happens via the env pair above.
   - `MEDIA_TRACK_ALLOW_REGISTRATION`: Unset lets the owner toggle public sign-up in **Settings → 账号** (closed by default); `1` or `0` locks the policy via env.
-  - `MEDIA_TRACK_MULTI_USER=0`: Legacy opt-out restoring single-user LAN bypass.
+  - `MEDIA_TRACK_MULTI_USER=0`: Legacy opt-out restoring single-user LAN bypass (not recommended on public hosts).
 - **Forgotten Password Reset CLI**:
   ```bash
   docker compose -f docker-compose.fork.yml exec web node scripts/reset-password.mjs <username>

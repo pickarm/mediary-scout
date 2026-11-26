@@ -26,6 +26,8 @@ services:
       PANSOU_BASE_URL: ${PANSOU_BASE_URL:?set PANSOU_BASE_URL to your external PanSou}
       # 预构建镜像标记：更新入口展示 pull/recreate，后台不启用旧源码 updater。
       MEDIA_TRACK_DISTRIBUTION: fork-image
+      MEDIA_TRACK_IMAGE: ${MEDIA_TRACK_IMAGE:-ghcr.io/pickarm/mediary-scout}
+      MEDIA_TRACK_IMAGE_TAG: ${MEDIA_TRACK_IMAGE_TAG:-latest}
       MEDIA_TRACK_SEARCH_PROVIDER: ${MEDIA_TRACK_SEARCH_PROVIDER:-tmdb}
       MEDIA_TRACK_WORKFLOW_ADAPTER: ${MEDIA_TRACK_WORKFLOW_ADAPTER:-pansou}
       # 光鸭连接在设置页创建；该适配器开关是原「真实存储模式」的兼容名称。
