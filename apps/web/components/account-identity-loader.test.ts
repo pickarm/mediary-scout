@@ -69,19 +69,37 @@ describe("AccountIdentityLoader", () => {
     expect(redirect).not.toHaveBeenCalled();
   });
 
-  it("returns null in demo mode or single-user mode when password is set, and redirects if single-user password is unset", async () => {
+  it("returns null in demo/desktop single-user, redirects when single-user unauthenticated, and renders logout menu when signed in", async () => {
     vi.mocked(isDemoMode).mockReturnValueOnce(true);
     expect(await AccountIdentityLoader()).toBeNull();
 
-    vi.mocked(runtime.isMultiUserEnabled).mockReturnValueOnce(false);
-    vi.mocked(runtime.hasLoginPassword).mockResolvedValueOnce(true);
-    expect(await AccountIdentityLoader()).toBeNull();
-    expect(redirect).not.toHaveBeenCalled();
-
+    // 单用户未设密码 → 重定向 /login
     vi.mocked(runtime.isMultiUserEnabled).mockReturnValueOnce(false);
     vi.mocked(runtime.hasLoginPassword).mockResolvedValueOnce(false);
     await expect(AccountIdentityLoader()).rejects.toThrow("NEXT_REDIRECT:/login");
 
+    // 单用户已设密码但未登录 → 重定向 /login
+    vi.mocked(runtime.isMultiUserEnabled).mockReturnValueOnce(false);
+    vi.mocked(runtime.hasLoginPassword).mockResolvedValueOnce(true);
+    vi.mocked(runtime.getCurrentAccountId).mockResolvedValueOnce(runtime.UNAUTHENTICATED_ACCOUNT_ID);
+    await expect(AccountIdentityLoader()).rejects.toThrow("NEXT_REDIRECT:/login");
+
+    // 单用户已设密码且已登录 → 渲染左下角身份卡片（隐藏账号管理，仅留改密+退出登录）
+    vi.mocked(runtime.isMultiUserEnabled).mockReturnValueOnce(false);
+    vi.mocked(runtime.hasLoginPassword).mockResolvedValueOnce(true);
+    vi.mocked(runtime.getCurrentAccountId).mockResolvedValueOnce("acct_default");
+    vi.mocked(runtime.getCurrentAccountSummary).mockResolvedValueOnce({ username: "default", isOwner: true });
+    const singleEl = await AccountIdentityLoader();
+    expect(singleEl).not.toBeNull();
+    expect(
+      (singleEl as { props: { username: string; isOwner: boolean; showAccountManagement?: boolean } }).props,
+    ).toEqual({
+      username: "站主",
+      isOwner: true,
+      showAccountManagement: false,
+    });
+
+    // 桌面端单用户 → 仍返回 null
     process.env.MEDIA_TRACK_DESKTOP = "1";
     vi.mocked(runtime.isMultiUserEnabled).mockReturnValueOnce(false);
     expect(await AccountIdentityLoader()).toBeNull();

@@ -10,7 +10,15 @@ import { LogOut, KeyRound, Users, LoaderCircle } from "lucide-react";
  * password, log out, and (owner only) open account management. Distinct from the
  * drive/workspace switcher — that picks a drive, this picks/acts on the person.
  */
-export function AccountIdentity({ username, isOwner }: { username: string; isOwner: boolean }) {
+export function AccountIdentity({
+  username,
+  isOwner,
+  showAccountManagement = isOwner,
+}: {
+  username: string;
+  isOwner: boolean;
+  showAccountManagement?: boolean;
+}) {
   const [isPending, startTransition] = useTransition();
   const initial = username.trim().charAt(0).toUpperCase() || "?";
   // Preserve the active workspace (?w) like the sidebar's globalNavHref does —
@@ -40,7 +48,7 @@ export function AccountIdentity({ username, isOwner }: { username: string; isOwn
           <KeyRound size={14} aria-hidden />
           修改密码
         </Link>
-        {isOwner ? (
+        {showAccountManagement ? (
           <Link className="account-identity-item" href={accountHref("#accounts")}>
             <Users size={14} aria-hidden />
             账号管理

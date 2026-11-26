@@ -58,6 +58,10 @@ const SAMPLE_SNAPSHOT: SystemInfoSnapshot = {
     demoMode: false,
     rehearsalMode: false,
   },
+  auth: {
+    mode: "account-auth",
+    passwordConfigured: true,
+  },
   database: {
     engine: "postgresql",
     status: "connected",

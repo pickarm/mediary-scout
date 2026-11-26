@@ -76,11 +76,15 @@ export default function LoginPage() {
       : allowRegistration
         ? mode
         : "login";
-  const needsConfirmPassword = !singleUser && effectiveMode === "register";
+  const needsConfirmPassword = settingPassword || (!singleUser && effectiveMode === "register");
 
-  /** 单用户兼容模式：首次设置访问密码并顺手换取 session。 */
+  /** 单用户兼容模式：首次设置访问密码（服务端已同步签发 mt_session）。 */
   const submitNewPassword = () => {
     setError(null);
+    if (password !== confirmPassword) {
+      setError("两次输入的密码不一致。");
+      return;
+    }
     startTransition(async () => {
       const res = await fetch("/api/auth/password", {
         method: "POST",
@@ -92,11 +96,6 @@ export default function LoginPage() {
         setError(body.error ?? "设置失败，请重试。");
         return;
       }
-      await fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ username: "", password }),
-      }).catch(() => undefined);
       window.location.href = nextPath;
     });
   };
@@ -136,7 +135,7 @@ export default function LoginPage() {
 
   const note = singleUser
     ? bootstrap?.passwordSet
-      ? "这台实例已设置访问密码。局域网内无需登录，从外网访问需要输入密码。"
+      ? "这台实例已设置访问密码。请输入密码登录以访问你的媒体库与网盘配置。"
       : "当前尚未设置访问密码。请先设置一个访问密码后再进入巡影（至少 6 位）。"
     : claiming
       ? bootstrap?.hasExistingLibrary

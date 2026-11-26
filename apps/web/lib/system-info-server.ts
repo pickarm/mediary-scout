@@ -11,7 +11,7 @@ import {
   parseSanitizedRedisTarget,
   type SystemInfoSnapshot,
 } from "./system-info-format";
-import { getWorkflowRepository } from "./workflow-runtime";
+import { getWorkflowRepository, hasLoginPassword, isMultiUserEnabled } from "./workflow-runtime";
 
 const DB_PROBE_TIMEOUT_MS = 3_000;
 const REDIS_PROBE_TIMEOUT_MS = 1_500;
@@ -326,6 +326,34 @@ async function collectLibraryStats(accountId: string): Promise<SystemInfoSnapsho
   };
 }
 
+async function collectAuthInfo(
+  accountId: string,
+  demoMode: boolean,
+): Promise<SystemInfoSnapshot["auth"]> {
+  if (demoMode) {
+    return { mode: "demo", passwordConfigured: false };
+  }
+  const desktop = process.env.MEDIA_TRACK_DESKTOP === "1";
+  const multiUser = isMultiUserEnabled();
+  if (desktop && !multiUser) {
+    return { mode: "desktop", passwordConfigured: false };
+  }
+  if (!multiUser) {
+    const state = await hasLoginPassword().catch(() => "unknown" as const);
+    return {
+      mode: "single-user-password",
+      passwordConfigured: state === true,
+    };
+  }
+  const acct = await getWorkflowRepository()
+    .getAccountById(accountId)
+    .catch(() => null);
+  return {
+    mode: "account-auth",
+    passwordConfigured: Boolean(acct && acct.passwordHash.length > 0),
+  };
+}
+
 /** 采集当前实例运行时、版本、数据库、Redis 与当前账号媒体库入库统计。 */
 export async function collectSystemInfo(opts: {
   accountId: string;
@@ -340,7 +368,7 @@ export async function collectSystemInfo(opts: {
   const distribution = resolveUpdateDistribution(process.env);
   const trackedImage = resolveTrackedImageRef(process.env);
 
-  const [buildVersion, buildCommit, database, redis, library] = await Promise.all([
+  const [buildVersion, buildCommit, database, redis, library, auth] = await Promise.all([
     readBuildVersion(),
     readBuildCommit(),
     probeDatabase(opts.canViewInfraDetails),
@@ -355,6 +383,7 @@ export async function collectSystemInfo(opts: {
       activeDrives: 0,
       totalDrives: 0,
     })),
+    collectAuthInfo(opts.accountId, demoMode),
   ]);
 
   return {
@@ -377,6 +406,7 @@ export async function collectSystemInfo(opts: {
       demoMode,
       rehearsalMode,
     },
+    auth,
     database,
     redis,
     library,

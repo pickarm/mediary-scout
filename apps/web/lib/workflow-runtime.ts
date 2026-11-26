@@ -284,6 +284,11 @@ async function createLoginSession(accountId: string): Promise<string> {
   return signSession(sessionId, await getSessionSecret());
 }
 
+/** 为单用户模式（acct_default）签发会话 Cookie（首次设密完成后直接登录态落地）。 */
+export async function createSingleUserSessionCookie(): Promise<string> {
+  return createLoginSession(DEFAULT_ACCOUNT_ID);
+}
+
 /**
  * 首次初始化站主或注册本地账号。
  * - 尚未认领时接管 acct_default（保留既有媒体库与网盘），若禁用网页初始化则拒绝。
@@ -933,40 +938,19 @@ export function isRemoteRequest(hdrs: Headers): boolean {
 }
 
 /**
- * 单用户账号判定（纯函数，本 plan 的安全核心）。**LAN 开放、远程一律需 session。**
- *
- * 远程判定不看密码状态。旧实现第一行是
- * `if (hasPassword === false) return DEFAULT_ACCOUNT_ID`，于是一台尚未设密码的
- * 实例对**公网匿名访客**完全敞开：经隧道进来即拿到 `acct_default`，可读整个
- * 媒体库、五个网盘的凭据与 LLM key，并且能写——`requireAuthenticatedAccountId()`
- * 只拦哨兵，而那条路径压根产不出哨兵。有 Cloudflare Access 挡在前面时这尚可
- * 存活；Access 一移除它就是个活的公网洞，故改为「远程无条件需要 session」。
- *
- * `hasPassword` 因此**不再参与判定**，但**刻意保留**在入参里：
- *  1. 调用方与测试都在传它，删掉是无谓的破坏性改动；
- *  2. 后续 plan 需要据此区分「该显示登录框」还是「该显示设置密码表单」；
- *  3. 留着它能让这段注释持续提醒：任何想用它放宽远程的改动都是在重开这个洞。
- * 未设密码的实例远程会被挡在 `/login`，那里提供设置密码表单（见 app/login/page.tsx），
- * 不会把站主锁死。
- *
- * `"unknown"`（状态读取失败）同样无需特判：远程本来就要 session，局域网本来就放行。
- *
- * 远程放行只认 `acct_default`：同一个库可能残留多用户时期的账号
- * （`MEDIA_TRACK_MULTI_USER` 是运行时开关，可来回切），那些账号的 session
- * 不该在单用户模式下被当作站主，况且改密/清密只会吊销 `acct_default` 的 session，
- * 吊销不掉它们。
- *
- * 抽成纯函数是为了能确定性覆盖全部「内外 × 有无 session」组合——
- * Emby/Jellyfin 的事故正是内外判定出错，这段逻辑必须可被精确测试。
+ * 单用户模式账号判定（全网络环境强制登录，彻底移除局域网免登）：
+ * 仅当 `acct_default` 已确认设置密码且当前携带有效 `acct_default` 会话时放行，
+ * 其余情况（未设密码、读取失败 `"unknown"`、无 session、或非 `acct_default` 会话，
+ * 无论请求是否来自局域网或反向代理）一律返回 `UNAUTHENTICATED_ACCOUNT_ID`（fail-closed）。
  */
 export function resolveSingleUserAccount(opts: {
-  /** 已不参与判定（远程一律需 session）。保留原因见上方 JSDoc。 */
   hasPassword: LoginPasswordState;
-  isRemote: boolean;
+  isRemote?: boolean;
   sessionAccountId: string | null;
 }): string {
-  if (!opts.isRemote) return DEFAULT_ACCOUNT_ID; // LAN 免登录（含状态未知）
-  // 远程：必须持有 acct_default 自己的有效 session，与是否设过密码无关
+  if (opts.hasPassword !== true) {
+    return UNAUTHENTICATED_ACCOUNT_ID;
+  }
   return opts.sessionAccountId === DEFAULT_ACCOUNT_ID
     ? DEFAULT_ACCOUNT_ID
     : UNAUTHENTICATED_ACCOUNT_ID;
@@ -977,23 +961,21 @@ export async function getCurrentAccountId(): Promise<string> {
     return DEFAULT_ACCOUNT_ID;
   }
   if (!isMultiUserEnabled()) {
-    // 注意：这里**不能**因为「没设密码」就提前返回 acct_default。那正是被移除的
-    // 公网洞——未设密码的实例会对隧道来的匿名访客全开放。密码状态只作为参数
-    // 传给 resolveSingleUserAccount()，由它统一按「LAN 开放 / 远程需 session」判定。
-    const hasPassword = await hasLoginPassword();
-    // 无论是否设过密码，都要看请求来自哪里
-    let hdrs: Headers;
-    let sessionCookie: string | undefined;
-    try {
-      const { cookies, headers } = await import("next/headers");
-      hdrs = await headers();
-      sessionCookie = (await cookies()).get(SESSION_COOKIE_NAME)?.value;
-    } catch {
-      // 无请求上下文（in-process worker）：视为本地直通——采集任务不认 cookie。
+    if (process.env.MEDIA_TRACK_DESKTOP === "1") {
       return DEFAULT_ACCOUNT_ID;
     }
-    if (!isRemoteRequest(hdrs)) return DEFAULT_ACCOUNT_ID; // LAN → 开放
-    // 已确认是远程：此后任何读取失败都必须 fail-closed，不能退回开放默认值
+    let sessionCookie: string | undefined;
+    try {
+      const { cookies } = await import("next/headers");
+      sessionCookie = (await cookies()).get(SESSION_COOKIE_NAME)?.value;
+    } catch {
+      // 无请求上下文（in-process worker）：视为后台任务，运行于 acct_default。
+      return DEFAULT_ACCOUNT_ID;
+    }
+    const hasPassword = await hasLoginPassword();
+    if (hasPassword !== true) {
+      return UNAUTHENTICATED_ACCOUNT_ID;
+    }
     let sessionAccountId: string | null = null;
     if (sessionCookie) {
       try {
@@ -1002,7 +984,7 @@ export async function getCurrentAccountId(): Promise<string> {
         return UNAUTHENTICATED_ACCOUNT_ID;
       }
     }
-    return resolveSingleUserAccount({ hasPassword, isRemote: true, sessionAccountId });
+    return resolveSingleUserAccount({ hasPassword, sessionAccountId });
   }
   try {
     const { cookies } = await import("next/headers");

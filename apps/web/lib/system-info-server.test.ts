@@ -7,6 +7,7 @@ const ENV_KEYS = [
   "REDIS_URL",
   "MEDIA_TRACK_REHEARSAL",
   "MEDIA_TRACK_DEMO_MODE",
+  "MEDIA_TRACK_MULTI_USER",
   "MEDIA_TRACK_DISTRIBUTION",
   "MEDIA_TRACK_IMAGE",
   "MEDIA_TRACK_IMAGE_TAG",
@@ -31,6 +32,7 @@ async function boot(overrides?: Partial<Record<(typeof ENV_KEYS)[number], string
   delete process.env.REDIS_URL;
   delete process.env.MEDIA_TRACK_REHEARSAL;
   delete process.env.MEDIA_TRACK_DEMO_MODE;
+  delete process.env.MEDIA_TRACK_MULTI_USER;
   delete process.env.MEDIA_TRACK_DISTRIBUTION;
   delete process.env.MEDIA_TRACK_IMAGE;
   delete process.env.MEDIA_TRACK_IMAGE_TAG;
@@ -212,6 +214,7 @@ describe("collectSystemInfo", () => {
     expect(ownerInfo.redis.status).toBe("unconfigured");
     expect(ownerInfo.version.distribution).toBe("fork-image");
     expect(ownerInfo.version.imageRef).toBe("ghcr.io/pickarm/mediary-scout:latest");
+    expect(ownerInfo.auth).toEqual({ mode: "account-auth", passwordConfigured: false });
     expect(ownerInfo.library).toEqual({
       landedTotal: 2,
       landedMovies: 1,
@@ -233,7 +236,22 @@ describe("collectSystemInfo", () => {
     expect(memberInfo.database.target).toBeNull();
     expect(memberInfo.database.databaseName).toBeNull();
     expect(memberInfo.redis.namespace).toBe("");
-  });
+  }, 30_000);
+
+  it("reports single-user-password auth mode when MEDIA_TRACK_MULTI_USER=0", async () => {
+    const { rt, collectSystemInfo } = await boot({
+      MEDIA_TRACK_MULTI_USER: "0",
+    });
+    await rt.setSingleUserPassword("SingleSecret123");
+    const info = await collectSystemInfo({
+      accountId: "acct_default",
+      canViewInfraDetails: true,
+    });
+    expect(info.auth).toEqual({
+      mode: "single-user-password",
+      passwordConfigured: true,
+    });
+  }, 30_000);
 
   it("reports rehearsal state for Redis when MEDIA_TRACK_REHEARSAL=1", async () => {
     const { collectSystemInfo } = await boot({
@@ -250,5 +268,5 @@ describe("collectSystemInfo", () => {
     expect(info.redis.target).toBe("redis.local:6379");
     expect(info.redis.dbIndex).toBe("db1");
     expect(JSON.stringify(info)).not.toContain("hidden");
-  });
+  }, 30_000);
 });

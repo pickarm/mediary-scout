@@ -142,7 +142,7 @@ describe("single-user gate wiring (failure paths)", () => {
   );
 
   it(
-    "LAN + 密码状态读失败 → 保持开放（不因读不到就把本地用户锁死）",
+    "LAN + 密码状态读失败 → 全环境 fail-closed，返回哨兵",
     async () => {
       vi.doMock("next/headers", () => ({
         headers: async () => new Headers({ "user-agent": "curl" }), // 无 CF 头 = LAN
@@ -160,8 +160,7 @@ describe("single-user gate wiring (failure paths)", () => {
       const accountId = await rt.getCurrentAccountId();
       repo.getAccountById = original;
 
-      // 局域网是可信网段：读不到状态时维持现状行为，不制造运维事故
-      expect(accountId).toBe("acct_default");
+      expect(accountId).toBe("acct_unauthenticated");
     },
     CRYPTO_TIMEOUT_MS,
   );
@@ -178,106 +177,67 @@ describe("single-user gate wiring (failure paths)", () => {
   );
 });
 
-/**
- * 「未设密码 ⇒ 远程也全开放」是本仓库最严重的一个洞。
- *
- * 旧实现在判定远程之前就先 `if (hasPassword === false) return acct_default`，
- * 于是一个**匿名公网访客**经隧道进来即拿到站主身份：整个媒体库、五个网盘的
- * 凭据、LLM key 全部可读，且写路径也放行——`requireAuthenticatedAccountId()`
- * 只拦哨兵 `acct_unauthenticated`，而这条路径压根产不出哨兵。
- *
- * 这在 Cloudflare Access 挡在前面时尚可存活；本分支移除了 Access，它就变成
- * 一个活的公网洞。新规则：**远程一律需要 session，与密码状态无关**；
- * 局域网维持开放（既定的可信网段设计）。
- */
-describe("未设密码 + 远程 = 必须 fail-closed（移除 Access 后的公网洞）", () => {
+describe("全环境强制登录（彻底移除未设密与局域网免登）", () => {
   it(
-    "纯函数：未设密码 + 远程 + 无 session → 哨兵，绝不是 acct_default",
+    "纯函数：仅 hasPassword=true 且 sessionAccountId=acct_default 才放行",
     async () => {
       const rt = await boot();
-      expect(
-        rt.resolveSingleUserAccount({ hasPassword: false, isRemote: true, sessionAccountId: null }),
-      ).toBe("acct_unauthenticated");
+      expect(rt.resolveSingleUserAccount({ hasPassword: false, isRemote: true, sessionAccountId: null })).toBe("acct_unauthenticated");
+      expect(rt.resolveSingleUserAccount({ hasPassword: false, isRemote: false, sessionAccountId: null })).toBe("acct_unauthenticated");
+      expect(rt.resolveSingleUserAccount({ hasPassword: true, isRemote: false, sessionAccountId: null })).toBe("acct_unauthenticated");
+      expect(rt.resolveSingleUserAccount({ hasPassword: "unknown", isRemote: false, sessionAccountId: null })).toBe("acct_unauthenticated");
+      expect(rt.resolveSingleUserAccount({ hasPassword: true, isRemote: true, sessionAccountId: null })).toBe("acct_unauthenticated");
+      expect(rt.resolveSingleUserAccount({ hasPassword: "unknown", isRemote: true, sessionAccountId: null })).toBe("acct_unauthenticated");
+      expect(rt.resolveSingleUserAccount({ hasPassword: false, isRemote: true, sessionAccountId: "acct_default" })).toBe("acct_unauthenticated");
+      expect(rt.resolveSingleUserAccount({ hasPassword: true, isRemote: false, sessionAccountId: "acct_default" })).toBe("acct_default");
+      expect(rt.resolveSingleUserAccount({ hasPassword: true, isRemote: true, sessionAccountId: "acct_default" })).toBe("acct_default");
     },
     CRYPTO_TIMEOUT_MS,
   );
 
   it(
-    "纯函数：未设密码 + 局域网 → 保持开放（可信网段设计不变）",
-    async () => {
-      const rt = await boot();
-      expect(
-        rt.resolveSingleUserAccount({ hasPassword: false, isRemote: false, sessionAccountId: null }),
-      ).toBe("acct_default");
-    },
-    CRYPTO_TIMEOUT_MS,
-  );
-
-  it(
-    "纯函数：状态未知/已设密码的既有组合不受影响",
-    async () => {
-      const rt = await boot();
-      // LAN 一律开放
-      expect(
-        rt.resolveSingleUserAccount({ hasPassword: true, isRemote: false, sessionAccountId: null }),
-      ).toBe("acct_default");
-      expect(
-        rt.resolveSingleUserAccount({ hasPassword: "unknown", isRemote: false, sessionAccountId: null }),
-      ).toBe("acct_default");
-      // 远程：只认 acct_default 自己的 session
-      expect(
-        rt.resolveSingleUserAccount({ hasPassword: true, isRemote: true, sessionAccountId: null }),
-      ).toBe("acct_unauthenticated");
-      expect(
-        rt.resolveSingleUserAccount({ hasPassword: "unknown", isRemote: true, sessionAccountId: null }),
-      ).toBe("acct_unauthenticated");
-      expect(
-        rt.resolveSingleUserAccount({ hasPassword: false, isRemote: true, sessionAccountId: "acct_default" }),
-      ).toBe("acct_default");
-      expect(
-        rt.resolveSingleUserAccount({ hasPassword: true, isRemote: true, sessionAccountId: "acct_default" }),
-      ).toBe("acct_default");
-    },
-    CRYPTO_TIMEOUT_MS,
-  );
-
-  /**
-   * 接线测试，不可省。`getCurrentAccountId()` 自己也有一份
-   * `if (hasPassword === false) return DEFAULT_ACCOUNT_ID` 的短路，位置在调用
-   * 纯函数**之前**。只修纯函数会让上面那些断言全绿、而真实请求路径依旧裸奔。
-   */
-  it(
-    "接线：未设密码 + 远程匿名请求 → getCurrentAccountId 必须返回哨兵",
-    async () => {
-      mockRemoteRequest(); // 有 cf-ray，无 session cookie
-      const rt = await boot();
-      // 刻意不设密码：全新实例的真实状态
-      expect(await rt.hasLoginPassword()).toBe(false);
-      expect(await rt.getCurrentAccountId()).toBe("acct_unauthenticated");
-    },
-    CRYPTO_TIMEOUT_MS,
-  );
-
-  it(
-    "接线：未设密码 + 远程匿名请求 → 写路径必须抛错",
+    "接线：未设密码 + 远程/局域网匿名请求 → getCurrentAccountId 一律返回哨兵且写路径抛错",
     async () => {
       mockRemoteRequest();
       const rt = await boot();
       expect(await rt.hasLoginPassword()).toBe(false);
+      expect(await rt.getCurrentAccountId()).toBe("acct_unauthenticated");
+      await expect(rt.requireAuthenticatedAccountId()).rejects.toThrow();
+
+      vi.doUnmock("next/headers");
+      vi.doMock("next/headers", () => ({
+        headers: async () => new Headers({ "user-agent": "curl" }),
+        cookies: async () => ({ get: () => undefined }),
+      }));
+      expect(await rt.getCurrentAccountId()).toBe("acct_unauthenticated");
       await expect(rt.requireAuthenticatedAccountId()).rejects.toThrow();
     },
     CRYPTO_TIMEOUT_MS,
   );
 
   it(
-    "接线：未设密码 + 局域网 → 仍然直通 acct_default（不得回归）",
+    "接线：已设密码 + 局域网无 session 拒绝，携带真实 acct_default session 才放行",
     async () => {
       vi.doMock("next/headers", () => ({
-        headers: async () => new Headers({ "user-agent": "curl" }), // 无 CF 头 = LAN
+        headers: async () => new Headers({ "user-agent": "curl" }),
         cookies: async () => ({ get: () => undefined }),
       }));
       const rt = await boot();
-      expect(await rt.hasLoginPassword()).toBe(false);
+      await rt.setSingleUserPassword("secret-123");
+      expect(await rt.hasLoginPassword()).toBe(true);
+      expect(await rt.getCurrentAccountId()).toBe("acct_unauthenticated");
+
+      const login = await rt.loginAccount("", "secret-123");
+      expect(login.ok).toBe(true);
+      if (!login.ok) return;
+
+      vi.doUnmock("next/headers");
+      vi.doMock("next/headers", () => ({
+        headers: async () => new Headers({ "user-agent": "curl" }),
+        cookies: async () => ({
+          get: (name: string) => (name === "mt_session" ? { name, value: login.signedCookie } : undefined),
+        }),
+      }));
       expect(await rt.getCurrentAccountId()).toBe("acct_default");
     },
     CRYPTO_TIMEOUT_MS,

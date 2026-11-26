@@ -1,4 +1,5 @@
 import { connection, NextResponse, type NextRequest } from "next/server";
+import { DEFAULT_ACCOUNT_ID } from "@media-track/workflow";
 import { isWebBootstrapDisabled } from "../../../../lib/auth-mode";
 import {
   SESSION_COOKIE_NAME,
@@ -47,18 +48,31 @@ export async function GET(request: NextRequest) {
   };
 
   if (!isMultiUserEnabled()) {
-    return finalize({
+    const passwordState = await hasLoginPassword();
+    const singleUserAuthenticated =
+      passwordState === true && sessionAccountId === DEFAULT_ACCOUNT_ID;
+    const response = NextResponse.json({
       needsClaim: false,
       hasExistingLibrary: false,
       singleUser: true,
-      // "unknown"（DB 读不出来）按**已设密码**上报：服务端远程读路径此时是
-      // fail-closed 的，宁可显示登录框，也不要误导为无需登录。
-      passwordSet: (await hasLoginPassword()) !== false,
+      // "unknown"（DB 读不出来）按**已设密码**上报：服务端是 fail-closed 的，
+      // 宁可显示登录框，也不要误导为无需设密码。
+      passwordSet: passwordState !== false,
       remote,
       allowRegistration: false,
       webBootstrapDisabled: false,
-      authenticated,
+      authenticated: singleUserAuthenticated,
     });
+    if (Boolean(rawSessionCookie) && !singleUserAuthenticated) {
+      response.cookies.set(SESSION_COOKIE_NAME, "", {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: isCookieSecure(request),
+        path: "/",
+        maxAge: 0,
+      });
+    }
+    return response;
   }
 
   await ensureEnvBootstrapOwner();

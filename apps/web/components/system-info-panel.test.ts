@@ -25,6 +25,10 @@ function makeSnapshot(over?: Partial<SystemInfoSnapshot>): SystemInfoSnapshot {
       demoMode: false,
       rehearsalMode: false,
     },
+    auth: {
+      mode: "account-auth",
+      passwordConfigured: true,
+    },
     database: {
       engine: "postgresql",
       status: "connected",
@@ -82,6 +86,7 @@ describe("SystemInfoPanel", () => {
     expect(html).toContain("redis.internal:6379 (db0)");
     expect(html).toContain("2 / 3");
     expect(html).toContain("ghcr.io/pickarm/mediary-scout:latest");
+    expect(html).toContain("强制账号密码登录（已设密码）");
   });
 
   it("masks infrastructure endpoints when canViewInfraDetails is false", () => {

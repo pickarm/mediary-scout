@@ -20,6 +20,10 @@ export interface SystemInfoSnapshot {
     demoMode: boolean;
     rehearsalMode: boolean;
   };
+  auth: {
+    mode: "account-auth" | "single-user-password" | "demo" | "desktop";
+    passwordConfigured: boolean;
+  };
   database: {
     engine: "postgresql" | "sqlite";
     status: "connected" | "error";

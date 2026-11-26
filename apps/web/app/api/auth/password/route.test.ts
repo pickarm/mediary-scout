@@ -7,11 +7,13 @@ vi.mock("../../../../lib/workflow-runtime", async () => {
     "../../../../lib/workflow-runtime",
   );
   return {
+    SESSION_COOKIE_NAME: "mt_session",
     isRemoteRequest: actual.isRemoteRequest,
+    isCookieSecure: vi.fn(() => false),
     isMultiUserEnabled: vi.fn(() => false),
     hasLoginPassword: vi.fn(),
     setSingleUserPassword: vi.fn(async () => ({ ok: true })),
-    clearSingleUserPassword: vi.fn(async () => undefined),
+    createSingleUserSessionCookie: vi.fn(async () => "sess_1.sig"),
     requireAuthenticatedAccountId: vi.fn(async () => "acct_default"),
     UnauthenticatedAccountError: actual.UnauthenticatedAccountError,
   };
@@ -48,11 +50,13 @@ describe("POST /api/auth/password", () => {
     expect(runtime.setSingleUserPassword).not.toHaveBeenCalled();
   });
 
-  it("sets the first password from the LAN", async () => {
+  it("sets the first password from the LAN and issues an mt_session cookie", async () => {
     vi.mocked(runtime.hasLoginPassword).mockResolvedValue(false);
     const res = await POST(post());
     expect(res.status).toBe(200);
     expect(runtime.setSingleUserPassword).toHaveBeenCalledWith("correct horse");
+    expect(runtime.createSingleUserSessionCookie).toHaveBeenCalledOnce();
+    expect(res.cookies.get("mt_session")?.value).toBe("sess_1.sig");
   });
 
   it("lets a signed-in owner change an existing password over the tunnel", async () => {
@@ -63,16 +67,23 @@ describe("POST /api/auth/password", () => {
     expect(runtime.setSingleUserPassword).toHaveBeenCalledWith("correct horse");
   });
 
-  it("answers 401, not 500, when an existing password is changed or cleared without signing in", async () => {
+  it("refuses clearing an existing password: 401 when unauthenticated, 400 when authenticated", async () => {
     vi.mocked(runtime.hasLoginPassword).mockResolvedValue(true);
-    vi.mocked(runtime.requireAuthenticatedAccountId)
-      .mockRejectedValueOnce(new runtime.UnauthenticatedAccountError())
-      .mockRejectedValueOnce(new runtime.UnauthenticatedAccountError());
-    const change = await POST(post(TUNNEL));
-    const clear = await POST(post(TUNNEL, { clear: true }));
-    expect([change.status, clear.status]).toEqual([401, 401]);
+    vi.mocked(runtime.requireAuthenticatedAccountId).mockRejectedValueOnce(
+      new runtime.UnauthenticatedAccountError(),
+    );
+    const unauthChange = await POST(post(TUNNEL));
+    expect(unauthChange.status).toBe(401);
+
+    vi.mocked(runtime.requireAuthenticatedAccountId).mockRejectedValueOnce(
+      new runtime.UnauthenticatedAccountError(),
+    );
+    const unauthClear = await POST(post(TUNNEL, { clear: true }));
+    expect(unauthClear.status).toBe(401);
+
+    const authClear = await POST(post({}, { clear: true }));
+    expect(authClear.status).toBe(400);
     expect(runtime.setSingleUserPassword).not.toHaveBeenCalled();
-    expect(runtime.clearSingleUserPassword).not.toHaveBeenCalled();
   });
 
   it("still fails loudly on an unexpected error from the session check", async () => {

@@ -211,30 +211,39 @@ describe("proxy gate — single-user opt-out mode (MEDIA_TRACK_MULTI_USER=0)", (
   );
 
   it(
-    "once password is set in MEDIA_TRACK_MULTI_USER=0, allows LAN while requiring verified acct_default session on remote",
+    "in MEDIA_TRACK_MULTI_USER=0, enforces acct_default session across BOTH LAN and remote (no LAN bypass)",
     async () => {
       const { rt, proxy } = await boot({ MEDIA_TRACK_MULTI_USER: "0" });
       await rt.setSingleUserPassword("secret-123");
 
-      // 已设密码：局域网直通
-      expect(isRedirectToLogin(await proxy(makeRequest({})))).toBe(false);
-      expect(isRedirectToLogin(await proxy(makeRequest({ staleAuthCookie: true })))).toBe(false);
-
-      // 远程（含 CF 头）：伪造或无 session 一律拦截，且清理失效 Cookie
+      // 已设密码：无 session 时局域网与外网同样被拦截跳转 /login（彻底取消免登）
+      expect(isRedirectToLogin(await proxy(makeRequest({})))).toBe(true);
+      expect(isRedirectToLogin(await proxy(makeRequest({ staleAuthCookie: true })))).toBe(true);
       expect(isRedirectToLogin(await proxy(makeRequest({ cf: true })))).toBe(true);
-      const forged = await proxy(makeRequest({ cf: true, sessionValue: "forged.sig" }));
-      expect(isRedirectToLogin(forged)).toBe(true);
-      expect(forged.headers.get("set-cookie") ?? "").toContain("Max-Age=0");
 
-      // 远程携带真实 acct_default 会话：放行
+      // 伪造 session 在局域网和远程都一律拦截并清 Cookie
+      for (const cf of [false, true]) {
+        const forged = await proxy(makeRequest({ cf, sessionValue: "forged.sig" }));
+        expect(isRedirectToLogin(forged)).toBe(true);
+        expect(forged.headers.get("set-cookie") ?? "").toContain("Max-Age=0");
+      }
+
+      // 携带真实 acct_default 会话：局域网和远程均放行
       const login = await rt.loginAccount("", "secret-123");
       expect(login.ok).toBe(true);
       if (!login.ok) return;
+      expect(isRedirectToLogin(await proxy(makeRequest({ sessionValue: login.signedCookie })))).toBe(false);
       expect(isRedirectToLogin(await proxy(makeRequest({ cf: true, sessionValue: login.signedCookie })))).toBe(false);
 
-      // 清密后恢复未设密态：局域网再次被强制跳转 /login 设置密码
+      // 退出登录后旧 session 在局域网和远程均立即失效并被拦截
+      await rt.logoutSession(login.signedCookie);
+      const afterLogout = await proxy(makeRequest({ path: "/", sessionValue: login.signedCookie }));
+      expect(isRedirectToLogin(afterLogout)).toBe(true);
+      expect(afterLogout.headers.get("set-cookie") ?? "").toContain("Max-Age=0");
+
+      // 清密后恢复未设密态：局域网携带旧会话亦被拦截
       await rt.clearSingleUserPassword();
-      expect(isRedirectToLogin(await proxy(makeRequest({ path: "/" })))).toBe(true);
+      expect(isRedirectToLogin(await proxy(makeRequest({ path: "/", sessionValue: login.signedCookie })))).toBe(true);
     },
     CRYPTO_TIMEOUT_MS,
   );

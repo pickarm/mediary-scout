@@ -13,7 +13,8 @@ import { AccountIdentity } from "./account-identity";
 /**
  * Async server loader for the sidebar identity block and page-level auth fallback:
  * - Demo mode or local desktop single-user: renders nothing;
- * - Single-user opt-out mode (MEDIA_TRACK_MULTI_USER=0): redirects to /login when no password is set;
+ * - Single-user opt-out mode (MEDIA_TRACK_MULTI_USER=0): redirects to /login when password is unset
+ *   or session is unauthenticated, otherwise shows identity menu (change password + logout);
  * - Default forced-auth mode: redirects to /login when session is invalid/missing or account lacks summary.
  */
 export async function AccountIdentityLoader() {
@@ -24,7 +25,13 @@ export async function AccountIdentityLoader() {
     if ((await hasLoginPassword()) !== true) {
       redirect("/login");
     }
-    return null;
+    const accountId = await getCurrentAccountId();
+    if (accountId === UNAUTHENTICATED_ACCOUNT_ID) {
+      redirect("/login");
+    }
+    const summary = await getCurrentAccountSummary();
+    const displayName = summary?.username && summary.username !== "default" ? summary.username : "站主";
+    return <AccountIdentity username={displayName} isOwner={true} showAccountManagement={false} />;
   }
   const accountId = await getCurrentAccountId();
   if (accountId === UNAUTHENTICATED_ACCOUNT_ID) {

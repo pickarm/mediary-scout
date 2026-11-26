@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import { redirect } from "next/navigation";
 import { TriangleAlert } from "lucide-react";
 import { AcquiringPoller } from "../components/acquiring-poller";
 import { AppSidebar } from "../components/app-sidebar";
@@ -12,12 +13,15 @@ import { GitHubNameplate } from "../components/github-nameplate";
 import type { TrendingKind } from "../lib/trending";
 import { getSearchView } from "../lib/search-page";
 import { getLibraryMediaPage } from "../lib/library-media-runtime";
+import { isDemoMode } from "../lib/demo-mode";
 import {
   ensureDemoSeeded,
   getActiveWorkspaceScope,
   getRegisteredDriveCount,
   getWorkflowRepository,
   getCurrentAccountId,
+  isMultiUserEnabled,
+  UNAUTHENTICATED_ACCOUNT_ID,
 } from "../lib/workflow-runtime";
 import { isUserVisibleWorkflowKind } from "@media-track/workflow";
 import type { TrackedSeasonState } from "@media-track/workflow";
@@ -77,6 +81,11 @@ async function HomeSurface({
   storageId?: string | undefined;
 }) {
   const params = (await searchParams) ?? {};
+  if (!isDemoMode() && !(process.env.MEDIA_TRACK_DESKTOP === "1" && !isMultiUserEnabled())) {
+    if ((await getCurrentAccountId()) === UNAUTHENTICATED_ACCOUNT_ID) {
+      redirect("/login");
+    }
+  }
   const query = stringParam(params.q);
   const activeTab = stringParam(params.tab) === "library" ? "library" : "search";
   const mediaType = stringParam(params.type) || "all";

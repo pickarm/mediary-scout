@@ -235,9 +235,11 @@ async function SettingsAttentionSection({
 
 async function PasswordChangeSection() {
   // connection() FIRST: cacheComponents would otherwise prerender this at build time
-  // (multi-user off) and bake it as null → never shows in production multi-user.
+  // (multi-user off) and bake it as null → never shows in production.
   await connection();
-  if (!isMultiUserEnabled()) return null;
+  if (isDemoMode() || (process.env.MEDIA_TRACK_DESKTOP === "1" && !isMultiUserEnabled())) {
+    return null;
+  }
   return (
     <section id="password" className="panel" style={{ maxWidth: 720, marginTop: 24 }}>
       <div className="panel-header">

@@ -52,6 +52,20 @@ function redisStatusMeta(status: SystemInfoSnapshot["redis"]["status"]): { label
   }
 }
 
+function authModeLabel(auth: SystemInfoSnapshot["auth"]): string {
+  const pwdText = auth.passwordConfigured ? "已设密码" : "未设密码";
+  switch (auth.mode) {
+    case "account-auth":
+      return `强制账号密码登录（${pwdText}）`;
+    case "single-user-password":
+      return `单用户强制密码登录 · MEDIA_TRACK_MULTI_USER=0（${pwdText}）`;
+    case "demo":
+      return "只读演示模式（免登录）";
+    case "desktop":
+      return "桌面本地模式";
+  }
+}
+
 export function SystemInfoPanel({
   initial,
   libraryHref,
@@ -378,6 +392,10 @@ export function SystemInfoPanel({
               <dd className={`${styles.kvValue} ${styles.kvMono}`}>
                 {snapshot.process.memoryRssMb} MB / {snapshot.process.memoryHeapUsedMb} MB
               </dd>
+            </div>
+            <div className={styles.kvRow}>
+              <dt className={styles.kvLabel}>登录鉴权</dt>
+              <dd className={styles.kvValue}>{authModeLabel(snapshot.auth)}</dd>
             </div>
             <div className={styles.kvRow}>
               <dt className={styles.kvLabel}>进程 PID</dt>

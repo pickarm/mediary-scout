@@ -41,17 +41,19 @@ describe("single-user password gate", () => {
   );
 
   it(
-    "resolveSingleUserAccount：LAN 一律开放；远程一律需 session（与密码状态无关）",
+    "resolveSingleUserAccount：全网络环境均需已设密码且持有效 acct_default session",
     async () => {
       const rt = await boot();
-      // 纯函数，覆盖全部内外/有无 session 组合（这是本 plan 的安全核心判定）
-      expect(rt.resolveSingleUserAccount({ hasPassword: false, isRemote: false, sessionAccountId: null })).toBe("acct_default");
-      // 未设密码 + 远程：曾经返回 acct_default —— 匿名公网访客直接拿到站主身份。
-      // Cloudflare Access 移除后这是活的公网洞，已收紧为哨兵。
+      // 无论是否远程，未设密码 / 状态未知 / 无 session 一律拒绝
+      expect(rt.resolveSingleUserAccount({ hasPassword: false, isRemote: false, sessionAccountId: null })).toBe("acct_unauthenticated");
       expect(rt.resolveSingleUserAccount({ hasPassword: false, isRemote: true, sessionAccountId: null })).toBe("acct_unauthenticated");
-      expect(rt.resolveSingleUserAccount({ hasPassword: true, isRemote: false, sessionAccountId: null })).toBe("acct_default"); // LAN 免登录
-      expect(rt.resolveSingleUserAccount({ hasPassword: true, isRemote: true, sessionAccountId: null })).toBe("acct_unauthenticated"); // 远程无 session → 哨兵
-      expect(rt.resolveSingleUserAccount({ hasPassword: true, isRemote: true, sessionAccountId: "acct_default" })).toBe("acct_default"); // 远程已登录 → 放行
+      expect(rt.resolveSingleUserAccount({ hasPassword: true, isRemote: false, sessionAccountId: null })).toBe("acct_unauthenticated");
+      expect(rt.resolveSingleUserAccount({ hasPassword: true, isRemote: true, sessionAccountId: null })).toBe("acct_unauthenticated");
+      expect(rt.resolveSingleUserAccount({ hasPassword: "unknown", isRemote: false, sessionAccountId: "acct_default" })).toBe("acct_unauthenticated");
+      expect(rt.resolveSingleUserAccount({ hasPassword: false, isRemote: false, sessionAccountId: "acct_default" })).toBe("acct_unauthenticated");
+      // 仅已设密码且持有效 acct_default session 放行（内外网一致）
+      expect(rt.resolveSingleUserAccount({ hasPassword: true, isRemote: false, sessionAccountId: "acct_default" })).toBe("acct_default");
+      expect(rt.resolveSingleUserAccount({ hasPassword: true, isRemote: true, sessionAccountId: "acct_default" })).toBe("acct_default");
     },
     CRYPTO_TIMEOUT_MS,
   );

@@ -95,8 +95,9 @@ describe("GET /api/auth/bootstrap", () => {
     expect(cleared?.maxAge).toBe(0);
   });
 
-  it("tells the login page whether the visitor came through the tunnel in single-user opt-out mode", async () => {
+  it("reports single-user bootstrap and enforces passwordSet + acct_default session checks", async () => {
     vi.mocked(runtime.isMultiUserEnabled).mockReturnValue(false);
+    vi.mocked(runtime.hasLoginPassword).mockResolvedValue(false);
     expect(await (await get(TUNNEL)).json()).toMatchObject({
       singleUser: true,
       passwordSet: false,
@@ -109,6 +110,27 @@ describe("GET /api/auth/bootstrap", () => {
       singleUser: true,
       passwordSet: false,
       remote: false,
+      authenticated: false,
+    });
+
+    // 已设密码但携带非 acct_default 会话：must NOT authenticate，且清理 Cookie
+    vi.mocked(runtime.hasLoginPassword).mockResolvedValue(true);
+    vi.mocked(runtime.resolveSessionAccountId).mockResolvedValueOnce("acct_other");
+    const nonDefaultRes = await get({ cookie: "mt_session=other.sig" });
+    expect(await nonDefaultRes.json()).toMatchObject({
+      singleUser: true,
+      passwordSet: true,
+      authenticated: false,
+    });
+    expect(nonDefaultRes.cookies.get("mt_session")?.maxAge).toBe(0);
+
+    // 已设密码且持有效 acct_default 会话 → authenticated: true
+    vi.mocked(runtime.resolveSessionAccountId).mockResolvedValueOnce("acct_default");
+    const validRes = await get({ cookie: "mt_session=default.sig" });
+    expect(await validRes.json()).toMatchObject({
+      singleUser: true,
+      passwordSet: true,
+      authenticated: true,
     });
   });
 });
