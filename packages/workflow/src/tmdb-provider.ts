@@ -57,10 +57,40 @@ function normalizeAccess(access: TmdbAccess): TmdbAccess {
   return access.readToken === undefined ? { baseURL } : { baseURL, readToken: access.readToken };
 }
 
+const TMDB_DEAD_ACCESS_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_SEARCH_MAX_RESULTS = 40;
+const DEFAULT_TV_DETAILS_LIMIT = 8;
+const MAX_SEARCH_PAGES = 3;
+const TV_DETAILS_CONCURRENCY = 6;
+const MAX_CAST_MEMBERS = 10;
+
+/** Shared 5-minute TTL circuit breaker for default-fetch TMDB accesses. */
+const sharedDeadAccesses = new Map<string, number>();
+
+export function resetSharedTmdbDeadAccessesForTests(): void {
+  sharedDeadAccesses.clear();
+}
+
+function isDeadAccess(
+  deadAccesses: Map<string, number> | undefined,
+  key: string,
+  now: number,
+): boolean {
+  if (!deadAccesses) return false;
+  const expiresAt = deadAccesses.get(key);
+  if (expiresAt === undefined) return false;
+  if (expiresAt <= now) {
+    deadAccesses.delete(key);
+    return false;
+  }
+  return true;
+}
+
 /** Try each access in order; first success wins, all-fail throws. This is the
  *  one chokepoint where user-key → proxy fallback lives.
  *
- *  `deadAccesses` (shared across a provider's lifetime) memoizes which accesses
+ *  `deadAccesses` (5-minute TTL map: shared across default-fetch callers, or
+ *  per-instance when tests inject a custom `fetchJson`) memoizes which accesses
  *  have already failed so later calls skip them instead of re-paying the cost.
  *  Without it, a user TMDB token whose direct api.themoviedb.org hop is blocked
  *  makes EVERY call (a search fires ~11) re-time-out on that hop before falling
@@ -68,14 +98,14 @@ function normalizeAccess(access: TmdbAccess): TmdbAccess {
  *  Keyed by baseURL + token (accessKey), so two accesses sharing a host but
  *  carrying different tokens (user key, then env token) are tracked independently
  *  — a failing user key must not skip a still-working env-token access. When every
- *  access is already marked dead the set is left untouched and all are retried
+ *  access is already marked dead the map is left untouched and all are retried
  *  (the prior failures may have been transient) rather than throwing blind. */
 async function fetchViaAccessChain(
   accesses: TmdbAccess[],
   path: string,
   query: Record<string, string>,
   fetchJson: TmdbFetchJson,
-  deadAccesses?: Set<string>,
+  deadAccesses?: Map<string, number>,
 ): Promise<unknown> {
   let lastError: unknown = new Error("no TMDB access configured");
   let sawTimeout = false;
@@ -120,13 +150,16 @@ async function fetchViaAccessChain(
         }
         // A 404 is this resource's answer, not a dead hop — the access responded.
         if (!notFound) {
-          deadAccesses?.add(accessKey(access));
+          deadAccesses?.set(accessKey(access), Date.now() + TMDB_DEAD_ACCESS_TTL_MS);
         }
       }
     }
     return { ok: false };
   };
-  const live = deadAccesses ? accesses.filter((a) => !deadAccesses.has(accessKey(a))) : accesses;
+  const now = Date.now();
+  const live = deadAccesses
+    ? accesses.filter((a) => !isDeadAccess(deadAccesses, accessKey(a), now))
+    : accesses;
   const candidates = live.length > 0 ? live : accesses;
   const first = await tryOnce(candidates);
   if (first.ok) {
@@ -193,7 +226,14 @@ export interface PreparedTrackingTarget {
   keyword: string;
 }
 
-interface TmdbTvDetails {
+export interface TmdbCastMember {
+  id: number;
+  name: string;
+  character: string;
+  profilePath: string | null;
+}
+
+export interface TmdbTvDetails {
   id: number;
   name: string;
   original_name: string;
@@ -212,12 +252,18 @@ interface TmdbTvDetails {
   }>;
   genres: number[];
   origin_country: string[];
+  voteAverage?: number | null;
+  genreNames?: string[];
+  runtime?: number | null;
+  cast?: TmdbCastMember[];
+  creators?: string[];
 }
 
-interface TmdbSeasonDetails {
+export interface TmdbSeasonDetails {
   season_number: number;
   episodes?: Array<{
     episode_number?: number;
+    name?: string | null;
     air_date?: string | null;
   }>;
 }
@@ -229,6 +275,7 @@ interface TmdbEpisodeGroupSummary {
 
 interface TmdbEpisodeGroupEpisode {
   order?: number;
+  name?: string | null;
   air_date?: string | null;
 }
 
@@ -243,7 +290,7 @@ interface TmdbEpisodeGroupDetails {
   groups: TmdbEpisodeGroupSubgroup[];
 }
 
-interface TmdbMovieDetails {
+export interface TmdbMovieDetails {
   id: number;
   title: string;
   original_title: string;
@@ -253,26 +300,33 @@ interface TmdbMovieDetails {
   backdrop_path: string | null;
   genres: number[];
   origin_country: string[];
+  voteAverage?: number | null;
+  genreNames?: string[];
+  runtime?: number | null;
+  cast?: TmdbCastMember[];
+  directors?: string[];
 }
 
 export class TmdbMetadataProvider {
   private readonly accesses: TmdbAccess[];
   private readonly language: string;
   private readonly fetchJson: TmdbFetchJson;
-  /** Per-instance memo of accesses that already failed (issue #68): skip them on
-   *  later calls so a blocked direct hop isn't re-probed once per TMDB request. */
-  private readonly deadAccesses = new Set<string>();
+  /** Memo of accesses that already failed (issue #68): shared 5-minute TTL table
+   *  when using default fetchJson; isolated per-instance when tests inject fetchJson. */
+  private readonly deadAccesses: Map<string, number>;
 
   constructor(options: TmdbMetadataProviderOptions) {
     this.accesses = resolveAccesses(options);
     this.language = options.language ?? "zh-CN";
     this.fetchJson = options.fetchJson ?? defaultFetchJson;
+    this.deadAccesses = options.fetchJson ? new Map<string, number>() : sharedDeadAccesses;
   }
 
   async getTvDetails(tmdbId: number): Promise<TmdbTvDetails> {
     return parseTvDetails(
       await this.get(`tv/${tmdbId}`, {
         language: this.language,
+        append_to_response: "credits",
       }),
     );
   }
@@ -302,7 +356,12 @@ export class TmdbMetadataProvider {
   }
 
   async getMovieDetails(tmdbId: number): Promise<TmdbMovieDetails> {
-    return parseMovieDetails(await this.get(`movie/${tmdbId}`, { language: this.language }));
+    return parseMovieDetails(
+      await this.get(`movie/${tmdbId}`, {
+        language: this.language,
+        append_to_response: "credits",
+      }),
+    );
   }
 
   private async get(path: string, query: Record<string, string>): Promise<unknown> {
@@ -314,9 +373,9 @@ export class TmdbSearchProvider implements MediaSearchProvider {
   private readonly accesses: TmdbAccess[];
   private readonly language: string;
   private readonly fetchJson: TmdbFetchJson;
-  /** Per-instance memo of accesses that already failed (issue #68): skip them on
-   *  later calls so a blocked direct hop isn't re-probed once per TMDB request. */
-  private readonly deadAccesses = new Set<string>();
+  /** Memo of accesses that already failed (issue #68): shared 5-minute TTL table
+   *  when using default fetchJson; isolated per-instance when tests inject fetchJson. */
+  private readonly deadAccesses: Map<string, number>;
   private readonly maxResults: number;
   private readonly tvDetailsLimit: number;
 
@@ -324,40 +383,68 @@ export class TmdbSearchProvider implements MediaSearchProvider {
     this.accesses = resolveAccesses(options);
     this.language = options.language ?? "zh-CN";
     this.fetchJson = options.fetchJson ?? defaultFetchJson;
-    this.maxResults = options.maxResults ?? 10;
-    this.tvDetailsLimit = options.tvDetailsLimit ?? this.maxResults;
+    this.deadAccesses = options.fetchJson ? new Map<string, number>() : sharedDeadAccesses;
+    this.maxResults = options.maxResults ?? DEFAULT_SEARCH_MAX_RESULTS;
+    this.tvDetailsLimit = options.tvDetailsLimit ?? DEFAULT_TV_DETAILS_LIMIT;
   }
 
   async searchMedia(input: { query: string }): Promise<MediaSearchCandidate[]> {
     const query = normalizeTitle(input.query);
-    if (!query) {
+    if (!query || this.maxResults <= 0) {
       return [];
     }
 
-    const response = await this.get("search/multi", {
+    const firstPage = await this.get("search/multi", {
       query,
       include_adult: "false",
       language: this.language,
       page: "1",
     });
-    const results = parseSearchResults(response).slice(0, this.maxResults);
-    const candidates: MediaSearchCandidate[] = [];
-    let tvDetailsRequests = 0;
+    const rawResults: TmdbSearchResult[] = [...parseSearchResults(firstPage)];
+    const totalPages = parseTotalPages(firstPage);
+    let deduped = dedupeSearchResults(rawResults);
 
-    for (const result of results) {
-      if (result.media_type === "movie") {
-        candidates.push(movieSearchCandidate(result));
+    if (deduped.length < this.maxResults && totalPages > 1) {
+      const lastPage = Math.min(totalPages, MAX_SEARCH_PAGES);
+      const extraPages = Array.from({ length: lastPage - 1 }, (_, index) => index + 2);
+      const outcomes = await Promise.allSettled(
+        extraPages.map((page) =>
+          this.get("search/multi", {
+            query,
+            include_adult: "false",
+            language: this.language,
+            page: String(page),
+          }),
+        ),
+      );
+      for (const outcome of outcomes) {
+        if (outcome.status === "fulfilled") {
+          rawResults.push(...parseSearchResults(outcome.value));
+        }
       }
-
-      if (result.media_type === "tv") {
-        const details =
-          tvDetailsRequests < this.tvDetailsLimit ? await this.getTvDetails(result.id) : null;
-        tvDetailsRequests += details ? 1 : 0;
-        candidates.push(tvSearchCandidate(result, details));
-      }
+      deduped = dedupeSearchResults(rawResults);
     }
 
-    return candidates;
+    const results = deduped.slice(0, this.maxResults);
+    const tvLimit = Math.max(0, this.tvDetailsLimit);
+    const tvItems = results
+      .filter((result): result is Extract<TmdbSearchResult, { media_type: "tv" }> => result.media_type === "tv")
+      .slice(0, tvLimit);
+    const tvDetailsById = new Map<number, TmdbTvDetails | null>();
+
+    await mapWithConcurrency(tvItems, TV_DETAILS_CONCURRENCY, async (tv) => {
+      try {
+        tvDetailsById.set(tv.id, await this.getTvDetails(tv.id));
+      } catch {
+        tvDetailsById.set(tv.id, null);
+      }
+    });
+
+    return results.map((result) =>
+      result.media_type === "movie"
+        ? movieSearchCandidate(result)
+        : tvSearchCandidate(result, tvDetailsById.get(result.id) ?? null),
+    );
   }
 
   private async getTvDetails(tmdbId: number): Promise<TmdbTvDetails> {
@@ -399,7 +486,8 @@ export async function fetchTmdbList(
   query: Record<string, string> = {},
   opts: { fetchJson?: TmdbFetchJson } = {},
 ): Promise<unknown> {
-  return fetchViaAccessChain(accesses, path, query, opts.fetchJson ?? defaultFetchJson);
+  const deadAccesses = opts.fetchJson ? new Map<string, number>() : sharedDeadAccesses;
+  return fetchViaAccessChain(accesses, path, query, opts.fetchJson ?? defaultFetchJson, deadAccesses);
 }
 
 export function createTmdbMetadataProviderFromEnv(
@@ -518,7 +606,11 @@ async function seasonFromEpisodeGroupFallback(input: {
   }
   const episodes = [...selected[0]!.group.episodes]
     .sort((left, right) => (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER))
-    .map((episode, index) => ({ episode_number: index + 1, air_date: episode.air_date ?? null }));
+    .map((episode, index) => ({
+      episode_number: index + 1,
+      name: episode.name ?? null,
+      air_date: episode.air_date ?? null,
+    }));
   return { season_number: input.seasonNumber, episodes };
 }
 
@@ -530,6 +622,11 @@ function seasonGroupNameMatches(name: string, seasonNumber: number): boolean {
 export interface PreparedMovieTarget {
   title: MediaTitle;
   keyword: string;
+  voteAverage?: number | null;
+  genreNames?: string[];
+  runtime?: number | null;
+  cast?: TmdbCastMember[];
+  directors?: string[];
 }
 
 /** "获取电影" prepare step: one TMDB movie details call → a movie MediaTitle. */
@@ -567,24 +664,49 @@ export async function prepareMovieTarget(input: {
     // original title) to maximize coverage. Quality is a preference it applies,
     // not a hardcoded filter baked into the search.
     keyword: title,
+    voteAverage: details.voteAverage ?? null,
+    genreNames: details.genreNames ?? [],
+    runtime: details.runtime ?? null,
+    cast: details.cast ?? [],
+    directors: details.directors ?? [],
   };
+}
+
+export interface PreparedSeriesEpisode {
+  episodeNumber: number;
+  name: string | null;
+  airDate: string | null;
+}
+
+export interface PreparedSeriesSeason {
+  seasonNumber: number;
+  totalEpisodes: number;
+  latestAiredEpisode: number;
+  episodes?: PreparedSeriesEpisode[];
 }
 
 export interface PreparedSeriesTarget {
   title: MediaTitle;
-  seasons: Array<{ seasonNumber: number; totalEpisodes: number; latestAiredEpisode: number }>;
+  seasons: PreparedSeriesSeason[];
   keyword: string;
+  voteAverage?: number | null;
+  genreNames?: string[];
+  runtime?: number | null;
+  cast?: TmdbCastMember[];
+  creators?: string[];
 }
 
 /**
  * Title-level prepare step for "获取全剧": one TMDB details call yields every
  * season's shape and the latest-aired cursor. Specials (season 0) are
  * excluded; seasons after the cursor's season have zero aired episodes.
+ * Pass `includeEpisodes: true` when episode titles/air dates per season are needed.
  */
 export async function prepareSeriesTarget(input: {
   tmdbId: number;
   qualityPreference: string;
   metadataProvider: TmdbMetadataProvider;
+  includeEpisodes?: boolean;
 }): Promise<PreparedSeriesTarget> {
   const details = await input.metadataProvider.getTvDetails(input.tmdbId);
   const titleId = `tmdb_tv_${details.id}`;
@@ -592,7 +714,7 @@ export async function prepareSeriesTarget(input: {
   const lastAiredSeason = details.last_episode_to_air?.season_number ?? 0;
   const lastAiredEpisode = details.last_episode_to_air?.episode_number ?? 0;
 
-  const seasons = (details.seasons ?? [])
+  const baseSeasons = (details.seasons ?? [])
     .map((season) => ({
       seasonNumber: season.season_number ?? 0,
       totalEpisodes: season.episode_count ?? 0,
@@ -609,8 +731,36 @@ export async function prepareSeriesTarget(input: {
             ? lastAiredEpisode
             : 0,
     }));
-  if (seasons.length === 0) {
+  if (baseSeasons.length === 0) {
     throw new Error(`TMDB tv/${input.tmdbId} exposes no seasons with episodes`);
+  }
+
+  let seasons: PreparedSeriesSeason[] = baseSeasons;
+  if (input.includeEpisodes) {
+    const seasonEpisodes = await mapWithConcurrency(
+      baseSeasons,
+      TV_DETAILS_CONCURRENCY,
+      async (season): Promise<PreparedSeriesEpisode[] | undefined> => {
+        try {
+          const seasonDetails = await input.metadataProvider.getTvSeason(input.tmdbId, season.seasonNumber);
+          return (seasonDetails.episodes ?? [])
+            .filter((ep): ep is { episode_number: number; name?: string | null; air_date?: string | null } =>
+              typeof ep.episode_number === "number" && Number.isFinite(ep.episode_number),
+            )
+            .map((ep) => ({
+              episodeNumber: ep.episode_number,
+              name: ep.name ?? null,
+              airDate: ep.air_date ?? null,
+            }));
+        } catch {
+          return undefined;
+        }
+      },
+    );
+    seasons = baseSeasons.map((season, index) => {
+      const episodes = seasonEpisodes[index];
+      return episodes === undefined ? season : { ...season, episodes };
+    });
   }
 
   return {
@@ -632,6 +782,11 @@ export async function prepareSeriesTarget(input: {
     // filters out title matches and drifts to same-quality wrong works. Quality
     // is post-recall selection guidance (getQualityGuidance), not a search term.
     keyword: title,
+    voteAverage: details.voteAverage ?? null,
+    genreNames: details.genreNames ?? [],
+    runtime: details.runtime ?? null,
+    cast: details.cast ?? [],
+    creators: details.creators ?? [],
   };
 }
 
@@ -688,6 +843,11 @@ function parseTvDetails(value: unknown): TmdbTvDetails {
     origin_country: Array.isArray(value["origin_country"])
       ? value["origin_country"].filter((country): country is string => typeof country === "string")
       : [],
+    voteAverage: parseVoteAverage(value["vote_average"]),
+    genreNames: parseGenreNames(value["genres"]),
+    runtime: parseTvRuntime(value),
+    cast: parseCast(value["credits"]),
+    creators: parseCreators(value["created_by"]),
   };
 }
 
@@ -716,6 +876,11 @@ function parseMovieDetails(value: unknown): TmdbMovieDetails {
           .map((country) => country["iso_3166_1"])
           .filter((code): code is string => typeof code === "string")
       : [],
+    voteAverage: parseVoteAverage(value["vote_average"]),
+    genreNames: parseGenreNames(value["genres"]),
+    runtime: parseMovieRuntime(value),
+    cast: parseCast(value["credits"]),
+    directors: parseDirectors(value["credits"]),
   };
 }
 
@@ -756,8 +921,10 @@ function parseEpisodeGroupDetails(value: unknown): TmdbEpisodeGroupDetails {
           episodes: Array.isArray(group["episodes"])
             ? group["episodes"].filter(isRecord).map((episode) => {
                 const episodeOrder = optionalNumberValue(episode["order"]);
+                const name = optionalStringOrNull(episode["name"]);
                 return {
                   ...(episodeOrder === undefined ? {} : { order: episodeOrder }),
+                  ...(name === null ? {} : { name }),
                   air_date: typeof episode["air_date"] === "string" ? episode["air_date"] : null,
                 };
               })
@@ -935,18 +1102,143 @@ function optionalSeasonSummary(value: Record<string, unknown>): {
 
 function optionalSeasonEpisode(value: Record<string, unknown>): {
   episode_number?: number;
+  name?: string | null;
   air_date?: string | null;
 } {
   const episode: {
     episode_number?: number;
+    name?: string | null;
     air_date?: string | null;
   } = {};
   const episodeNumber = optionalNumberValue(value["episode_number"]);
   if (episodeNumber !== undefined) {
     episode.episode_number = episodeNumber;
   }
+  episode.name = typeof value["name"] === "string" ? value["name"] : null;
   episode.air_date = typeof value["air_date"] === "string" ? value["air_date"] : null;
   return episode;
+}
+
+function parseTotalPages(value: unknown): number {
+  if (!isRecord(value)) {
+    return 1;
+  }
+  const totalPages = optionalNumberValue(value["total_pages"]);
+  return totalPages !== undefined && totalPages > 1 ? Math.trunc(totalPages) : 1;
+}
+
+function dedupeSearchResults(results: readonly TmdbSearchResult[]): TmdbSearchResult[] {
+  const seen = new Set<string>();
+  const deduped: TmdbSearchResult[] = [];
+  for (const item of results) {
+    const key = `${item.media_type}:${item.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(item);
+  }
+  return deduped;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const limit = Math.max(1, Math.min(concurrency, items.length));
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  await Promise.all(
+    Array.from({ length: limit }, async () => {
+      while (true) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= items.length) return;
+        results[index] = await worker(items[index]!, index);
+      }
+    }),
+  );
+  return results;
+}
+
+function parseVoteAverage(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function parseGenreNames(genres: unknown): string[] {
+  if (!Array.isArray(genres)) return [];
+  return genres
+    .filter(isRecord)
+    .map((genre) => stringValue(genre["name"]).trim())
+    .filter((name) => name.length > 0);
+}
+
+function parseMovieRuntime(value: Record<string, unknown>): number | null {
+  const runtime = optionalNumberValue(value["runtime"]);
+  return runtime !== undefined && runtime > 0 ? runtime : null;
+}
+
+function parseTvRuntime(value: Record<string, unknown>): number | null {
+  const direct = optionalNumberValue(value["runtime"]);
+  if (direct !== undefined && direct > 0) return direct;
+  if (Array.isArray(value["episode_run_time"])) {
+    for (const item of value["episode_run_time"]) {
+      const n = optionalNumberValue(item);
+      if (n !== undefined && n > 0) return n;
+    }
+  }
+  if (isRecord(value["last_episode_to_air"])) {
+    const epRuntime = optionalNumberValue(value["last_episode_to_air"]["runtime"]);
+    if (epRuntime !== undefined && epRuntime > 0) return epRuntime;
+  }
+  return null;
+}
+
+function parseCast(credits: unknown): TmdbCastMember[] {
+  if (!isRecord(credits) || !Array.isArray(credits["cast"])) return [];
+  const members: TmdbCastMember[] = [];
+  for (const entry of credits["cast"]) {
+    if (!isRecord(entry)) continue;
+    const id = optionalNumberValue(entry["id"]);
+    const name = stringValue(entry["name"]).trim();
+    if (id === undefined || !name) continue;
+    members.push({
+      id,
+      name,
+      character: stringValue(entry["character"]).trim(),
+      profilePath: optionalStringOrNull(entry["profile_path"]),
+    });
+    if (members.length >= MAX_CAST_MEMBERS) break;
+  }
+  return members;
+}
+
+function parseDirectors(credits: unknown): string[] {
+  if (!isRecord(credits) || !Array.isArray(credits["crew"])) return [];
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of credits["crew"]) {
+    if (!isRecord(entry) || entry["job"] !== "Director") continue;
+    const name = stringValue(entry["name"]).trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    names.push(name);
+  }
+  return names;
+}
+
+function parseCreators(createdBy: unknown): string[] {
+  if (!Array.isArray(createdBy)) return [];
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of createdBy) {
+    if (!isRecord(entry)) continue;
+    const name = stringValue(entry["name"]).trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    names.push(name);
+  }
+  return names;
 }
 
 function totalEpisodesForSeason(

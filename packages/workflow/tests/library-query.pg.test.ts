@@ -126,6 +126,38 @@ integration("PostgresLibraryQuery", () => {
       storageId: accountStorage, total: 4, aired: 3, status: "active",
     });
     await insertEpisode("tmdb_tv_9001_s1", accountStorage, "S01E01", true);
+    await pool.query(
+      "INSERT INTO workflow_runs (id, tracked_season_id, account_id, connected_storage_id, payload) VALUES ($1, $2, $3, $4, $5::jsonb)",
+      [
+        "run_9001_finished",
+        "tmdb_tv_9001_s1",
+        accountId,
+        accountStorage,
+        JSON.stringify({
+          id: "run_9001_finished",
+          kind: "type2_init",
+          status: "succeeded",
+          startedAt: "2026-11-20T08:00:00.000Z",
+          finishedAt: "2026-11-20T09:00:00.000Z",
+        }),
+      ],
+    );
+    await pool.query(
+      "INSERT INTO workflow_runs (id, tracked_season_id, account_id, connected_storage_id, payload) VALUES ($1, $2, $3, $4, $5::jsonb)",
+      [
+        "run_9001_staging",
+        "tmdb_tv_9001_s1",
+        accountId,
+        accountStorage,
+        JSON.stringify({
+          id: "run_9001_staging",
+          kind: "staging_recovery",
+          status: "succeeded",
+          startedAt: "2026-11-26T00:00:00.000Z",
+          finishedAt: "2026-11-26T01:00:00.000Z",
+        }),
+      ],
+    );
     // An explicitly disabled season must remain false in the summary.
     await insertTitleAndSeason({
       id: "tmdb_tv_9002", type: "tv", tmdbId: 9002, title: "关闭自动补缺", seasonId: "tmdb_tv_9002_s1",
@@ -143,6 +175,22 @@ integration("PostgresLibraryQuery", () => {
     });
     await insertEpisode("tmdb_tv_9003_s1", accountStorage, "S01E01", true);
     await insertEpisode("tmdb_tv_9003_s1", accountStorage, "S01E02", true);
+    await pool.query(
+      "INSERT INTO workflow_runs (id, tracked_season_id, account_id, connected_storage_id, payload) VALUES ($1, $2, $3, $4, $5::jsonb)",
+      [
+        "run_9003_active",
+        "tmdb_tv_9003_s1",
+        accountId,
+        accountStorage,
+        JSON.stringify({
+          id: "run_9003_active",
+          kind: "type3_monitor",
+          status: "queued",
+          startedAt: "2026-11-22T10:00:00.000Z",
+          finishedAt: null,
+        }),
+      ],
+    );
     // Account boundary: same numeric identity but a distinct account-only title.
     await pool.query("INSERT INTO accounts (id, username, password_hash, is_owner, created_at) VALUES ('acct_other_library', $1, '', false, now()::text)", [`user_${randomUUID()}`]);
     await pool.query("INSERT INTO media_titles (id, payload) VALUES ('tmdb_movie_7777', $1::jsonb)", [JSON.stringify({ id: "tmdb_movie_7777", tmdbId: 7777, type: "movie", title: "别的账号", year: 2020 })]);
@@ -271,11 +319,47 @@ integration("PostgresLibraryQuery", () => {
 
   integrationIt("preserves missing legacy autoAcquire, false, and unreleased/missing states", async () => {
     const rows = await query.list({ accountId, connectedStorageId: accountStorage, search: "待播缺集" });
-    expect(rows.items[0]).toMatchObject({ autoAcquire: null, obtainedEpisodes: 1, totalAiredEpisodes: 3, totalEpisodes: 4, state: "partial", airing: true });
+    expect(rows.items[0]).toMatchObject({
+      autoAcquire: null,
+      obtainedEpisodes: 1,
+      totalAiredEpisodes: 3,
+      totalEpisodes: 4,
+      state: "partial",
+      airing: true,
+      updatedAt: "2026-11-20T09:00:00.000Z",
+    });
     const disabled = await query.list({ accountId, connectedStorageId: accountStorage, search: "关闭自动补缺" });
-    expect(disabled.items[0]).toMatchObject({ autoAcquire: false, state: "complete", acquiring: true });
+    expect(disabled.items[0]).toMatchObject({ autoAcquire: false, state: "complete", acquiring: true, updatedAt: null });
     const caughtUp = await query.list({ accountId, connectedStorageId: accountStorage, search: "追更但当前齐全" });
-    expect(caughtUp.items[0]).toMatchObject({ obtainedEpisodes: 2, totalAiredEpisodes: 2, state: "tracking", airing: true });
+    expect(caughtUp.items[0]).toMatchObject({
+      obtainedEpisodes: 2,
+      totalAiredEpisodes: 2,
+      state: "tracking",
+      airing: true,
+      updatedAt: "2026-11-22T10:00:00.000Z",
+    });
+  });
+
+  integrationIt("sorts by updatedAt descending and ascending with nulls last", async () => {
+    const descPage = await query.list({
+      accountId,
+      connectedStorageId: accountStorage,
+      sort: "updatedAt",
+      direction: "desc",
+      pageSize: 10,
+    });
+    expect(descPage.items.slice(0, 2).map((item) => item.tmdbId)).toEqual([9003, 9001]);
+    expect(descPage.items[2]?.updatedAt).toBeNull();
+
+    const ascPage = await query.list({
+      accountId,
+      connectedStorageId: accountStorage,
+      sort: "updatedAt",
+      direction: "asc",
+      pageSize: 10,
+    });
+    expect(ascPage.items.slice(0, 2).map((item) => item.tmdbId)).toEqual([9001, 9003]);
+    expect(ascPage.items[2]?.updatedAt).toBeNull();
   });
 
   it("rejects invalid query bounds before touching the database", async () => {

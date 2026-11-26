@@ -2,7 +2,7 @@ import type { Pool } from "pg";
 
 export type LibraryQueryMediaType = "movie" | "tv" | "anime";
 export type LibraryQueryState = "complete" | "tracking" | "partial" | "reserved";
-export type LibraryQuerySort = "title" | "year" | "obtainedEpisodes" | "totalAiredEpisodes";
+export type LibraryQuerySort = "title" | "year" | "obtainedEpisodes" | "totalAiredEpisodes" | "updatedAt";
 
 export interface PostgresLibraryQueryInput {
   accountId: string;
@@ -34,6 +34,8 @@ export interface LibraryQueryItem {
   acquiring: boolean;
   /** Null means all matching seasons predate the persisted option. */
   autoAcquire: boolean | null;
+  /** Latest workflow activity timestamp (prefer finishedAt, fallback startedAt), or null. */
+  updatedAt?: string | null;
 }
 
 export interface LibraryQueryPage {
@@ -130,7 +132,7 @@ export function normalizePostgresLibraryQueryInput(input: PostgresLibraryQueryIn
     throw new LibraryQueryInputError("search must be at most 200 characters");
   }
   const sort = input.sort ?? "title";
-  if (!["title", "year", "obtainedEpisodes", "totalAiredEpisodes"].includes(sort)) {
+  if (!["title", "year", "obtainedEpisodes", "totalAiredEpisodes", "updatedAt"].includes(sort)) {
     throw new LibraryQueryInputError("sort is not supported");
   }
   const direction = input.direction ?? "asc";
@@ -145,7 +147,10 @@ export function normalizePostgresLibraryQueryInput(input: PostgresLibraryQueryIn
   return { accountId, connectedStorageId, type: input.type ?? null, state: input.state ?? null, search, sort, direction, page, pageSize };
 }
 
-type DbItem = Omit<LibraryQueryItem, "tmdbId" | "year" | "seasonCount" | "obtainedEpisodes" | "totalAiredEpisodes" | "totalEpisodes" | "airing" | "acquiring"> & {
+type DbItem = Omit<
+  LibraryQueryItem,
+  "tmdbId" | "year" | "seasonCount" | "obtainedEpisodes" | "totalAiredEpisodes" | "totalEpisodes" | "airing" | "acquiring" | "updatedAt"
+> & {
   tmdb_id: number | string;
   year: number | string;
   seasonCount: number | string;
@@ -154,6 +159,7 @@ type DbItem = Omit<LibraryQueryItem, "tmdbId" | "year" | "seasonCount" | "obtain
   totalEpisodes: number | string;
   airing: boolean;
   acquiring: boolean;
+  updatedAt: string | null;
 };
 
 interface QueryResultRow {
@@ -172,6 +178,7 @@ export class PostgresLibraryQuery {
       year: "year",
       obtainedEpisodes: "obtained_episodes",
       totalAiredEpisodes: "total_aired_episodes",
+      updatedAt: "updated_at",
     };
     const sortColumn = sortColumns[parsed.sort];
     const sortDirection = parsed.direction === "asc" ? "ASC" : "DESC";
@@ -266,16 +273,27 @@ export class PostgresLibraryQuery {
                   sm.latest_aired_episode, sm.total_episodes, sm.has_active,
                   sm.any_auto_acquire, sm.has_auto_acquire
       ),
-      active_runs AS (
-        SELECT DISTINCT s.account_id, s.media_title_id
+      title_runs AS (
+        SELECT s.account_id,
+               s.media_title_id,
+               BOOL_OR(
+                 wr.payload->>'status' IN ('queued', 'running')
+                 AND wr.payload->>'kind' IS DISTINCT FROM 'replace_request'
+                 AND wr.payload->>'kind' IS DISTINCT FROM 'staging_recovery'
+               ) AS acquiring,
+               MAX(
+                 COALESCE(
+                   NULLIF(wr.payload->>'finishedAt', ''),
+                   NULLIF(wr.payload->>'startedAt', '')
+                 )
+               ) FILTER (WHERE wr.payload->>'kind' IS DISTINCT FROM 'staging_recovery') AS updated_at
           FROM scoped_seasons s
           JOIN workflow_runs wr
             ON wr.tracked_season_id = s.season_id
            AND wr.account_id = s.account_id
            AND wr.connected_storage_id = s.connected_storage_id
          WHERE ($2::text IS NULL OR wr.connected_storage_id = $2)
-           AND wr.payload->>'status' IN ('queued', 'running')
-           AND wr.payload->>'kind' NOT IN ('replace_request', 'staging_recovery')
+         GROUP BY s.account_id, s.media_title_id
       ),
       title_summary AS (
         SELECT season_counts.account_id, season_counts.media_title_id, season_counts.media_type, season_counts.tmdb_id,
@@ -292,11 +310,12 @@ export class PostgresLibraryQuery {
                ) AS airing,
                CASE WHEN BOOL_OR(season_counts.has_auto_acquire) THEN BOOL_OR(season_counts.any_auto_acquire) ELSE NULL END AS auto_acquire,
                BOOL_OR(season_counts.obtained_count < season_counts.aired_count) AS behind,
-               BOOL_OR(active_runs.media_title_id IS NOT NULL) AS acquiring
+               COALESCE(BOOL_OR(title_runs.acquiring), false) AS acquiring,
+               MAX(title_runs.updated_at) AS updated_at
           FROM season_counts
-          LEFT JOIN active_runs
-            ON active_runs.account_id = season_counts.account_id
-           AND active_runs.media_title_id = season_counts.media_title_id
+          LEFT JOIN title_runs
+            ON title_runs.account_id = season_counts.account_id
+           AND title_runs.media_title_id = season_counts.media_title_id
          GROUP BY season_counts.account_id, season_counts.media_title_id, season_counts.media_type, season_counts.tmdb_id
       ),
       classified AS (
@@ -307,13 +326,15 @@ export class PostgresLibraryQuery {
                CASE WHEN media_type = 'movie' AND release_date IS NOT NULL AND release_date > $5
                     THEN false ELSE airing END AS airing,
                acquiring, auto_acquire AS "autoAcquire",
+               updated_at AS "updatedAt",
                CASE WHEN media_type = 'movie' AND release_date IS NOT NULL AND release_date > $5
                     THEN 'reserved'
                     WHEN behind THEN 'partial'
                     WHEN airing THEN 'tracking'
                     ELSE 'complete' END AS state,
                obtained_episodes AS obtained_episodes,
-               total_aired_episodes AS total_aired_episodes
+               total_aired_episodes AS total_aired_episodes,
+               updated_at AS updated_at
           FROM title_summary
       ),
       filtered AS (
@@ -347,6 +368,7 @@ export class PostgresLibraryQuery {
       airing: item.airing,
       acquiring: item.acquiring,
       autoAcquire: item.autoAcquire,
+      updatedAt: item.updatedAt ?? null,
     }));
     return { items, total, page: parsed.page, pageSize: parsed.pageSize, hasMore: parsed.page * parsed.pageSize < total };
   }

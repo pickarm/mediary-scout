@@ -2,8 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createTmdbMetadataProvider,
   createTmdbSearchProvider,
+  fetchTmdbList,
   prepareMovieTarget,
+  prepareSeriesTarget,
   prepareTrackingTarget,
+  resetSharedTmdbDeadAccessesForTests,
   TmdbMetadataProvider,
   TmdbHttpError,
   TmdbNotFoundError,
@@ -66,7 +69,7 @@ describe("TmdbMetadataProvider", () => {
     });
 
     expect(requests).toEqual([
-      "https://api.themoviedb.org/3/tv/289271?language=zh-CN",
+      "https://api.themoviedb.org/3/tv/289271?language=zh-CN&append_to_response=credits",
       "https://api.themoviedb.org/3/tv/289271/season/1?language=zh-CN",
     ]);
     expect(target).toEqual({
@@ -1143,5 +1146,358 @@ describe("per-access timeout + timeout retry (2026-07-02 压测发现:软路由�
     await provider.getMovieDetails(278); // timeout → retry → success (2 calls), memo healed
     await provider.getMovieDetails(278); // healed memo → single straight call
     expect(calls).toBe(3);
+  });
+});
+
+describe("TmdbSearchProvider pagination, concurrency, and defaults", () => {
+  it("fetches up to 3 search/multi pages concurrently, deduplicates by media_type:id, and defaults maxResults to 40", async () => {
+    const requestedPages: string[] = [];
+    const makeMovie = (id: number, title: string) => ({
+      id,
+      media_type: "movie",
+      title,
+      original_title: title,
+      release_date: "2025-01-01",
+      overview: "",
+      poster_path: null,
+      backdrop_path: null,
+    });
+    const provider = new TmdbSearchProvider({
+      accesses: [{ baseURL: "https://proxy.example" }],
+      fetchJson: async (url) => {
+        const parsed = new URL(url);
+        if (parsed.pathname.endsWith("/search/multi")) {
+          const page = parsed.searchParams.get("page") ?? "1";
+          requestedPages.push(page);
+          if (page === "1") {
+            return {
+              total_pages: 5,
+              results: [
+                // Person entry should be filtered out before counting
+                { id: 999, media_type: "person", name: "Actor" },
+                // Same numeric id 1 for movie and tv must BOTH survive dedup
+                makeMovie(1, "Movie 1"),
+                {
+                  id: 1,
+                  media_type: "tv",
+                  name: "TV 1",
+                  original_name: "TV 1",
+                  first_air_date: "2025-01-01",
+                  overview: "",
+                },
+                ...Array.from({ length: 16 }, (_, idx) => makeMovie(10 + idx, `M${10 + idx}`)),
+              ],
+            };
+          }
+          if (page === "2") {
+            return {
+              total_pages: 5,
+              results: [
+                // Duplicate movie:1 should be dropped
+                makeMovie(1, "Movie 1 dup"),
+                ...Array.from({ length: 15 }, (_, idx) => makeMovie(100 + idx, `M${100 + idx}`)),
+              ],
+            };
+          }
+          if (page === "3") {
+            return {
+              total_pages: 5,
+              results: Array.from({ length: 15 }, (_, idx) => makeMovie(200 + idx, `M${200 + idx}`)),
+            };
+          }
+        }
+        if (parsed.pathname.endsWith("/tv/1")) {
+          return {
+            id: 1,
+            name: "TV 1",
+            original_name: "TV 1",
+            first_air_date: "2025-01-01",
+            seasons: [{ season_number: 1, episode_count: 10 }],
+          };
+        }
+        throw new Error(`Unexpected URL ${url}`);
+      },
+    });
+
+    const candidates = await provider.searchMedia({ query: "test" });
+
+    expect(requestedPages).toEqual(["1", "2", "3"]);
+    expect(candidates).toHaveLength(40);
+    expect(candidates.slice(0, 2).map((c) => `${c.mediaType}:${c.tmdbId}`)).toEqual(["movie:1", "tv:1"]);
+    expect(new Set(candidates.map((c) => `${c.mediaType}:${c.tmdbId}`)).size).toBe(40);
+  });
+
+  it("limits TV details to 8 by default, runs with concurrency <= 6, and degrades single failures", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const detailIds: number[] = [];
+    const provider = new TmdbSearchProvider({
+      accesses: [{ baseURL: "https://proxy.example" }],
+      fetchJson: async (url) => {
+        if (url.includes("/search/multi?")) {
+          return {
+            total_pages: 1,
+            results: Array.from({ length: 12 }, (_, idx) => ({
+              id: 500 + idx,
+              media_type: "tv",
+              name: `Show ${idx}`,
+              original_name: `Show ${idx}`,
+              first_air_date: "2025-01-01",
+              overview: "",
+            })),
+          };
+        }
+        const match = /\/tv\/(\d+)\?/.exec(url);
+        if (match) {
+          const id = Number(match[1]);
+          detailIds.push(id);
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((resolve) => setTimeout(resolve, 15));
+          inFlight -= 1;
+          if (id === 502) {
+            throw new TmdbHttpError("upstream 500", 500);
+          }
+          return {
+            id,
+            name: `Show ${id}`,
+            original_name: `Show ${id}`,
+            first_air_date: "2025-01-01",
+            seasons: [{ season_number: 1, episode_count: 12 }],
+          };
+        }
+        throw new Error(`Unexpected URL ${url}`);
+      },
+    });
+
+    const candidates = await provider.searchMedia({ query: "show" });
+
+    expect(candidates).toHaveLength(12);
+    expect(detailIds).toHaveLength(8);
+    expect(maxInFlight).toBeGreaterThan(1);
+    expect(maxInFlight).toBeLessThanOrEqual(6);
+    // 502 failed → degraded to seasons: [], others populated, 9th..12th skipped
+    expect(candidates[0]?.seasons).toHaveLength(1);
+    expect(candidates[2]?.seasons).toEqual([]);
+    expect(candidates[8]?.seasons).toEqual([]);
+  });
+
+  it("strictly respects explicit tvDetailsLimit and maxResults", async () => {
+    const detailIds: number[] = [];
+    const provider = new TmdbSearchProvider({
+      accesses: [{ baseURL: "https://proxy.example" }],
+      maxResults: 5,
+      tvDetailsLimit: 2,
+      fetchJson: async (url) => {
+        if (url.includes("/search/multi?")) {
+          return {
+            total_pages: 3,
+            results: Array.from({ length: 10 }, (_, idx) => ({
+              id: 700 + idx,
+              media_type: "tv",
+              name: `Show ${idx}`,
+              original_name: `Show ${idx}`,
+              first_air_date: "2025-01-01",
+              overview: "",
+            })),
+          };
+        }
+        const match = /\/tv\/(\d+)\?/.exec(url);
+        if (match) {
+          detailIds.push(Number(match[1]));
+          return { id: Number(match[1]), name: "Show", seasons: [{ season_number: 1, episode_count: 8 }] };
+        }
+        throw new Error(`Unexpected URL ${url}`);
+      },
+    });
+
+    const candidates = await provider.searchMedia({ query: "show" });
+    expect(candidates).toHaveLength(5);
+    expect(detailIds).toEqual([700, 701]);
+  });
+});
+
+describe("Shared 5-minute TTL dead-access circuit breaker", () => {
+  it("shares dead access state across default-fetch providers and fetchTmdbList for 5 minutes, and resets via helper", async () => {
+    resetSharedTmdbDeadAccessesForTests();
+    vi.useFakeTimers();
+    const originalFetch = globalThis.fetch;
+    const calledUrls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        calledUrls.push(url);
+        if (url.startsWith("https://dead-direct.example")) {
+          throw new Error("ECONNREFUSED");
+        }
+        if (url.includes("/search/multi")) {
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        }
+        if (url.includes("/movie/278")) {
+          return new Response(JSON.stringify(movieJson(278)), { status: 200 });
+        }
+        return new Response(JSON.stringify({ results: [{ id: 1 }] }), { status: 200 });
+      }),
+    );
+
+    try {
+      const accesses = [
+        { baseURL: "https://dead-direct.example/3", readToken: "userkey" },
+        { baseURL: "https://healthy-proxy.example" },
+      ];
+      const searchProvider = new TmdbSearchProvider({ accesses });
+      const metadataProvider = new TmdbMetadataProvider({ accesses });
+
+      await searchProvider.searchMedia({ query: "matrix" });
+      await metadataProvider.getMovieDetails(278);
+      await fetchTmdbList(accesses, "trending/movie/week");
+
+      // Only the first request probed dead-direct; metadata & fetchTmdbList skipped it.
+      expect(calledUrls.filter((u) => u.startsWith("https://dead-direct.example"))).toHaveLength(1);
+      expect(calledUrls.filter((u) => u.startsWith("https://healthy-proxy.example"))).toHaveLength(3);
+
+      // Advance past 5-minute TTL → direct hop is probed again.
+      vi.advanceTimersByTime(5 * 60 * 1000 + 1);
+      await metadataProvider.getMovieDetails(278);
+      expect(calledUrls.filter((u) => u.startsWith("https://dead-direct.example"))).toHaveLength(2);
+
+      // Explicit reset helper also clears shared breaker immediately.
+      resetSharedTmdbDeadAccessesForTests();
+      await fetchTmdbList(accesses, "trending/movie/week");
+      expect(calledUrls.filter((u) => u.startsWith("https://dead-direct.example"))).toHaveLength(3);
+    } finally {
+      vi.stubGlobal("fetch", originalFetch);
+      vi.useRealTimers();
+      resetSharedTmdbDeadAccessesForTests();
+    }
+  });
+});
+
+describe("TMDB details metadata extensions (credits, runtime, rating, episode names)", () => {
+  it("parses credits, voteAverage, genreNames, runtime, directors on movie details and prepareMovieTarget", async () => {
+    const provider = new TmdbMetadataProvider({
+      readToken: "token",
+      fetchJson: async (url) => {
+        expect(url).toContain("append_to_response=credits");
+        return {
+          id: 129,
+          title: "千与千寻",
+          original_title: "千と千尋の神隠し",
+          release_date: "2001-07-20",
+          overview: "经典动画。",
+          poster_path: "/p.jpg",
+          backdrop_path: "/b.jpg",
+          vote_average: 8.5,
+          runtime: 125,
+          genres: [
+            { id: 16, name: "动画" },
+            { id: 10751, name: "家庭" },
+          ],
+          production_countries: [{ iso_3166_1: "JP" }],
+          credits: {
+            cast: Array.from({ length: 14 }, (_, idx) => ({
+              id: 100 + idx,
+              name: `Actor ${idx + 1}`,
+              character: `Role ${idx + 1}`,
+              profile_path: idx === 0 ? "/actor1.jpg" : null,
+            })),
+            crew: [
+              { id: 1, name: "宫崎骏", job: "Director" },
+              { id: 2, name: "久石让", job: "Original Music Composer" },
+              { id: 1, name: "宫崎骏", job: "Director" },
+            ],
+          },
+        };
+      },
+    });
+
+    const target = await prepareMovieTarget({
+      tmdbId: 129,
+      qualityPreference: "4K",
+      metadataProvider: provider,
+    });
+
+    expect(target.voteAverage).toBe(8.5);
+    expect(target.genreNames).toEqual(["动画", "家庭"]);
+    expect(target.runtime).toBe(125);
+    expect(target.directors).toEqual(["宫崎骏"]);
+    expect(target.cast).toHaveLength(10);
+    expect(target.cast?.[0]).toEqual({
+      id: 100,
+      name: "Actor 1",
+      character: "Role 1",
+      profilePath: "/actor1.jpg",
+    });
+  });
+
+  it("parses credits, creators, runtime, episode names on TV details and prepareSeriesTarget", async () => {
+    const provider = new TmdbMetadataProvider({
+      readToken: "token",
+      fetchJson: async (url) => {
+        if (url.includes("/tv/999?")) {
+          expect(url).toContain("append_to_response=credits");
+          return {
+            id: 999,
+            name: "测试剧集",
+            original_name: "Test Series",
+            first_air_date: "2025-01-01",
+            number_of_episodes: 2,
+            overview: "",
+            poster_path: null,
+            backdrop_path: null,
+            vote_average: 9.1,
+            episode_run_time: [45, 50],
+            genres: [{ id: 18, name: "剧情" }],
+            origin_country: ["CN"],
+            created_by: [{ id: 11, name: "主创甲" }, { id: 12, name: "主创乙" }],
+            last_episode_to_air: { season_number: 1, episode_number: 2 },
+            seasons: [{ season_number: 1, episode_count: 2 }],
+            credits: {
+              cast: [{ id: 201, name: "主演A", character: "主角", profile_path: "/a.jpg" }],
+            },
+          };
+        }
+        if (url.includes("/tv/999/season/1?")) {
+          return {
+            season_number: 1,
+            episodes: [
+              { episode_number: 1, name: "序幕", air_date: "2025-01-01" },
+              { episode_number: 2, name: "转折", air_date: "2025-01-08" },
+            ],
+          };
+        }
+        throw new Error(`Unexpected URL ${url}`);
+      },
+    });
+
+    const season = await provider.getTvSeason(999, 1);
+    expect(season.episodes).toEqual([
+      { episode_number: 1, name: "序幕", air_date: "2025-01-01" },
+      { episode_number: 2, name: "转折", air_date: "2025-01-08" },
+    ]);
+
+    const seriesTarget = await prepareSeriesTarget({
+      tmdbId: 999,
+      qualityPreference: "4K",
+      metadataProvider: provider,
+      includeEpisodes: true,
+    });
+    expect(seriesTarget.voteAverage).toBe(9.1);
+    expect(seriesTarget.genreNames).toEqual(["剧情"]);
+    expect(seriesTarget.runtime).toBe(45);
+    expect(seriesTarget.creators).toEqual(["主创甲", "主创乙"]);
+    expect(seriesTarget.cast).toEqual([
+      { id: 201, name: "主演A", character: "主角", profilePath: "/a.jpg" },
+    ]);
+    expect(seriesTarget.seasons[0]).toEqual({
+      seasonNumber: 1,
+      totalEpisodes: 2,
+      latestAiredEpisode: 2,
+      episodes: [
+        { episodeNumber: 1, name: "序幕", airDate: "2025-01-01" },
+        { episodeNumber: 2, name: "转折", airDate: "2025-01-08" },
+      ],
+    });
   });
 });

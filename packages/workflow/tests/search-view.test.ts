@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createEpisodeStates,
   getSearchPageView,
@@ -509,6 +509,156 @@ describe("getSearchPageView", () => {
     expect(first.cacheStatus).toBe("miss");
     expect(second.cacheStatus).toBe("hit");
     expect(second.candidates[0]?.title).toBe("翘楚");
+  });
+
+  it("batches movie action lookups without N+1 queries and preserves all 40 candidates", async () => {
+    const repository = new InMemoryWorkflowRepository();
+    const findActiveSpy = vi.spyOn(repository, "findActiveWorkflowRun");
+    const getSeasonSpy = vi.spyOn(repository, "getTrackedSeasonState");
+    const listActiveSpy = vi.spyOn(repository, "listActiveWorkflowRuns");
+    const listTrackedSpy = vi.spyOn(repository, "listTrackedSeasonStates");
+
+    // Seed 1 active movie (tmdbId 2001) and 1 acquired movie (tmdbId 2002)
+    await repository.saveWorkflowRunSnapshot({
+      title: {
+        id: "tmdb_movie_2001",
+        tmdbId: 2001,
+        type: "movie",
+        title: "Movie 2001",
+        originalTitle: "Movie 2001",
+        year: 2025,
+        aliases: [],
+      },
+      season: {
+        id: "tmdb_movie_2001_movie",
+        mediaTitleId: "tmdb_movie_2001",
+        seasonNumber: 1,
+        status: "active",
+        qualityPreference: "4K",
+        storageDirectoryId: "",
+        totalEpisodes: 1,
+        latestAiredEpisode: 1,
+        latestAiredSource: "metadata",
+      },
+      workflowRun: {
+        id: "run_2001",
+        kind: "movie_init",
+        status: "running",
+        trackedSeasonId: "tmdb_movie_2001_movie",
+        startedAt: "2026-06-12T00:00:00.000Z",
+        finishedAt: null,
+        auditEvents: [],
+      },
+      episodes: [],
+      resourceSnapshots: [],
+      decisions: [],
+      transferAttempts: [],
+      notifications: [],
+    });
+
+    await repository.saveWorkflowRunSnapshot({
+      title: {
+        id: "tmdb_movie_2002",
+        tmdbId: 2002,
+        type: "movie",
+        title: "Movie 2002",
+        originalTitle: "Movie 2002",
+        year: 2024,
+        aliases: [],
+      },
+      season: {
+        id: "tmdb_movie_2002_movie",
+        mediaTitleId: "tmdb_movie_2002",
+        seasonNumber: 1,
+        status: "completed",
+        qualityPreference: "4K",
+        storageDirectoryId: "dir_2002",
+        totalEpisodes: 1,
+        latestAiredEpisode: 1,
+        latestAiredSource: "metadata",
+      },
+      workflowRun: {
+        id: "run_2002",
+        kind: "movie_init",
+        status: "succeeded",
+        trackedSeasonId: "tmdb_movie_2002_movie",
+        startedAt: "2026-06-12T00:00:00.000Z",
+        finishedAt: "2026-06-12T00:05:00.000Z",
+        auditEvents: [],
+      },
+      episodes: createEpisodeStates({
+        trackedSeasonId: "tmdb_movie_2002_movie",
+        seasonNumber: 1,
+        totalEpisodes: 1,
+        latestAiredEpisode: 1,
+      }).map((ep) => ({ ...ep, obtained: true })),
+      resourceSnapshots: [],
+      decisions: [],
+      transferAttempts: [],
+      notifications: [],
+    });
+
+    const candidates: MediaSearchCandidate[] = [
+      ...Array.from({ length: 25 }, (_, idx) => ({
+        tmdbId: 2001 + idx,
+        mediaType: "movie" as const,
+        title: `Movie ${2001 + idx}`,
+        originalTitle: `Movie ${2001 + idx}`,
+        year: 2025,
+        releaseDate: idx === 2 ? "2026-12-25" : "2024-01-01",
+        overview: "",
+        posterPath: null,
+        backdropPath: null,
+        seasons: [],
+      })),
+      ...Array.from({ length: 15 }, (_, idx) => ({
+        tmdbId: 3001 + idx,
+        mediaType: "tv" as const,
+        title: `Show ${3001 + idx}`,
+        originalTitle: `Show ${3001 + idx}`,
+        year: 2025,
+        overview: "",
+        posterPath: null,
+        backdropPath: null,
+        seasons: [{ seasonNumber: 1, episodeCount: 10, latestAiredEpisode: 10 }],
+      })),
+    ];
+
+    const view = await getSearchPageView({
+      query: "batch",
+      provider: countingSearchProvider(candidates),
+      cache: new InMemoryMediaSearchCache(),
+      repository,
+      now: () => NOW,
+    });
+
+    expect(view.candidates).toHaveLength(40);
+    expect(view.candidates[0]?.action).toMatchObject({ state: "active_workflow", workflowRunId: "run_2001" });
+    expect(view.candidates[1]?.action).toMatchObject({ state: "already_tracked", label: "已获取" });
+    expect(view.candidates[2]?.action).toMatchObject({ state: "can_reserve", label: "预定" });
+    expect(view.candidates[3]?.action).toMatchObject({ state: "can_request", label: "获取" });
+
+    expect(findActiveSpy).not.toHaveBeenCalled();
+    expect(getSeasonSpy).not.toHaveBeenCalled();
+    expect(listActiveSpy).toHaveBeenCalledTimes(1);
+    expect(listTrackedSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips repository movie queries completely when search candidates contain only TV shows", async () => {
+    const repository = new InMemoryWorkflowRepository();
+    const listActiveSpy = vi.spyOn(repository, "listActiveWorkflowRuns");
+    const listTrackedSpy = vi.spyOn(repository, "listTrackedSeasonStates");
+
+    const view = await getSearchPageView({
+      query: "翘楚",
+      provider: countingSearchProvider([qiaochuCandidate()]),
+      cache: new InMemoryMediaSearchCache(),
+      repository,
+    });
+
+    expect(view.candidates).toHaveLength(1);
+    expect(listActiveSpy).not.toHaveBeenCalled();
+    expect(listTrackedSpy).not.toHaveBeenCalled();
   });
 });
 

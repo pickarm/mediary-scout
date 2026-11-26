@@ -1,6 +1,10 @@
 import { isMovieUnreleased } from "./domain.js";
-import type { EpisodeState, MediaType, TrackedSeason, WorkflowKind } from "./domain.js";
-import type { WorkflowRepository } from "./repository.js";
+import type { EpisodeState, MediaType, TrackedSeason } from "./domain.js";
+import type {
+  PersistedWorkflowRunSnapshot,
+  TrackedSeasonState,
+  WorkflowRepository,
+} from "./repository.js";
 import { normalizeScope, type ScopeArg } from "./workflow-scope.js";
 
 export type SearchPageState = "empty" | "ready" | "provider_error";
@@ -180,6 +184,49 @@ async function resolveOnce(
   }
 }
 
+interface MovieActionLookup {
+  activeMovieRunsBySeasonId: Map<string, PersistedWorkflowRunSnapshot>;
+  trackedStatesBySeasonId: Map<string, TrackedSeasonState[]>;
+  now: string;
+  scope: ScopeArg;
+}
+
+async function buildMovieActionLookup(
+  candidates: readonly MediaSearchCandidate[],
+  repository: WorkflowRepository,
+  now: string,
+  scope: ScopeArg,
+): Promise<MovieActionLookup | null> {
+  if (!candidates.some((candidate) => candidate.mediaType === "movie")) {
+    return null;
+  }
+  const [activeRuns, trackedStates] = await Promise.all([
+    repository.listActiveWorkflowRuns(scope),
+    repository.listTrackedSeasonStates(scope),
+  ]);
+  const activeMovieRunsBySeasonId = new Map<string, PersistedWorkflowRunSnapshot>();
+  for (const run of activeRuns) {
+    if (run.workflowRun.kind === "movie_init" && !activeMovieRunsBySeasonId.has(run.workflowRun.trackedSeasonId)) {
+      activeMovieRunsBySeasonId.set(run.workflowRun.trackedSeasonId, run);
+    }
+  }
+  const trackedStatesBySeasonId = new Map<string, TrackedSeasonState[]>();
+  for (const state of trackedStates) {
+    const existing = trackedStatesBySeasonId.get(state.season.id);
+    if (existing) {
+      existing.push(state);
+    } else {
+      trackedStatesBySeasonId.set(state.season.id, [state]);
+    }
+  }
+  return {
+    activeMovieRunsBySeasonId,
+    trackedStatesBySeasonId,
+    now,
+    scope,
+  };
+}
+
 export async function getSearchPageView(input: {
   query: string;
   provider: MediaSearchProvider;
@@ -247,13 +294,15 @@ export async function getSearchPageView(input: {
     }
   }
 
+  const movieLookup = await buildMovieActionLookup(candidates, input.repository, now(), input.scope);
+
   return {
     query,
     state: "ready",
     cacheStatus: cached ? "hit" : "miss",
     ...(interpretedQuery === undefined ? {} : { interpretedQuery }),
     candidates: await Promise.all(
-      candidates.map((candidate) => toCandidateCard(candidate, input.repository, now(), input.scope)),
+      candidates.map((candidate) => toCandidateCard(candidate, input.repository, movieLookup)),
     ),
   };
 }
@@ -347,8 +396,7 @@ function describeError(error: unknown): string {
 async function toCandidateCard(
   candidate: MediaSearchCandidate,
   repository: WorkflowRepository,
-  now: string,
-  scope?: ScopeArg,
+  movieLookup: MovieActionLookup | null,
 ): Promise<SearchCandidateCard> {
   // The search card is SEASON-AGNOSTIC for a TV show: it never pre-picks a
   // season. The user chooses one (or all remaining) via SeasonRequestMenu, and
@@ -376,37 +424,22 @@ async function toCandidateCard(
         ? candidate.seasons.map((season) => season.seasonNumber).sort((a, b) => a - b)
         : [],
     action:
-      candidate.mediaType === "movie"
+      candidate.mediaType === "movie" && movieLookup
         ? // A movie tracks as a degenerate one-"episode" anchor season; once it
           // is acquired (or acquiring) it must NOT be re-requestable in search.
           // An UNRELEASED film offers 预定 (reserve) instead of 获取 (acquire).
-          await actionForTrackedSeason(
-            repository,
-            movieTrackedSeasonId(candidate.tmdbId),
-            "movie_init",
-            { releaseDate: candidate.releaseDate, now },
-            scope,
-          )
+          await actionForMovieCandidate(candidate, repository, movieLookup)
         : canRequestAction(),
   };
 }
 
-async function actionForTrackedSeason(
+async function actionForMovieCandidate(
+  candidate: MediaSearchCandidate,
   repository: WorkflowRepository,
-  trackedSeasonIdValue: string,
-  kind: WorkflowKind,
-  // Movie reserve air-time gate: an unreleased film offers 预定 instead of 获取.
-  reserveGate?: { releaseDate: string | null | undefined; now: string },
-  // Tree model: scope the obtained/active-run check to the active drive so a
-  // movie obtained on another drive stays 获取-able here.
-  scope?: ScopeArg,
+  lookup: MovieActionLookup,
 ): Promise<SearchCandidateAction> {
-  const scoped = scope === undefined ? undefined : normalizeScope(scope);
-  const activeRun = await repository.findActiveWorkflowRun({
-    trackedSeasonId: trackedSeasonIdValue,
-    kind,
-    ...(scoped ? { accountId: scoped.accountId, connectedStorageId: scoped.connectedStorageId } : {}),
-  });
+  const trackedSeasonIdValue = movieTrackedSeasonId(candidate.tmdbId);
+  const activeRun = lookup.activeMovieRunsBySeasonId.get(trackedSeasonIdValue);
   if (activeRun) {
     return {
       state: "active_workflow",
@@ -416,30 +449,37 @@ async function actionForTrackedSeason(
     };
   }
 
-  const unreleased = reserveGate ? isMovieUnreleased(reserveGate.releaseDate, reserveGate.now) : false;
-  const state = await repository.getTrackedSeasonState(trackedSeasonIdValue, scope);
-  if (!state || state.episodes.length === 0) {
+  const unreleased = isMovieUnreleased(candidate.releaseDate, lookup.now);
+  const matchingStates = (lookup.trackedStatesBySeasonId.get(trackedSeasonIdValue) ?? []).filter(
+    (state) => state.episodes.length > 0,
+  );
+  if (matchingStates.length === 0) {
     // Not tracked yet: an unreleased film is reservable (预定), not acquirable.
     return unreleased ? reserveAction() : canRequestAction();
   }
-  // Tracked. A reserved-but-not-yet-acquired film whose release is still in the
-  // future reads as 已预定 (the daily patrol collects it the moment it releases) —
-  // keyed on the real acquisition signal (the anchor obtained flag), NOT on
-  // isFullyAcquired, which a finished-season/unaired-anchor reserve trips falsely.
-  // Otherwise, situation-aware wording: a one-off film / finished season fully in
-  // hand is DONE → "已获取"; a still-airing season or real gaps is "已追踪".
-  let effectiveEpisodes = state.episodes;
+
+  const primaryState = matchingStates[0]!;
+  const scoped = lookup.scope === undefined ? undefined : normalizeScope(lookup.scope);
+  // Merge episode ownership across all matching drive states already loaded in
+  // one batch, avoiding N+1 per-candidate queries.
+  let effectiveEpisodes = primaryState.episodes.map((ep) => ({
+    ...ep,
+    obtained: matchingStates.some((state) =>
+      state.episodes.some((other) => other.episodeCode === ep.episodeCode && other.obtained),
+    ),
+  }));
   if (
+    !effectiveEpisodes.some((episode) => episode.obtained) &&
     (scoped === undefined || scoped.connectedStorageId === null) &&
     repository.obtainedEpisodesForSeason
   ) {
     const union = await repository.obtainedEpisodesForSeason(
       trackedSeasonIdValue,
-      scoped?.accountId ?? state.accountId,
+      scoped?.accountId ?? primaryState.accountId,
     );
     if (union.length > 0) {
       const obtainedCodes = new Set(union.filter((c) => c.obtained).map((c) => c.episodeCode));
-      effectiveEpisodes = state.episodes.map((ep) => ({
+      effectiveEpisodes = effectiveEpisodes.map((ep) => ({
         ...ep,
         obtained: ep.obtained || obtainedCodes.has(ep.episodeCode),
       }));
@@ -451,7 +491,7 @@ async function actionForTrackedSeason(
   }
   return {
     state: "already_tracked",
-    label: isFullyAcquired({ season: state.season, episodes: effectiveEpisodes }) ? "已获取" : "已追踪",
+    label: isFullyAcquired({ season: primaryState.season, episodes: effectiveEpisodes }) ? "已获取" : "已追踪",
     disabled: true,
     workflowRunId: null,
   };
