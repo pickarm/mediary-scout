@@ -1,22 +1,25 @@
 # Fork 镜像部署与验证
 
-状态：代码及amd64镜像隔离验收完成。用户于2026-11-16另行要求发布当前镜像，现已发布[Docker Hub](https://hub.docker.com/r/qicket/mediary-scout/tags)的`v2026.11.16`、提交SHA标签和`latest`，均来自审核提交`f3e8a54`且摘要一致。真实网盘验证仍未完成，发布不代表生产验收；详情见[交付记录](DELIVERY-20261116.md)。
+状态：已完成全仓库静态检查、单元/集成回归、默认强制登录认证以及 GHCR 自动构建流程改造。真实平台（微信/飞书/Telegram）收发与真实网盘写入验证仍建议先在独立测试目录运行；数据库迁移演练与历史交付记录见 [DELIVERY-20261116.md](DELIVERY-20261116.md) 与 [DELIVERY-20261125.md](DELIVERY-20261125.md)。
 
 ## 运行形态
 
-一个 `qicket/mediary-scout` 应用容器同时承载 Web 与 worker，外接现有 PostgreSQL、PanSou，以及可选 Redis。使用 `docker-compose.fork.yml`；NAS 不需要检出源码、安装 npm 或挂载 Docker socket。
+一个 `ghcr.io/pickarm/mediary-scout`（`linux/amd64`）应用容器同时承载 Web 与进程内 worker，外接现有 PostgreSQL、PanSou，以及可选 Redis。部署使用 `docker-compose.fork.yml`；NAS / VPS 不需要检出源码、安装 npm 或挂载 Docker socket。
 
-在部署目录放置该 compose 文件和本机 `.env`，填写外部服务地址、所需元数据与模型配置。不要把 `.env`、访问令牌或备份提交到 Git。网盘连接仍在设置页管理。
+在部署目录放置 [`docker-compose.fork.yml`](../../docker-compose.fork.yml) 和本机 `.env`，填写外部服务地址、所需元数据与模型配置（不要把 `.env`、访问令牌或备份提交到 Git；网盘连接在网页「设置 → 网盘」管理）：
 
 ```dotenv
 MEDIA_TRACK_POSTGRES_URL=postgresql://USER:PASSWORD@DATABASE_HOST:5432/DATABASE_NAME
 PANSOU_BASE_URL=http://PANSOU_HOST:PORT
 REDIS_URL=redis://REDIS_HOST:6379
-MEDIA_TRACK_IMAGE_TAG=RELEASE_TAG
+
+# 镜像来源与标签：默认拉取 ghcr.io/pickarm/mediary-scout:latest（可选 edge / sha-... / 固定版本标签）
+# MEDIA_TRACK_IMAGE=ghcr.io/pickarm/mediary-scout
+MEDIA_TRACK_IMAGE_TAG=latest
 WEB_PORT=3000
 ```
 
-`RELEASE_TAG` 必须替换为已经发布的版本；也可使用 `latest`。容器内的 `localhost` 指容器自身，外部数据库和 PanSou 应使用容器可达的服务地址。Redis 不可用时退回 PostgreSQL，不能把 Redis 当成任务备份。
+容器内的 `localhost` 指容器自身，外部数据库和 PanSou 应使用容器可达的服务地址。Redis 不可用时退回 PostgreSQL，不能把 Redis 当成任务备份。
 
 ```sh
 docker compose -f docker-compose.fork.yml pull web
@@ -25,7 +28,27 @@ docker compose -f docker-compose.fork.yml ps
 docker compose -f docker-compose.fork.yml logs --tail=100 web
 ```
 
-应用以 `/api/health` 检查数据库读取是否可用。镜像使用 Fork 更新来源，设置页提供拉取和重建命令；不启用原来依赖本地源码构建的 updater。
+应用以 `/api/health` 检查数据库读取是否可用。镜像使用 Fork 更新来源，设置页展示 `pull` 和 `--force-recreate` 命令；不启用原来依赖本地源码构建的 updater。
+
+## 登录与访问控制配置
+
+Fork 默认启用**全站强制账号密码登录**，无论是直接暴露公网 IP 端口、走反向代理还是局域网访问，未持有有效 `mt_session` 会话都会重定向至 `/login`（仅 `/api/health`、`/api/auth/*` 及自带令牌守卫的 `/api/workflows/*`、`/api/agent/*`、`/api/update/busy`、`/api/update/hold` 例外）。
+
+- **首次初始化方式**：
+  1. **网页端一次性认领（默认开启）**：首次打开 `http://<HOST_IP>:3000/login` 设置站主用户名与密码（若原库已有 `acct_default` 数据和绑定网盘会自动接管保留），设置完成后初始化入口自动锁定。
+  2. **环境变量预置（适合自动化部署）**：在 `.env` 配置 `MEDIA_TRACK_ADMIN_USERNAME` 与 `MEDIA_TRACK_ADMIN_PASSWORD`（至少 6 位），启动后首次引导或登录会自动写入站主凭证；**一旦实例已认领或改过密码，环境变量绝不会覆盖现有密码**。
+  3. **禁止网页匿名初始化**：设置 `MEDIA_TRACK_DISABLE_WEB_BOOTSTRAP=1` 后，`/login` 不再提供首次创建站主表单，强制走上述环境变量初始化。
+- **公开注册与成员管理**：
+  - 认领完成后，公开注册**默认关闭**（访客请求 `/api/auth/register` 返回 `403`）。
+  - 站主可在 **设置 → 账号** 动态切换「公开注册」开关，或在关闭公开注册的情况下直接后台「新建账号」或重置成员密码。
+  - 若在 `.env` 中设置了 `MEDIA_TRACK_ALLOW_REGISTRATION=1` 或 `0`，则由环境变量强制锁定，设置页开关禁用。
+- **HTTP / HTTPS 会话 Cookie 兼容**：
+  - `MEDIA_TRACK_COOKIE_SECURE` 留空时自动依据客户端协议与 `x-forwarded-proto` 判定；直接通过 HTTP 访问公网 IP `:3000` 不会写入 `Secure` 标记，可正常保留登录态；若使用反代且未透传 `x-forwarded-proto`，可显式设为 `1` 或 `0`。
+- **兼容逃生开关**：显式设置 `MEDIA_TRACK_MULTI_USER=0` 可退回旧版单用户局域网免登录模式。
+- **忘记密码重置**：在部署主机执行以下命令直接重置指定账号密码：
+  ```sh
+  docker compose -f docker-compose.fork.yml exec web node scripts/reset-password.mjs <用户名>
+  ```
 
 ## 更新与回退前提
 
@@ -34,7 +57,7 @@ docker compose -f docker-compose.fork.yml logs --tail=100 web
 ```sh
 docker compose -f docker-compose.fork.yml pull web
 docker compose -f docker-compose.fork.yml up -d --force-recreate web
-docker compose -f docker-compose.fork.yml exec -T web cat BUILD_COMMIT
+docker compose -f docker-compose.fork.yml exec -T web cat BUILD_COMMIT BUILD_VERSION
 ```
 
 首次兼容迁移必须先在独立 PostgreSQL 副本演练。副本保留真实网盘文件 ID，演练时强制 `MEDIA_TRACK_REHEARSAL=1`、`MEDIA_TRACK_INPROCESS_WORKER=0` 并使用假适配，禁止真实网盘写入。真实扫描和整理另用物理隔离的专用测试目录。
@@ -43,20 +66,22 @@ docker compose -f docker-compose.fork.yml exec -T web cat BUILD_COMMIT
 
 ## 发行门槛
 
-发行必须包含完整类型检查（含 Web 源码与测试）、lint、workflow/Web 构建、原有回归、全部位置的 PG/Redis 集成，以及隔离镜像启动检查。镜像启动通过后才推送版本/SHA/latest 标签，三者应指向同一镜像，最后创建 Fork 正式 release。
-
-自动发行凭证保存在 CI Secrets。本次用户授权的本地发布由主代理将凭证通过标准输入交给Docker，使用临时Docker配置并在结束后清理。开发代理不执行发布、生产迁移或真实网盘操作。
+发行必须包含完整类型检查（含 Web 源码与测试）、lint、workflow/Web 构建、原有回归、全部位置的 PG/Redis 集成，以及隔离镜像启动检查。镜像启动与登录门禁冒烟全部通过后才推送版本/SHA/latest 标签，三者应指向同一镜像 ID 与 digest，最后创建 Fork 正式 GitHub Release。
 
 ## 自动构建与发行工作流
 
-本 Fork 在 `.github/workflows/` 下提供两条镜像构建流水线：
+本 Fork 在 `.github/workflows/` 下提供两条零外部 Secrets、纯基于 GHCR（`ghcr.io/<owner>/<repo>`）的镜像构建流水线（均仅构建 `linux/amd64` 以提升出包速度）：
 
 - **日常/分支自动构建（[`.github/workflows/docker-autobuild.yml`](../../.github/workflows/docker-autobuild.yml)）**：
-  - 当代码推送至 `main`（自动打标 `edge`）或 `feature/pickarm-v1`（自动打标 `dev`），或在 GitHub **Actions → Auto build Docker image → Run workflow** 手动触发时运行；
-  - 仅执行一次 `linux/amd64` `docker buildx build`，利用独立 PostgreSQL 与假适配启动并轮询 `/api/health` 确认可用后，推送同一已验证镜像 ID；
-  - 默认免密推送至 **GHCR**（`ghcr.io/<owner>/<repo>:<tag>` 与 `sha-<12位>`），若同时配置了 `DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN` Secrets，也会自动双推至 Docker Hub（默认 `qicket/mediary-scout`，可通过 Repository Variable `DOCKERHUB_IMAGE` 覆盖）；默认不覆盖 `latest`（仅手动勾选 `push_latest` 时更新）。
+  - 当代码推送至 `main` 或 `feature/pickarm-v1`（自动忽略纯文档变更 `docs/**`、`README*.md`、`LICENSE`、`release-notes/**`），或在 GitHub **Actions → Auto build Docker image → Run workflow** 手动触发时运行；
+  - 仅执行一次 `linux/amd64` `docker buildx build --load`，对接独立 PostgreSQL 与假适配启动容器，连续校验：`/api/health` 返回 200、`/login` 返回 200、未登录访问 `/` 返回 `307`/`302` 重定向，全部通过后才推送同一镜像 ID 至 GHCR：
+    - 推送至 `main`：自动同步推送 **`latest`**、**`edge`** 与 **`sha-<12位>`**；
+    - 推送至 `feature/pickarm-v1`：推送 **`dev`** 与 **`sha-<12位>`**（不覆盖 `latest`）；
+    - 手动触发支持填写自定义 `image_tag` 与勾选 `push_latest`。
 - **正式版本发布（[`.github/workflows/fork-image.yml`](../../.github/workflows/fork-image.yml)）**：
-  - 仅在推送 `v*` 轻量标签时触发，先完整执行 [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) 与只读预检，冒烟验证后向 Docker Hub 推送 `<tag>`、`sha-<40位>`、`latest` 并验证远端摘要完全一致，最后创建 GitHub Release。
+  - 仅在推送 `v*` 轻量标签时触发，先完整执行 [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) 与只读预检，完成同款单次构建与健康/登录门禁冒烟后，使用 `GITHUB_TOKEN` 向 GHCR 推送 `<tag>`、`sha-<40位>`、`latest` 并验证三者远端 digest 完全一致，最后创建 GitHub Release。
+
+> **首次启用提示**：在仓库 **Settings → Actions → General → Workflow permissions** 开启 **Read and write permissions**；首次推送镜像到 GHCR 后，前往仓库 **Packages → `mediary-scout` → Package settings** 将可见性设为 **Public**，即可免登录 `docker pull ghcr.io/<owner>/mediary-scout:latest`。
 
 ## v1.1消息入口配置
 

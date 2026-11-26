@@ -21,7 +21,8 @@ function read(path: string): string {
 const composeText = read("docker-compose.fork.yml");
 const compose = obj(parse(composeText));
 const ci = obj(parse(read(".github/workflows/ci.yml")));
-const release = obj(parse(read(".github/workflows/fork-image.yml")));
+const releaseText = read(".github/workflows/fork-image.yml");
+const release = obj(parse(releaseText));
 const autobuildText = read(".github/workflows/docker-autobuild.yml");
 const autobuild = obj(parse(autobuildText));
 const desktopRelease = obj(parse(read(".github/workflows/release-desktop.yml")));
@@ -38,7 +39,11 @@ describe("docker-compose.fork.yml", () => {
     expect(web.volumes).toBeUndefined();
     expect(composeText).not.toContain("docker.sock");
     expect(composeText).not.toMatch(/^\s*build:/m);
-    expect(text(web.image)).toMatch(/^qicket\/mediary-scout:/);
+    expect(composeText).not.toContain("qicket/mediary-scout");
+    expect(text(web.image)).toBe(
+      "${MEDIA_TRACK_IMAGE:-ghcr.io/pickarm/mediary-scout}:${MEDIA_TRACK_IMAGE_TAG:-latest}",
+    );
+    expect(text(web.image)).toContain("ghcr.io/pickarm/mediary-scout");
     expect(web.platform).toBe("linux/amd64");
   });
 
@@ -89,17 +94,26 @@ describe("CI workflow", () => {
 describe("Fork image release workflow", () => {
   const publish = obj(obj(release.jobs).publish);
   const steps = arr(publish.steps).map(obj);
-  const runOf = (name: string): string => text(steps.find((step) => step.name === name)?.run);
+  const stepNamed = (name: string) => steps.find((step) => step.name === name);
+  const runOf = (name: string): string => text(stepNamed(name)?.run);
   const indexOf = (name: string): number => steps.findIndex((step) => step.name === name);
   const buildRun = runOf("Build the linux/amd64 candidate locally");
+  const bootRun = runOf("Boot the local candidate with fake adapters and workers disabled");
   const pushRun = runOf("Tag and push the verified image (version + sha + latest)");
   const verifyRun = runOf("Verify the three remote tags point at the same digest");
+  const ghcrLoginStep = stepNamed("Log in to GitHub Container Registry (GHCR)");
 
-  it("requires CI before publishing, and publishes only on tags", () => {
+  it("requires CI before publishing to GHCR only on v* tags, without Docker Hub coupling", () => {
     expect(publish.needs).toBe("verify");
+    expect(publish.if).toBe("github.repository != 'fancydirty/mediary-scout'");
     expect(obj(release.on).push).toBeDefined();
     expect(obj(obj(release.on).push).tags).toEqual(["v*"]);
     expect(obj(release.permissions).contents).toBe("write");
+    expect(obj(release.permissions).packages).toBe("write");
+    expect(releaseText).not.toContain("DOCKERHUB_");
+    expect(releaseText).not.toContain("qicket/mediary-scout");
+    expect(obj(ghcrLoginStep?.with).registry).toBe("ghcr.io");
+    expect(obj(ghcrLoginStep?.with).password).toBe("${{ secrets.GITHUB_TOKEN }}");
     // One global release lane: simultaneous tags would race over latest/digest.
     expect(obj(release.concurrency).group).toBe("fork-image-release");
     expect(obj(release.concurrency)["cancel-in-progress"]).toBe(false);
@@ -122,19 +136,27 @@ describe("Fork image release workflow", () => {
     expect(buildRun).toContain("linux/amd64");
     expect(buildRun).toContain("VERSION=\"${TAG}\"");
     expect(buildRun).toContain("GIT_SHA=\"${GITHUB_SHA}\"");
-    expect((read(".github/workflows/fork-image.yml").match(/docker buildx build/g) ?? [])).toHaveLength(1);
+    expect((releaseText.match(/docker buildx build/g) ?? [])).toHaveLength(1);
   });
 
-  it("boots the local candidate before any tag or push work", () => {
+  it("boots the local candidate and checks /api/health, /login and unauthenticated redirect before pushing", () => {
     const bootIndex = indexOf("Boot the local candidate with fake adapters and workers disabled");
+    const loginIndex = indexOf("Log in to GitHub Container Registry (GHCR)");
     const pushIndex = indexOf("Tag and push the verified image (version + sha + latest)");
     expect(bootIndex).toBeGreaterThan(indexOf("Build the linux/amd64 candidate locally"));
-    expect(bootIndex).toBeLessThan(pushIndex);
+    expect(bootIndex).toBeLessThan(loginIndex);
+    expect(loginIndex).toBeLessThan(pushIndex);
+
+    expect(bootRun).toContain("/api/health");
+    expect(bootRun).toContain("/login");
+    expect(bootRun).toContain("ROOT_CODE");
+
     expect(pushRun).toContain('docker tag "${CANDIDATE}:${GITHUB_SHA}" "${IMAGE}:${TAG}"');
     expect(pushRun).toContain('docker tag "${CANDIDATE}:${GITHUB_SHA}" "${IMAGE}:sha-${GITHUB_SHA}"');
+    expect(pushRun).toContain('docker tag "${CANDIDATE}:${GITHUB_SHA}" "${IMAGE}:latest"');
     expect(pushRun).toContain('docker push "${IMAGE}:${TAG}"');
     expect(pushRun).toContain('docker push "${IMAGE}:sha-${GITHUB_SHA}"');
-    expect(pushRun).toContain("docker push \"${IMAGE}:latest\"");
+    expect(pushRun).toContain('docker push "${IMAGE}:latest"');
     expect(pushRun).toContain('test "$(docker image inspect "${IMAGE}:latest" --format \'{{.Id}}\')" = "$CANDIDATE_ID"');
   });
 
@@ -151,7 +173,7 @@ describe("Fork image release workflow", () => {
     );
   });
 
-  it("creates the release only after the image exists, with pull + recreate instructions", () => {
+  it("creates the release only after the image exists on GHCR, with pull + recreate instructions", () => {
     const releaseRun = runOf("Publish the Fork release");
     expect(releaseRun).toContain("gh release create");
     expect(releaseRun).toContain('${IMAGE}:sha-${SHA}');
@@ -172,31 +194,42 @@ describe("Auto build Docker image workflow", () => {
   const stepNamed = (name: string) => steps.find((step) => step.name === name);
   const runOf = (name: string): string => text(stepNamed(name)?.run);
   const indexOf = (name: string): number => steps.findIndex((step) => step.name === name);
+  const metaRun = runOf("Resolve image metadata and tags");
   const buildRun = runOf("Build the linux/amd64 image once locally");
   const smokeRun = runOf("Boot the local image with fake adapters and workers disabled");
+  const ghcrPushRun = runOf("Push verified image to GHCR");
+  const ghcrLoginStep = stepNamed("Log in to GitHub Container Registry (GHCR)");
 
-  it("triggers on branch pushes and manual workflow_dispatch without forcing latest", () => {
-    expect(arr(push.branches)).toEqual(expect.arrayContaining(["main", "feature/pickarm-v1"]));
-    expect(dispatch).toBeDefined();
-    expect(obj(inputs.push_latest).default).toBe(false);
+  it("uses GHCR exclusively without Docker Hub or qicket references", () => {
+    expect(autobuildText).not.toContain("DOCKERHUB_");
+    expect(autobuildText).not.toContain("qicket/mediary-scout");
     expect(obj(autobuild.permissions).packages).toBe("write");
     expect(buildJob.if).toBe("github.repository != 'fancydirty/mediary-scout'");
+    expect(obj(ghcrLoginStep?.with).registry).toBe("ghcr.io");
+    expect(obj(ghcrLoginStep?.with).password).toBe("${{ secrets.GITHUB_TOKEN }}");
   });
 
-  it("builds linux/amd64 once, smoke-tests /api/health, then pushes the verified image to GHCR and optionally Docker Hub", () => {
+  it("triggers on main/feature pushes and workflow_dispatch, syncing latest on main pushes", () => {
+    expect(arr(push.branches)).toEqual(expect.arrayContaining(["main", "feature/pickarm-v1"]));
+    expect(dispatch).toBeDefined();
+    expect(obj(inputs.image_tag)).toBeDefined();
+    expect(obj(inputs.push_latest).default).toBe(false);
+    expect(metaRun).toContain('elif [ "$REF_NAME" = "main" ]; then');
+    expect(metaRun).toContain('PRIMARY_TAG="edge"');
+    expect(metaRun).toContain('if [ "$EVENT" = "push" ] || [ "$INPUT_PUSH_LATEST" = "true" ]; then');
+    expect(metaRun).toContain('PUSH_LATEST="true"');
+  });
+
+  it("builds linux/amd64 once, smoke-tests /api/health, /login and / gate, then pushes same image ID to GHCR", () => {
     const buildIdx = indexOf("Build the linux/amd64 image once locally");
     const smokeIdx = indexOf("Boot the local image with fake adapters and workers disabled");
     const ghcrLoginIdx = indexOf("Log in to GitHub Container Registry (GHCR)");
     const ghcrPushIdx = indexOf("Push verified image to GHCR");
-    const hubLoginIdx = indexOf("Log in to Docker Hub (optional)");
-    const hubPushIdx = indexOf("Push verified image to Docker Hub (optional)");
 
     expect(buildIdx).toBeGreaterThan(-1);
     expect(smokeIdx).toBeGreaterThan(buildIdx);
     expect(ghcrLoginIdx).toBeGreaterThan(smokeIdx);
     expect(ghcrPushIdx).toBeGreaterThan(ghcrLoginIdx);
-    expect(hubLoginIdx).toBeGreaterThan(smokeIdx);
-    expect(hubPushIdx).toBeGreaterThan(hubLoginIdx);
 
     expect(buildRun).toContain("--platform linux/amd64");
     expect(buildRun).toContain("--load");
@@ -206,11 +239,13 @@ describe("Auto build Docker image workflow", () => {
     expect(smokeRun).toContain("MEDIA_TRACK_REHEARSAL=1");
     expect(smokeRun).toContain("MEDIA_TRACK_INPROCESS_WORKER=0");
     expect(smokeRun).toContain("/api/health");
+    expect(smokeRun).toContain("/login");
+    expect(smokeRun).toContain("ROOT_CODE");
 
-    expect(text(stepNamed("Log in to Docker Hub (optional)")?.if)).toContain("secrets.DOCKERHUB_USERNAME");
-    expect(text(stepNamed("Log in to Docker Hub (optional)")?.if)).toContain("secrets.DOCKERHUB_TOKEN");
-    expect(text(stepNamed("Push verified image to Docker Hub (optional)")?.if)).toContain("secrets.DOCKERHUB_USERNAME");
-    expect(text(stepNamed("Push verified image to Docker Hub (optional)")?.if)).toContain("secrets.DOCKERHUB_TOKEN");
+    expect(ghcrPushRun).toContain('docker push "${GHCR_IMAGE}:${PRIMARY_TAG}"');
+    expect(ghcrPushRun).toContain('docker push "${GHCR_IMAGE}:${SHA_TAG}"');
+    expect(ghcrPushRun).toContain('docker push "${GHCR_IMAGE}:latest"');
+    expect(ghcrPushRun).toContain('test "$(docker image inspect "${GHCR_IMAGE}:latest" --format \'{{.Id}}\')" = "$CANDIDATE_ID"');
   });
 });
 

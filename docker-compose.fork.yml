@@ -1,4 +1,4 @@
-# 巡影 Fork 默认部署：只拉取已发布的 linux/amd64 应用镜像。
+# 巡影 Fork 默认部署：默认拉取 GHCR 自动构建发布的 linux/amd64 应用镜像。
 #
 #   cp .env.example .env      # 填 MEDIA_TRACK_POSTGRES_URL / PANSOU_BASE_URL / REDIS_URL
 #   docker compose -f docker-compose.fork.yml up -d
@@ -7,7 +7,7 @@
 #   * 没有 build 段，不编译源码
 #   * 没有源码挂载
 #   * 不挂 Docker socket，也不启动旧本地构建 updater
-# 固定版本：MEDIA_TRACK_IMAGE_TAG=v2026.11.16；默认 latest。
+# 默认拉取 ghcr.io/pickarm/mediary-scout:latest（可设 MEDIA_TRACK_IMAGE_TAG=edge / v2026.11.26 或用 MEDIA_TRACK_IMAGE 覆盖镜像源）。
 
 x-default-logging: &default-logging
   driver: json-file
@@ -17,7 +17,7 @@ x-default-logging: &default-logging
 
 services:
   web:
-    image: qicket/mediary-scout:${MEDIA_TRACK_IMAGE_TAG:-latest}
+    image: ${MEDIA_TRACK_IMAGE:-ghcr.io/pickarm/mediary-scout}:${MEDIA_TRACK_IMAGE_TAG:-latest}
     platform: linux/amd64
     # 外部服务地址必须显式提供；不在这里私自内置数据库或 PanSou。
     environment:

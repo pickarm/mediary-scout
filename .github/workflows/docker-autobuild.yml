@@ -1,8 +1,8 @@
 name: Auto build Docker image
 
 # Builds the linux/amd64 container image on branch pushes and manual dispatches,
-# boots it once against an isolated PostgreSQL + fake adapters (/api/health), and
-# pushes the exact verified image ID to GHCR (zero-config) and optionally Docker Hub.
+# boots it once against an isolated PostgreSQL + fake adapters (/api/health, /login, / gate),
+# and pushes the exact verified image ID exclusively to GHCR (zero-config).
 on:
   push:
     branches:
@@ -22,7 +22,7 @@ on:
         type: string
         default: ""
       push_latest:
-        description: "同时更新 latest 标签（默认关闭，避免覆盖正式发布版）"
+        description: "同时更新 latest 标签（main 分支 push 自动更新，手动打测试标签时默认关闭）"
         required: false
         type: boolean
         default: false
@@ -37,7 +37,6 @@ concurrency:
 
 env:
   CANDIDATE: xunying-autobuild-candidate
-  DEFAULT_DOCKERHUB_IMAGE: qicket/mediary-scout
 
 jobs:
   build-and-push:
@@ -70,11 +69,8 @@ jobs:
           INPUT_TAG: ${{ inputs.image_tag }}
           INPUT_PUSH_LATEST: ${{ inputs.push_latest }}
           REF_NAME: ${{ github.ref_name }}
-          CUSTOM_DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
         run: |
           GHCR_IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
-          CLEAN_HUB="$(printf '%s' "${CUSTOM_DOCKERHUB_IMAGE:-}" | tr -d '[:space:]')"
-          DOCKERHUB_IMAGE="${CLEAN_HUB:-$DEFAULT_DOCKERHUB_IMAGE}"
           SHORT_SHA="${GITHUB_SHA:0:12}"
           SHA_TAG="sha-${SHORT_SHA}"
 
@@ -85,21 +81,29 @@ jobs:
               exit 1
             fi
             PRIMARY_TAG="$RAW_INPUT_TAG"
+            if [ "$INPUT_PUSH_LATEST" = "true" ]; then
+              PUSH_LATEST="true"
+            else
+              PUSH_LATEST="false"
+            fi
           elif [ "$REF_NAME" = "main" ]; then
             PRIMARY_TAG="edge"
+            if [ "$EVENT" = "push" ] || [ "$INPUT_PUSH_LATEST" = "true" ]; then
+              PUSH_LATEST="true"
+            else
+              PUSH_LATEST="false"
+            fi
           else
             PRIMARY_TAG="dev"
-          fi
-
-          if [ "$EVENT" = "workflow_dispatch" ] && [ "$INPUT_PUSH_LATEST" = "true" ]; then
-            PUSH_LATEST="true"
-          else
-            PUSH_LATEST="false"
+            if [ "$INPUT_PUSH_LATEST" = "true" ]; then
+              PUSH_LATEST="true"
+            else
+              PUSH_LATEST="false"
+            fi
           fi
 
           {
             echo "ghcr_image=${GHCR_IMAGE}"
-            echo "dockerhub_image=${DOCKERHUB_IMAGE}"
             echo "primary_tag=${PRIMARY_TAG}"
             echo "sha_tag=${SHA_TAG}"
             echo "push_latest=${PUSH_LATEST}"
@@ -141,16 +145,28 @@ jobs:
             -e MEDIA_TRACK_SEARCH_PROVIDER=demo \
             -e MEDIA_TRACK_DEMO_SEED=0 \
             "${CANDIDATE}:${GITHUB_SHA}"
+          HEALTH_OK=0
           for i in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:3000/api/health >/dev/null; then
               echo "autobuild image health OK"
-              exit 0
+              HEALTH_OK=1
+              break
             fi
             sleep 2
           done
-          echo "autobuild image did not become healthy" >&2
-          docker logs xunying-autobuild-smoke >&2
-          exit 1
+          if [ "$HEALTH_OK" != "1" ]; then
+            echo "autobuild image did not become healthy" >&2
+            docker logs xunying-autobuild-smoke >&2
+            exit 1
+          fi
+          curl -fsS http://127.0.0.1:3000/login >/dev/null
+          ROOT_CODE="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/)"
+          echo "root unauthenticated status: ${ROOT_CODE}"
+          if [ "$ROOT_CODE" != "307" ] && [ "$ROOT_CODE" != "302" ]; then
+            echo "expected unauthenticated / to redirect to /login, got ${ROOT_CODE}" >&2
+            docker logs xunying-autobuild-smoke >&2
+            exit 1
+          fi
 
       - name: Remove the smoke container
         if: always()
@@ -185,63 +201,30 @@ jobs:
             docker push "${GHCR_IMAGE}:latest"
           fi
 
-      - name: Log in to Docker Hub (optional)
-        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Push verified image to Docker Hub (optional)
-        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
-        shell: bash
-        env:
-          DOCKERHUB_IMAGE: ${{ steps.meta.outputs.dockerhub_image }}
-          PRIMARY_TAG: ${{ steps.meta.outputs.primary_tag }}
-          SHA_TAG: ${{ steps.meta.outputs.sha_tag }}
-          PUSH_LATEST: ${{ steps.meta.outputs.push_latest }}
-        run: |
-          CANDIDATE_ID="$(docker image inspect "${CANDIDATE}:${GITHUB_SHA}" --format '{{.Id}}')"
-          docker tag "${CANDIDATE}:${GITHUB_SHA}" "${DOCKERHUB_IMAGE}:${PRIMARY_TAG}"
-          docker tag "${CANDIDATE}:${GITHUB_SHA}" "${DOCKERHUB_IMAGE}:${SHA_TAG}"
-          test "$(docker image inspect "${DOCKERHUB_IMAGE}:${PRIMARY_TAG}" --format '{{.Id}}')" = "$CANDIDATE_ID"
-          test "$(docker image inspect "${DOCKERHUB_IMAGE}:${SHA_TAG}" --format '{{.Id}}')" = "$CANDIDATE_ID"
-          docker push "${DOCKERHUB_IMAGE}:${PRIMARY_TAG}"
-          docker push "${DOCKERHUB_IMAGE}:${SHA_TAG}"
-          if [ "$PUSH_LATEST" = "true" ]; then
-            docker tag "${CANDIDATE}:${GITHUB_SHA}" "${DOCKERHUB_IMAGE}:latest"
-            test "$(docker image inspect "${DOCKERHUB_IMAGE}:latest" --format '{{.Id}}')" = "$CANDIDATE_ID"
-            docker push "${DOCKERHUB_IMAGE}:latest"
-          fi
-
       - name: Write build summary
         shell: bash
         env:
           GHCR_IMAGE: ${{ steps.meta.outputs.ghcr_image }}
-          DOCKERHUB_IMAGE: ${{ steps.meta.outputs.dockerhub_image }}
           PRIMARY_TAG: ${{ steps.meta.outputs.primary_tag }}
           SHA_TAG: ${{ steps.meta.outputs.sha_tag }}
           PUSH_LATEST: ${{ steps.meta.outputs.push_latest }}
-          DOCKERHUB_CONFIGURED: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
         run: |
           {
-            echo "## 巡影自动构建镜像完成"
+            echo "## 巡影 GHCR 自动构建镜像完成"
             echo ""
             echo "- 提交：\`${GITHUB_SHA}\`"
-            echo "- GHCR：\`${GHCR_IMAGE}:${PRIMARY_TAG}\` · \`${GHCR_IMAGE}:${SHA_TAG}\`"
+            echo "- GHCR 标签：\`${GHCR_IMAGE}:${PRIMARY_TAG}\` · \`${GHCR_IMAGE}:${SHA_TAG}\`"
             if [ "$PUSH_LATEST" = "true" ]; then
               echo "- GHCR latest：\`${GHCR_IMAGE}:latest\`"
             fi
-            if [ "$DOCKERHUB_CONFIGURED" = "true" ]; then
-              echo "- Docker Hub：\`${DOCKERHUB_IMAGE}:${PRIMARY_TAG}\` · \`${DOCKERHUB_IMAGE}:${SHA_TAG}\`"
-              if [ "$PUSH_LATEST" = "true" ]; then
-                echo "- Docker Hub latest：\`${DOCKERHUB_IMAGE}:latest\`"
-              fi
-            else
-              echo "- Docker Hub：已跳过（未配置 \`DOCKERHUB_USERNAME\` / \`DOCKERHUB_TOKEN\`）"
-            fi
             echo ""
+            echo "### 拉取命令"
             echo "\`\`\`sh"
+            if [ "$PUSH_LATEST" = "true" ]; then
+              echo "docker pull ${GHCR_IMAGE}:latest"
+            fi
             echo "docker pull ${GHCR_IMAGE}:${PRIMARY_TAG}"
             echo "\`\`\`"
+            echo ""
+            echo "> 提示：若为仓库首次推送 GHCR 镜像，请在 GitHub Packages 中将对应 package 的可见性设为 **Public**，此后任意主机或 NAS 均可免登录拉取。"
           } >> "$GITHUB_STEP_SUMMARY"

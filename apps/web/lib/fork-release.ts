@@ -8,7 +8,7 @@
 export const FORK_REPO = "pickarm/mediary-scout";
 export const FORK_REPO_URL = `https://github.com/${FORK_REPO}`;
 export const FORK_RELEASES_URL = `${FORK_REPO_URL}/releases`;
-export const FORK_IMAGE = "qicket/mediary-scout";
+export const FORK_IMAGE = "ghcr.io/pickarm/mediary-scout";
 export const FORK_COMPOSE_FILE = "docker-compose.fork.yml";
 
 /** `MEDIA_TRACK_DISTRIBUTION` value baked into the prebuilt image/compose. */

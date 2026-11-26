@@ -1,10 +1,11 @@
 name: Fork image release
 
 # Only date tags matching the release-version parser reach this workflow. One buildx
-# build is loaded locally first, boot-checked with fake adapters and no worker, then
-# the SAME image is tagged/pushed as version, commit SHA and latest, the remote digests
-# are compared, and only then is the GitHub release created. A tag alone never
-# advertises an update: the app reads published releases, not bare tags.
+# build is loaded locally first, boot-checked with fake adapters and no worker
+# (/api/health, /login, / gate), then the SAME image is tagged/pushed to GHCR as
+# version, commit SHA and latest, the remote digests are compared, and only then is
+# the GitHub release created. A tag alone never advertises an update: the app reads
+# published releases, not bare tags.
 on:
   push:
     tags:
@@ -12,6 +13,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 concurrency:
   # Every Fork release shares one group: two tags must never race over latest/digest.
@@ -19,7 +21,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE: qicket/mediary-scout
   CANDIDATE: xunying-release-candidate
 
 jobs:
@@ -27,6 +28,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   publish:
+    if: github.repository != 'fancydirty/mediary-scout'
     needs: verify
     runs-on: ubuntu-latest
 
@@ -47,6 +49,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+
+      - name: Resolve GHCR image name
+        id: meta
+        shell: bash
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v6
         with:
@@ -94,7 +101,7 @@ jobs:
             --build-arg GIT_SHA="${GITHUB_SHA}" \
             --build-arg VERSION="${TAG}" \
             --label "org.opencontainers.image.title=巡影" \
-            --label "org.opencontainers.image.source=https://github.com/pickarm/mediary-scout" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
             --label "org.opencontainers.image.version=${TAG}" \
             --tag "${CANDIDATE}:${GITHUB_SHA}" \
@@ -117,30 +124,46 @@ jobs:
             -e MEDIA_TRACK_SEARCH_PROVIDER=demo \
             -e MEDIA_TRACK_DEMO_SEED=0 \
             "${CANDIDATE}:${GITHUB_SHA}"
+          HEALTH_OK=0
           for i in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:3000/api/health >/dev/null; then
               echo "release candidate health OK"
-              exit 0
+              HEALTH_OK=1
+              break
             fi
             sleep 2
           done
-          echo "release candidate did not become healthy" >&2
-          docker logs xunying-release-smoke >&2
-          exit 1
+          if [ "$HEALTH_OK" != "1" ]; then
+            echo "release candidate did not become healthy" >&2
+            docker logs xunying-release-smoke >&2
+            exit 1
+          fi
+          curl -fsS http://127.0.0.1:3000/login >/dev/null
+          ROOT_CODE="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/)"
+          echo "root unauthenticated status: ${ROOT_CODE}"
+          if [ "$ROOT_CODE" != "307" ] && [ "$ROOT_CODE" != "302" ]; then
+            echo "expected unauthenticated / to redirect to /login, got ${ROOT_CODE}" >&2
+            docker logs xunying-release-smoke >&2
+            exit 1
+          fi
 
       - name: Remove the smoke container
         if: always()
         shell: bash
         run: docker rm -f xunying-release-smoke || true
 
-      - uses: docker/login-action@v3
+      - name: Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # Same local image ID, three remote tags: no rebuild between smoke and publish.
       - name: Tag and push the verified image (version + sha + latest)
         shell: bash
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
         run: |
           TAG="${GITHUB_REF_NAME}"
           CANDIDATE_ID="$(docker image inspect "${CANDIDATE}:${GITHUB_SHA}" --format '{{.Id}}')"
@@ -157,6 +180,8 @@ jobs:
       - name: Verify the three remote tags point at the same digest
         id: verify-digests
         shell: bash
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
         run: |
           TAG="${GITHUB_REF_NAME}"
           digest() {
@@ -179,6 +204,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ steps.meta.outputs.image }}
           TAG: ${{ github.ref_name }}
           SHA: ${{ github.sha }}
           DIGEST: ${{ steps.verify-digests.outputs.digest }}

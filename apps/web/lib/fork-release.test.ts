@@ -11,12 +11,12 @@ import {
 } from "./fork-release";
 
 describe("Fork release identity", () => {
-  it("points at the Fork repository and the qicket image", () => {
+  it("points at the Fork repository and the GHCR image", () => {
     expect(FORK_REPO).toBe("pickarm/mediary-scout");
     expect(FORK_REPO_URL).toBe("https://github.com/pickarm/mediary-scout");
-    expect(FORK_IMAGE).toBe("qicket/mediary-scout");
+    expect(FORK_IMAGE).toBe("ghcr.io/pickarm/mediary-scout");
     expect(FORK_IMAGE_DISTRIBUTION).toBe("fork-image");
-    expect(releaseImage("v2026.11.16")).toBe("qicket/mediary-scout:v2026.11.16");
+    expect(releaseImage("v2026.11.16")).toBe("ghcr.io/pickarm/mediary-scout:v2026.11.16");
   });
 
   it("is the image path only when the deployment explicitly says so", () => {

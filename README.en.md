@@ -1,106 +1,139 @@
-> **pickarm Fork**: Adds existing cloud-drive library scanning/identification/template organization across all 6 supported drives, server-side pagination, optional Redis summary caching, personal messaging bots (WeChat / Feishu / Telegram), direct share/magnet link import, prebuilt `linux/amd64` NAS Docker deployment (`docker-compose.fork.yml`), and GitHub Actions auto-build workflows ([GHCR](https://github.com/pickarm/mediary-scout/pkgs/container/mediary-scout) & [Docker Hub `qicket/mediary-scout`](https://hub.docker.com/r/qicket/mediary-scout/tags)).
-> See the Chinese [README](README.md) and [Fork Deployment Guide](docs/fork/DEPLOYMENT.md) for NAS deployment, CI auto-builds, and current verification boundaries (real platform/drive live verification remains pending).
-
 <p align="center">
   <img src="docs/images/hero.svg" alt="Mediary Scout" width="600">
 </p>
 
 <p align="center">
-  <b>An agent-driven media library for your own cloud drives.</b>
+  <b>Mediary Scout (pickarm Fork)</b><br>
+  <b>An agent-driven cloud-drive media library for self-hosted NAS/VPS: auto search & gap-fill, 6-drive library scan & organization, messaging bot direct import, default forced login, and GHCR auto-build images.</b>
 </p>
 
 <p align="center">
-  <a href="https://github.com/fancydirty/mediary-scout/actions/workflows/ci.yml"><img src="https://github.com/fancydirty/mediary-scout/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/fancydirty/mediary-scout/releases/latest"><img src="https://img.shields.io/github/v/release/fancydirty/mediary-scout?display_name=tag" alt="Latest release"></a>
+  <a href="https://github.com/pickarm/mediary-scout/actions/workflows/ci.yml"><img src="https://github.com/pickarm/mediary-scout/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/pickarm/mediary-scout/actions/workflows/docker-autobuild.yml"><img src="https://github.com/pickarm/mediary-scout/actions/workflows/docker-autobuild.yml/badge.svg" alt="Auto Build Docker Image"></a>
+  <a href="https://github.com/pickarm/mediary-scout/pkgs/container/mediary-scout"><img src="https://img.shields.io/badge/GHCR-ghcr.io%2Fpickarm%2Fmediary--scout-2ea44f?logo=github" alt="GHCR"></a>
+  <a href="https://github.com/pickarm/mediary-scout/releases"><img src="https://img.shields.io/github/v/release/pickarm/mediary-scout?display_name=tag" alt="Fork Releases"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-0BSD-blue" alt="license"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/fancydirty/mediary-scout/releases/latest">📥 Download</a> ·
-  <a href="https://mediaryscout.app/en/">🌐 Website</a> ·
-  <a href="https://demo.mediaryscout.app">🔭 Live demo</a> ·
-  <a href="README.md">中文</a>
+  <a href="#nas--vps-quick-start-ghcr">🚀 Quick Start</a> ·
+  <a href="#authentication--access-control">🔐 Login & Security</a> ·
+  <a href="#github-actions-ghcr-auto-build">⚙️ GHCR Auto-Build</a> ·
+  <a href="#supported-drives">🗂️ Drives</a> ·
+  <a href="#messaging-bots--direct-import">💬 Messaging Bots</a> ·
+  <a href="README.md">中文文档</a>
 </p>
 
-Ask for a movie, show or anime; an agent searches for it, transfers the best match into your own drive (Quark / UC / 115 / GuangYaPan / 123 / Tianyi), reads the drive back to confirm it landed, and keeps filling in episodes that are still missing.
+Maintained on top of upstream [fancydirty/mediary-scout](https://github.com/fancydirty/mediary-scout) (synced through `#379`), keeping full movie/TV/anime search, agent source picking, transfer verification, daily scheduled gap-fill, multi-account isolation, and Emby/Jellyfin/Plex/webhook refreshes while adding:
 
-Download: [GitHub Releases](https://github.com/fancydirty/mediary-scout/releases/latest) (macOS / Windows desktop app)
+- **Default Forced Login & Owner Controls**: All Web routes and user APIs enforce `mt_session` authentication out of the box (over bare public VPS ports, reverse proxies, and LAN). Unclaimed instances adopt any seeded `acct_default` library on initial setup (either via `/login` or `MEDIA_TRACK_ADMIN_USERNAME` + `MEDIA_TRACK_ADMIN_PASSWORD`) and lock public self-registration by default.
+- **6-Drive Existing Library Scan & Organization**: Paginated directory scan, TMDB identification, safe import (`autoAcquire` off by default), template preview & non-destructive rename/organize preserving multi-version files and subtitle language/`forced` flags across **Quark, UC, 115, 123, GuangYaPan (光鸭), and Tianyi (天翼)**.
+- **Scale & Caching**: Server-side paginated library/activity views, independent non-drive preparation workers, optional Redis summary cache (gracefully degrades back to PostgreSQL on Redis failure), and shared SSE progress streams.
+- **Messaging Bots & Direct Share/Magnet Import**: Built-in **WeChat (iLink QR/PIN), Feishu (long connection cards), and Telegram (grammY)** private chat bots for searching, choosing seasons/drives, querying/stopping jobs, and importing share links or magnet URLs into isolated landing directories.
+- **Zero-Secret GHCR `linux/amd64` Auto-Build**: Prebuilt single-container image (`web` + in-process worker) automatically built, smoke-tested, and pushed to `ghcr.io/pickarm/mediary-scout` without external Docker Hub secrets.
 
-Support the author: [buy me a coffee](docs/support/README.md)
-
-Community: this project takes part in and endorses the [LINUX DO community](https://linux.do), where many users self-host, share drive tips, and get deployment questions answered fast. [![认可 LINUX DO](https://img.shields.io/badge/LINUX%20DO-认可-2ecc71?style=flat&labelColor=1f1f1f)](https://linux.do)
+> **Verification Boundary Note**: Static type checks, ESLint, database-free Web build, unit/contract tests, and isolated Linux/PostgreSQL/Redis suites have been run. Before migrating an existing database, always run a dry-run on an isolated PostgreSQL clone (`MEDIA_TRACK_REHEARSAL=1`) and validate real WeChat/Feishu/Telegram messaging and cloud-drive writes against a dedicated test folder. See [Fork Deployment Guide (Chinese)](docs/fork/DEPLOYMENT.md) and [Migration Guide (Chinese)](docs/fork/MIGRATION.md).
 
 ![Mediary Scout: search a title, hit 获取, and the agent searches, transfers, and verifies it into your drive](docs/images/demo.gif)
 
-## Install
+---
 
-### Desktop app (easiest)
+## NAS / VPS Quick Start (GHCR)
 
-| Platform | Download | Notes |
-|---|---|---|
-| macOS (Apple Silicon) | [.dmg](https://github.com/fancydirty/mediary-scout/releases/latest) | Signed and notarized |
-| Windows (x64) | [.exe](https://github.com/fancydirty/mediary-scout/releases/latest) | Unsigned: when SmartScreen prompts, click "Run anyway" |
+Download [`docker-compose.fork.yml`](docker-compose.fork.yml) and create `.env` (refer to [`.env.example`](.env.example)):
 
-Install, open it, connect a drive and add an AI model in Settings, then search a title and hit 获取. The app tells you when a new version is out.
+```dotenv
+# Required external services
+MEDIA_TRACK_POSTGRES_URL=postgresql://USER:PASSWORD@DATABASE_HOST:5432/DATABASE_NAME
+PANSOU_BASE_URL=http://PANSOU_HOST:PORT
 
-### Docker (NAS / router / server)
+# Optional Redis summary cache (PostgreSQL remains the source of truth)
+REDIS_URL=redis://REDIS_HOST:6379
 
-```bash
-git clone https://github.com/fancydirty/mediary-scout && cd mediary-scout
-docker compose up -d
+# GHCR image settings (defaults to ghcr.io/pickarm/mediary-scout:latest)
+# MEDIA_TRACK_IMAGE=ghcr.io/pickarm/mediary-scout
+MEDIA_TRACK_IMAGE_TAG=latest
+WEB_PORT=3000
+
+# Optional pre-seeded owner credentials (applied only while unclaimed; never overwrites changed passwords)
+# MEDIA_TRACK_ADMIN_USERNAME=admin
+# MEDIA_TRACK_ADMIN_PASSWORD=your_strong_password
 ```
 
-Open `http://<host>:3000` and configure it in Settings. Later updates are one click in **Settings → 更新**, or daily on a schedule you set. Build mirrors for mainland China, remote access via Tailscale / Cloudflare Tunnel, multi-user, backups, and a prompt that lets an AI agent deploy it for you are all in the **[deploy guide](docs/deploy.md)** (Chinese).
+Start and check the service:
 
-| | Desktop app | Docker |
-|---|---|---|
-| Best for | Personal use on Mac / Windows | NAS or server, always on |
-| Scheduled gap-fill | While the app is open | 24/7 |
-| Multi-user | No | Yes |
-| Phone / remote access | This machine only | Tailscale / Cloudflare Tunnel |
+```bash
+docker compose -f docker-compose.fork.yml pull web
+docker compose -f docker-compose.fork.yml up -d web
+docker compose -f docker-compose.fork.yml ps
+```
 
-Either way, bringing your own OpenAI-compatible AI model endpoint is an optional upgrade (the key stays in your own instance). Without a configured AI model, the app defaults to Kilo Code's free public model pool (no signup needed; the acquisition conversation context - search queries, task and message content, candidate results, file names - is sent to Kilo and its upstream model providers). Metadata works out of the box. Resource search uses PanSou: Docker bundles one, the desktop app defaults to a public instance you can swap for your own in Settings; Prowlarr can be added for magnets.
+Open `http://<HOST_IP>:3000` (health check at `/api/health`) to create or log in as the owner account and connect your cloud drives in **Settings**. For source-built all-in-one Docker (`docker-compose.yml`) or the upstream desktop app, see [`docs/deploy.md`](docs/deploy.md) and [upstream releases](https://github.com/fancydirty/mediary-scout/releases/latest).
 
-## Supported drives
+---
 
-When multiple drives are connected, the agent unifies all drive pools, checks live free space before every transfer, and can even complete a single season across multiple drives ([Multi-Drive Agent overview](https://mediaryscout.app/features/multi-drive-agent/)):
+## Authentication & Access Control
 
-- **Quark**: share-link transfer; QR login; the largest pool on PanSou.
-- **UC Drive**: share-link transfer; QR login; generous free storage.
-- **115**: share links + magnets; QR login.
-- **123**: share links + magnets; free accounts can transfer; QR login. [Setup](docs/deploy.md#123网盘连接)
-- **GuangYaPan (光鸭)**: share links + magnets; paste a token to log in. [Setup](docs/deploy.md#光鸭云盘guangyapan连接)
-- **Tianyi (天翼)**: share-link transfer; QR login; few movies. [Setup](docs/deploy.md#天翼云盘连接)
+- **Default Protected Gate**: Unlike the legacy single-user mode that trusted non-Cloudflare requests, every Web page and session-scoped API requires a signed `mt_session` cookie by default (`/api/health`, `/api/workflows/*` guarded by `MEDIA_TRACK_WORKER_SECRET`, `/api/agent/*` guarded by Agent Bearer token, and `/api/update/{busy,hold}` remain handler-guarded; `MEDIA_TRACK_DEMO_MODE=1` stays read-only/unauthenticated).
+- **HTTP & HTTPS Safe Cookie**: Leaving `MEDIA_TRACK_COOKIE_SECURE` unset detects HTTPS automatically from `x-forwarded-proto` or request protocol, while working out of the box on plain HTTP IP ports.
+- **Key Environment Variables**:
+  - `MEDIA_TRACK_ADMIN_USERNAME` / `MEDIA_TRACK_ADMIN_PASSWORD`: Optional pair to pre-provision the owner while unclaimed.
+  - `MEDIA_TRACK_DISABLE_WEB_BOOTSTRAP=1`: Disables first-time owner creation through `/login` so initialization only happens via the env pair above.
+  - `MEDIA_TRACK_ALLOW_REGISTRATION`: Unset lets the owner toggle public sign-up in **Settings → 账号** (closed by default); `1` or `0` locks the policy via env.
+  - `MEDIA_TRACK_MULTI_USER=0`: Legacy opt-out restoring single-user LAN bypass.
+- **Forgotten Password Reset CLI**:
+  ```bash
+  docker compose -f docker-compose.fork.yml exec web node scripts/reset-password.mjs <username>
+  ```
 
-Per-drive resource counts, and why only these six: [Cloud drive comparison](https://mediaryscout.app/guides/which-cloud-drive/) · [drive evaluations](docs/drive-brand-evaluations.md) (Chinese).
+---
 
-## More docs
+## GitHub Actions GHCR Auto-Build
 
-- [Official Website (English)](https://mediaryscout.app/en/) · [Guides & Tutorials Hub](https://mediaryscout.app/guides/) · [Mediary Scout vs. MoviePilot / Sonarr](https://mediaryscout.app/compare/mediary-scout-vs-moviepilot-sonarr/)
-- [Deploy guide](https://mediaryscout.app/guides/docker-nas-deploy/) ([repo docs](docs/deploy.md))
-- [Agent API](https://mediaryscout.app/features/agent-api/) ([repo docs](docs/agent-api.md)): let coding agents such as Claude Code, Codex, or OpenClaw drive Mediary Scout
-- [Smart Search & Subtitles](https://mediaryscout.app/features/smart-search-and-subtitles/) · [Search and web research](docs/web-research.md) (Chinese): describe a plot, or how shows without official seasons map to episode numbers
-- [Architecture overview](docs/architecture.md)
+Two workflows in `.github/workflows/` build and verify a single `linux/amd64` container image (checking `/api/health`, `/login`, and unauthenticated `/` redirect before pushing):
 
-## Disclaimer
+- **Branch & Manual Builds ([`.github/workflows/docker-autobuild.yml`](.github/workflows/docker-autobuild.yml))**:
+  - Runs on `push` to `main` (publishes `:latest`, `:edge`, and `:sha-<12>`) or `feature/pickarm-v1` (`:dev` and `:sha-<12>`), plus manual `workflow_dispatch` with custom `image_tag` / `push_latest`.
+  - Pushes directly to `ghcr.io/<owner>/<repo>` using `GITHUB_TOKEN` (no external secrets needed).
+- **Tagged Releases ([`.github/workflows/fork-image.yml`](.github/workflows/fork-image.yml))**:
+  - Runs on `v*` tags after full [`ci.yml`](.github/workflows/ci.yml) + release preflight pass; pushes `:<tag>`, `:sha-<40>`, and `:latest` to GHCR, verifies all three remote digests match, and publishes the GitHub Release.
 
-Mediary Scout is open-source, self-hosted software. It is not offered, and never will be offered, as a hosted service: you run your own instance and bring your own drive and AI model credentials. It performs the same file operations you could do by hand in your own cloud drive. See [project positioning](docs/distribution-and-legal-positioning.md). Not affiliated with 115, Quark, UC, GuangYaPan, 123, Tianyi, TMDB, or any indexer.
+To enable in your own fork: ensure **Settings → Actions → General → Workflow permissions** is set to **Read and write permissions**, and after the first push set your GHCR package `mediary-scout` visibility to **Public** so NAS/servers can `docker pull` anonymously.
 
-## Credits
+---
 
-- [PanSou](https://github.com/fish2018/pansou-web): resource search backend
-- [Prowlarr](https://github.com/Prowlarr/Prowlarr): indexer manager (optional)
-- [p115client](https://github.com/ChenyangGao/p115client): 115 API reference
-- [p123client](https://github.com/ChenyangGao/p123client): 123 API reference
-- [AList](https://github.com/AlistGo/alist): GuangYaPan API reference (`drivers/guangyapan`)
-- [cloud189-auto-save](https://github.com/1307super/cloud189-auto-save) / [cloudpan189-api](https://github.com/tickstep/cloudpan189-api): Tianyi API references
-- [TMDB](https://www.themoviedb.org/): metadata (this product is not endorsed or certified by TMDB)
+## Supported Drives
 
-## Star History
-<a href="https://www.star-history.com/?repos=fancydirty%2Fmediary-scout&type=date&legend=top-left">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=fancydirty/mediary-scout&type=date&theme=dark&legend=top-left&sealed_token=SyhZxdVgoG8rffU_0ypYi7eroHlPNo9kj1V0_4F2L1vJ_C_Yw_DBBmDqGADi7kl916TTZJ8nmCCIK6osu_tfo__vf8AfSlwqk176hnpqc_oIg_PcmKuulA" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=fancydirty/mediary-scout&type=date&legend=top-left&sealed_token=SyhZxdVgoG8rffU_0ypYi7eroHlPNo9kj1V0_4F2L1vJ_C_Yw_DBBmDqGADi7kl916TTZJ8nmCCIK6osu_tfo__vf8AfSlwqk176hnpqc_oIg_PcmKuulA" />
-    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=fancydirty/mediary-scout&type=date&legend=top-left&sealed_token=SyhZxdVgoG8rffU_0ypYi7eroHlPNo9kj1V0_4F2L1vJ_C_Yw_DBBmDqGADi7kl916TTZJ8nmCCIK6osu_tfo__vf8AfSlwqk176hnpqc_oIg_PcmKuulA" />
-  </picture>
-</a>
+- **Quark (夸克)** · **UC Drive (UC)** · **Tianyi (天翼)**: share-link transfers, QR login, and existing library scan/organize.
+- **115** · **123** · **GuangYaPan (光鸭)**: share links + magnets/offline transfers, QR/device/token login, and existing library scan/organize.
+
+---
+
+## Messaging Bots & Direct Import
+
+Configure **WeChat**, **Feishu**, or **Telegram** per account in **Settings → 巡检 → 消息机器人** (off by default; owner private chat only). Supported chat actions include `帮助`, `我想看 <title>`, sharing cloud-drive links (with optional extraction code), sending `magnet:` URIs, `查询 [taskId]`, and `停止 [taskId]`.
+
+---
+
+## Development & Verification
+
+Requires Node.js `>=22.13.0` and `npm` (`package-lock.json`):
+
+```bash
+npm ci
+npm run build:workflow
+npm run build:web
+npm run typecheck
+npm run typecheck:migration
+npx tsc --noEmit --project apps/web/tsconfig.json
+npm run lint
+npx vitest run --exclude '**/*.pg.test.ts' --exclude '**/*.postgres.test.ts'
+```
+
+---
+
+## Disclaimer & Credits
+
+Mediary Scout is open-source, self-hosted software and never operates as a hosted service. You run your own instance and supply your own cloud-drive, LLM, and search credentials. See [project positioning](docs/distribution-and-legal-positioning.md). Not affiliated with 115, Quark, UC, GuangYaPan, 123, Tianyi, TMDB, WeChat, Feishu, Telegram, or any indexer.
+
+Built with thanks to upstream [fancydirty/mediary-scout](https://github.com/fancydirty/mediary-scout), [LINUX DO community](https://linux.do), [PanSou](https://github.com/fish2018/pansou-web), [Prowlarr](https://github.com/Prowlarr/Prowlarr), [p115client](https://github.com/ChenyangGao/p115client), [p123client](https://github.com/ChenyangGao/p123client), [AList](https://github.com/AlistGo/alist), [cloud189-auto-save](https://github.com/1307super/cloud189-auto-save) / [cloudpan189-api](https://github.com/tickstep/cloudpan189-api), and [TMDB](https://www.themoviedb.org/).

@@ -334,7 +334,7 @@
   },
   "plan": {
     "composeFile": "docker-compose.fork.yml",
-    "imagePlaceholder": "qicket/mediary-scout:<RELEASE_TAG>",
+    "imagePlaceholder": "ghcr.io/pickarm/mediary-scout:<RELEASE_TAG>",
     "backupPathPlaceholder": "<BACKUP_PATH>"
   }
 }
