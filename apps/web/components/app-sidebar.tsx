@@ -128,10 +128,7 @@ export function AppSidebar({
           </span>
           <span>
             <strong>设置</strong>
-            {/* 副标题兼作宣传口:把「远程访问」摆进来,左下角这张卡一直可见,
-                比顶部通知的触达更持久。去掉「推送」是为了保持**单行** ——
-                四项会撑到换行,卡片高度就乱了。 */}
-            <span>{resolveIsDesktop() ? "网盘 · 偏好 · 设置" : "网盘 · 偏好 · 远程访问"}</span>
+            <span>{resolveIsDesktop() ? "网盘 · 偏好 · 设置" : "网盘 · 偏好 · 更新"}</span>
           </span>
           <SettingsAttentionBadge storageId={activeStorageId} visibleWhen="desktop" />
         </Link>

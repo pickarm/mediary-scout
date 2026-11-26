@@ -79,6 +79,7 @@ describe("GET /api/tmdb/image/[size]/[...path]", () => {
     expect(new Uint8Array(await first.arrayBuffer())).toEqual(PNG_BYTES);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]?.[0]).toBe(`https://image.tmdb.org/t/p/w342/${filename}`);
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "GET", redirect: "error" });
 
     // Second request hits in-memory LRU cache with zero extra upstream fetch calls.
     const second = await GET(...makeRequest("w342", [filename]));

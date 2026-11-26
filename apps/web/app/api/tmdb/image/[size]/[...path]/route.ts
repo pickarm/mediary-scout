@@ -147,6 +147,7 @@ async function fetchImageFromUrl(
   try {
     const response = await fetch(url, {
       method: "GET",
+      redirect: "error",
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (response.status === 404) {

@@ -122,7 +122,7 @@ To enable in your own fork: ensure **Settings → Actions → General → Workfl
 
 ## Messaging Bots & Direct Import
 
-Configure **WeChat**, **Feishu**, or **Telegram** per account in **Settings → 巡检 → 消息机器人** (off by default; owner private chat only). Supported chat actions include `帮助`, `我想看 <title>`, sharing cloud-drive links (with optional extraction code), sending `magnet:` URIs, `查询 [taskId]`, and `停止 [taskId]`.
+Configure **WeChat**, **Feishu**, or **Telegram** per account in **Settings → 巡检与通知 → 消息机器人** (off by default; owner private chat only). Supported chat actions include `帮助`, `我想看 <title>`, sharing cloud-drive links (with optional extraction code), sending `magnet:` URIs, `查询 [taskId]`, and `停止 [taskId]`.
 
 ---
 

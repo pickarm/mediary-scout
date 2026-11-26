@@ -87,7 +87,9 @@ export function LibraryPagedWall({ previews, storageId, mediaType, filter, stora
   const [direction, setDirection] = useState<SortDirection>("asc");
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [loadedStorages, setLoadedStorages] = useState<readonly LibraryStorageOption[] | null>(null);
+  const loadedStoragesRef = useRef(storages !== undefined);
   const loadingStoragesRef = useRef(false);
+  if (storages !== undefined) loadedStoragesRef.current = true;
 
   const initial = useMemo(() => category ? previews.find((item) => item.type === category)?.page : undefined, [previews, category]);
   const initialKey = initial ? resultKey(baseStorage || undefined, category, filter, 1, "", "title", "asc") : null;
@@ -157,7 +159,7 @@ export function LibraryPagedWall({ previews, storageId, mediaType, filter, stora
     const state = stateForFilter(filter);
     if (state) params.set("state", state);
     if (settledQuery) params.set("search", settledQuery);
-    if (!storages && loadedStorages === null) params.set("includeStorages", "1");
+    if (!storages && !loadedStoragesRef.current) params.set("includeStorages", "1");
     setLoading(true);
     setError(null);
     void fetch(`/api/library/media?${params.toString()}`, { signal: controller.signal, cache: "no-store" })
@@ -169,6 +171,7 @@ export function LibraryPagedWall({ previews, storageId, mediaType, filter, stora
       .then((value) => {
         if (!active) return;
         if (isStorageOptionArray(value.storages)) {
+          loadedStoragesRef.current = true;
           setLoadedStorages(value.storages);
         }
         setLoadedResult({ key, page: value });
@@ -180,16 +183,17 @@ export function LibraryPagedWall({ previews, storageId, mediaType, filter, stora
       })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; controller.abort(); };
-  }, [category, direction, effectiveStorageId, filter, isDefaultOverview, loadedStorages, page, retry, scopeKey, settledQuery, sort, storages]);
+  }, [category, direction, effectiveStorageId, filter, isDefaultOverview, page, retry, scopeKey, settledQuery, sort, storages]);
 
   const ensureStoragesLoaded = () => {
-    if (storages || loadedStorages !== null || loadingStoragesRef.current) return;
+    if (storages || loadedStoragesRef.current || loadingStoragesRef.current) return;
     loadingStoragesRef.current = true;
     void fetch("/api/library/media?page=1&pageSize=1&includeStorages=1", { cache: "no-store" })
       .then(async (response) => {
         if (!response.ok) return;
         const body: unknown = await response.json();
         if (body && typeof body === "object" && "storages" in body && isStorageOptionArray(body.storages)) {
+          loadedStoragesRef.current = true;
           setLoadedStorages(body.storages);
         }
       })

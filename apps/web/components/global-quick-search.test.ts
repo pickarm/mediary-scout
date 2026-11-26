@@ -319,6 +319,7 @@ describe("GlobalQuickSearch", () => {
     expect(requests[0]!.url.pathname).toBe("/api/library/media");
     expect(requests[0]!.url.searchParams.get("search")).toBe("沙丘");
     expect(requests[0]!.url.searchParams.get("pageSize")).toBe("8");
+    expect(requests[0]!.url.searchParams.get("storageId")).toBe("drive-b");
 
     await respondLatest(queryPage([
       item({ tmdbId: 438631, title: "沙丘", type: "movie", year: 2021, posterPath: "/dune.jpg", state: "complete" }),

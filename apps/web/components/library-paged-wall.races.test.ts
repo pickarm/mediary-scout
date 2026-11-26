@@ -205,7 +205,7 @@ function pending(predicate: (url: URL) => boolean): PendingRequest[] {
   return requests.filter((request) => !request.done && predicate(request.url));
 }
 
-async function respond(request: PendingRequest, body: LibraryQueryPage): Promise<void> {
+async function respond(request: PendingRequest, body: LibraryQueryPage & { storages?: readonly { id: string; label: string }[] }): Promise<void> {
   request.done = true;
   request.resolve(body);
   await flush();
@@ -558,5 +558,24 @@ describe("LibraryPagedWall queries", () => {
     expect(markup).toContain("/api/tmdb/image/w92/all.jpg");
     expect(markup).toContain("更新 2026-11-26");
     expect(markup).not.toContain('class="poster-wall"');
+  });
+
+  it("does not trigger a duplicate media fetch after receiving storages from includeStorages=1", async () => {
+    render({ previews, mediaType: "movie", filter: "all" });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.url.searchParams.get("includeStorages")).toBe("1");
+
+    await respond(requests[0]!, {
+      ...page([item({ tmdbId: 11, title: "首请求电影" })], 1),
+      storages: [
+        { id: "drive-1", label: "网盘 A" },
+        { id: "drive-2", label: "网盘 B" },
+      ],
+    });
+
+    // 更新 loadedStorages 后不应触发第二次 /api/library/media 请求
+    expect(requests).toHaveLength(1);
+    expect(html()).toContain("网盘 A");
+    expect(html()).toContain("网盘 B");
   });
 });

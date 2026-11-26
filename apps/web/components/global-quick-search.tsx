@@ -99,7 +99,9 @@ export function GlobalQuickSearch({
     let active = true;
     setLoading(true);
     setError(null);
-    void fetch(`/api/library/media?search=${encodeURIComponent(settledQuery)}&pageSize=8`, {
+    const params = new URLSearchParams({ search: settledQuery, pageSize: "8" });
+    if (storageId) params.set("storageId", storageId);
+    void fetch(`/api/library/media?${params.toString()}`, {
       signal: controller.signal,
       cache: "no-store",
     })
@@ -127,7 +129,7 @@ export function GlobalQuickSearch({
       active = false;
       controller.abort();
     };
-  }, [open, settledQuery]);
+  }, [open, settledQuery, storageId]);
 
   const trimmed = query.trim();
   const hasTmdbFallback = trimmed.length > 0;
