@@ -130,6 +130,33 @@ describe("buildSettingsAttentionItems", () => {
     expect(item?.body).toBe("当前 v2026.09.28 · 新版本 v2026.10.02。去「更新」看看改了什么。");
   });
 
+  it("renders container image update copy when mode is image", () => {
+    const items = buildSettingsAttentionItems({
+      demo: false,
+      isOwner: true,
+      drives: [],
+      brandLabel,
+      llmConfigured: true,
+      availableUpdate: {
+        tag: "latest",
+        commit: "d".repeat(40),
+        currentLabel: "edge · a1b2c3d4",
+        mode: "image",
+      },
+    });
+    const item = items.find((entry) => entry.kind === "update_available");
+    expect(item).toMatchObject({
+      id: "update:ddddddd",
+      severity: "info",
+      title: "检测到新镜像，请更新容器",
+      actionLabel: "查看更新",
+    });
+    expect(item?.body).toBe(
+      "当前提交 edge · a1b2c3d4 · 远端镜像 ddddddd（latest）。前往「设置 → 更新」复制容器更新命令。",
+    );
+    expect(item?.href).toContain("tab=update");
+  });
+
   it("shows no update item to a non-owner or when nothing newer exists", () => {
     const update = { tag: "v2026.10.02", commit: "c".repeat(40), currentLabel: "v2026.09.28" };
     const hasUpdate = (items: Array<{ kind: string }>) => items.some((item) => item.kind === "update_available");

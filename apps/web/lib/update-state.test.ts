@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { buildUpdateView, desktopDownload, desktopFeed, desktopView } from "./update-state";
+import type { TrackedImageRef } from "./fork-release";
+import type { RemoteImageResult } from "./image-update-server";
+import { buildImageUpdateView, buildUpdateView, desktopDownload, desktopFeed, desktopView } from "./update-state";
 
 const feed = [
   { tag: "v2026.10.02", date: "2026-10-02", commit: "c".repeat(40), notes: [] },
@@ -59,8 +61,121 @@ describe("buildUpdateView", () => {
     const view = buildUpdateView({ ...base, currentCommit: "d".repeat(40), feed: [] });
     expect(view.available).toBeNull();
     expect(view.status).toBe("offline");
-    // Without the release list we cannot tell a release from a dev build.
     expect(view.current).toEqual({ label: "dddddddd", tag: null });
+  });
+});
+
+describe("buildImageUpdateView", () => {
+  const trackedRef: TrackedImageRef = {
+    ok: true,
+    registry: "ghcr.io",
+    repository: "pickarm/mediary-scout",
+    tag: "latest",
+    fullRef: "ghcr.io/pickarm/mediary-scout:latest",
+  };
+  const remoteOk: RemoteImageResult = {
+    ok: true,
+    registry: "ghcr.io",
+    repository: "pickarm/mediary-scout",
+    tag: "latest",
+    fullRef: "ghcr.io/pickarm/mediary-scout:latest",
+    manifestDigest: "sha256:abcd",
+    configDigest: "sha256:efgh",
+    commit: "c".repeat(40),
+    version: "edge",
+    createdAt: "2026-11-26T08:00:00Z",
+    sourceUrl: "https://github.com/pickarm/mediary-scout",
+    checkedAt: "2026-11-26T09:00:00Z",
+  };
+
+  it("reports available with compareUrl when local commit differs from remote revision", () => {
+    const view = buildImageUpdateView({
+      currentCommit: "b".repeat(40),
+      currentVersion: "v2026.11.20",
+      trackedRef,
+      remote: remoteOk,
+    });
+    expect(view.status).toBe("available");
+    expect(view.distribution).toBe("fork-image");
+    expect(view.current.label).toBe("v2026.11.20 · bbbbbbbb");
+    expect(view.available).toEqual({
+      tag: "latest",
+      date: "2026-11-26",
+      commit: "c".repeat(40),
+      notes: [],
+    });
+    expect(view.image?.compareUrl).toBe(
+      `https://github.com/pickarm/mediary-scout/compare/${"b".repeat(40)}...${"c".repeat(40)}`,
+    );
+  });
+
+  it("reports latest when local commit matches remote revision", () => {
+    const view = buildImageUpdateView({
+      currentCommit: "c".repeat(40),
+      currentVersion: null,
+      trackedRef,
+      remote: remoteOk,
+    });
+    expect(view.status).toBe("latest");
+    expect(view.available).toBeNull();
+    expect(view.current.label).toBe("latest · cccccccc");
+    expect(view.image?.compareUrl).toBeNull();
+  });
+
+  it("reports unknown without false positive when local commit is missing", () => {
+    const view = buildImageUpdateView({
+      currentCommit: null,
+      currentVersion: "unknown",
+      trackedRef,
+      remote: remoteOk,
+    });
+    expect(view.status).toBe("unknown");
+    expect(view.available).toBeNull();
+    expect(view.current.label).toBe("本地开发版");
+    expect(view.image?.reason).toBe("missing_local_commit");
+  });
+
+  it("reports unknown without false positive when remote revision label is missing", () => {
+    const view = buildImageUpdateView({
+      currentCommit: "b".repeat(40),
+      currentVersion: null,
+      trackedRef,
+      remote: { ...remoteOk, commit: null },
+    });
+    expect(view.status).toBe("unknown");
+    expect(view.available).toBeNull();
+    expect(view.image?.reason).toBe("missing_remote_revision");
+  });
+
+  it("reports offline for unauthorized, not_found, unreachable, and invalid_ref", () => {
+    for (const reason of ["unauthorized", "not_found", "unreachable"] as const) {
+      const view = buildImageUpdateView({
+        currentCommit: "b".repeat(40),
+        currentVersion: null,
+        trackedRef,
+        remote: {
+          ok: false,
+          reason,
+          registry: "ghcr.io",
+          repository: "pickarm/mediary-scout",
+          tag: "latest",
+          fullRef: "ghcr.io/pickarm/mediary-scout:latest",
+          checkedAt: "2026-11-26T09:00:00Z",
+        },
+      });
+      expect(view.status).toBe("offline");
+      expect(view.available).toBeNull();
+      expect(view.image?.reason).toBe(reason);
+    }
+
+    const invalidView = buildImageUpdateView({
+      currentCommit: "b".repeat(40),
+      currentVersion: null,
+      trackedRef: { ok: false, reason: "invalid_ref", rawImage: "bad ref", rawTag: "latest" },
+      remote: { ok: false, reason: "invalid_ref", checkedAt: "2026-11-26T09:00:00Z" },
+    });
+    expect(invalidView.status).toBe("offline");
+    expect(invalidView.image?.reason).toBe("invalid_ref");
   });
 });
 

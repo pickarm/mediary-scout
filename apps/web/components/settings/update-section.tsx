@@ -1,15 +1,23 @@
 import { connection } from "next/server";
 import { isDemoMode } from "../../lib/demo-mode";
 import { getAutoUpdateSettings, getWorkflowRepository, resolveIsDesktop } from "../../lib/workflow-runtime";
-import { ACTIVE_UPDATER_PHASES, type UpdateView } from "../../lib/update-state";
+import { ACTIVE_UPDATER_PHASES, type ImageUpdateInfo, type UpdateView } from "../../lib/update-state";
 import { loadUpdateView } from "../../lib/update-view-server";
 import { resolveCurrentIsOwner } from "../../lib/settings-attention-server";
 import type { UpdaterPhase } from "../../lib/updater-client";
-import { FORK_RELEASES_URL, FORK_REPO_URL, imageUpdateCommand } from "../../lib/fork-release";
+import {
+  FORK_IMAGE,
+  FORK_RELEASES_URL,
+  FORK_REPO_URL,
+  imageUpdateCommand,
+  resolveUpdateDistribution,
+} from "../../lib/fork-release";
 import { AutoUpdateSwitch, CheckUpdatesButton, CopyCommandButton, UpdateNowButton } from "./update-actions";
+import styles from "./update-section.module.css";
 
 const MIGRATE_COMMAND = "./scripts/deploy.sh";
 const IMAGE_UPDATE_COMMAND = imageUpdateCommand();
+const DEFAULT_AUTO_UPDATE = { enabled: false, time: "04:00" };
 
 const KIND_LABEL = { add: "新增", improve: "改进", fix: "修复" } as const;
 
@@ -21,13 +29,17 @@ const INSTALL_HINT = {
 } as const;
 
 /* Hallmark · component: update-tab · genre: modern-minimal · theme: project (apps/web/DESIGN.md, Spotify)
- * states: up-to-date · update-available · desktop-download · updating · waiting · rolled-back · no-updater · offline feed · auto-update row
+ * states: up-to-date · update-available · image-update · desktop-download · updating · waiting · rolled-back · no-updater · offline feed · auto-update row
  * 方向 A：状态卡在上 · 更新日志在下。 */
 export async function UpdateSection() {
   await connection();
   if (isDemoMode() || !(await resolveCurrentIsOwner())) return null;
   const desktop = resolveIsDesktop();
-  const [view, autoUpdate] = await Promise.all([loadUpdateView(), getAutoUpdateSettings(getWorkflowRepository())]);
+  const forkImage = !desktop && resolveUpdateDistribution(process.env) === "fork-image";
+  const [view, autoUpdate] = await Promise.all([
+    loadUpdateView(),
+    forkImage ? Promise.resolve(DEFAULT_AUTO_UPDATE) : getAutoUpdateSettings(getWorkflowRepository()),
+  ]);
   return <UpdateTab view={view} desktop={desktop} autoUpdate={autoUpdate} />;
 }
 
@@ -75,17 +87,109 @@ function DesktopUpdateHint({ view }: { view: UpdateView }) {
   );
 }
 
+function truncateDigest(digest: string): string {
+  return digest.length > 20 ? `${digest.slice(0, 19)}…` : digest;
+}
+
+function imageReasonMessage(image: ImageUpdateInfo): string | null {
+  switch (image.reason) {
+    case "unauthorized":
+      return "镜像仓库需要认证或未公开，请在 GitHub Packages 将包设为 Public。";
+    case "not_found":
+      return `远端未找到镜像标签「${image.tag}」，请核对 MEDIA_TRACK_IMAGE / MEDIA_TRACK_IMAGE_TAG。`;
+    case "invalid_ref":
+      return "环境变量 MEDIA_TRACK_IMAGE 或 MEDIA_TRACK_IMAGE_TAG 格式无效，请检查配置。";
+    case "unreachable":
+      return "暂时无法连接镜像仓库，请检查网络连接或配置 HTTPS_PROXY / MEDIA_TRACK_IMAGE 镜像代理。";
+    case "missing_local_commit":
+      return "当前为本地开发构建（未记录构建提交），仅 CI 构建镜像支持自动比对。";
+    case "missing_remote_revision":
+      return "远端镜像缺少提交标签（org.opencontainers.image.revision），暂无法比对版本。";
+    default:
+      return null;
+  }
+}
+
+function ImageMetadataSection({ image }: { image: ImageUpdateInfo }) {
+  const reasonText = imageReasonMessage(image);
+  const currentShort = image.currentCommit ? image.currentCommit.slice(0, 8) : null;
+  const remoteShort = image.remoteCommit ? image.remoteCommit.slice(0, 8) : null;
+
+  return (
+    <>
+      {reasonText ? <p className="update-muted">{reasonText}</p> : null}
+      <div className={styles.metaGrid}>
+        <div className={styles.metaItem}>
+          <span className={styles.metaLabel}>跟踪镜像</span>
+          <div className={styles.metaValue}>
+            <code className={styles.metaCode}>{image.fullRef}</code>
+          </div>
+        </div>
+        <div className={styles.metaItem}>
+          <span className={styles.metaLabel}>当前提交</span>
+          <div className={styles.metaValue}>
+            <code className={styles.metaCode} title={image.currentCommit ?? undefined}>
+              {currentShort ?? "本地开发版（未记录构建提交）"}
+            </code>
+            {image.currentVersion ? <span>({image.currentVersion})</span> : null}
+          </div>
+        </div>
+        <div className={styles.metaItem}>
+          <span className={styles.metaLabel}>远端镜像提交</span>
+          <div className={styles.metaValue}>
+            <code className={styles.metaCode} title={image.remoteCommit ?? undefined}>
+              {remoteShort ?? "未知"}
+            </code>
+            {image.remoteVersion ? <span>({image.remoteVersion})</span> : null}
+            {image.compareUrl ? (
+              <a
+                className={styles.compareLink}
+                href={image.compareUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                查看提交差异
+              </a>
+            ) : null}
+          </div>
+        </div>
+        <div className={styles.metaItem}>
+          <span className={styles.metaLabel}>远端构建时间</span>
+          <div className={styles.metaValue}>
+            {image.remoteCreatedAt ? formatUpdateFinishedAt(image.remoteCreatedAt) : "未知"}
+          </div>
+        </div>
+        <div className={styles.metaItem}>
+          <span className={styles.metaLabel}>远端 Digest</span>
+          <div className={styles.metaValue}>
+            <code className={styles.metaCode} title={image.manifestDigest ?? undefined}>
+              {image.manifestDigest ? truncateDigest(image.manifestDigest) : "未知"}
+            </code>
+          </div>
+        </div>
+        <div className={styles.metaItem}>
+          <span className={styles.metaLabel}>上次检查</span>
+          <div className={styles.metaValue}>{formatUpdateFinishedAt(image.checkedAt)}</div>
+        </div>
+      </div>
+    </>
+  );
+}
+
 /** NAS deployments pull the published image; they never build this checkout. */
 function ImageUpdateHint({ view }: { view: UpdateView }) {
+  const fullRef = view.image?.fullRef ?? `${FORK_IMAGE}:latest`;
   return (
     <div className="update-migrate">
       <p className="update-muted">
-        {view.available ? `新版本 ${view.available.tag} 已发布。` : "更新时"}在部署目录拉取并重建应用：
+        {view.available
+          ? "检测到远端镜像已更新，请拉取最新镜像并重建容器："
+          : "更新时在部署目录拉取最新镜像并重建容器："}
       </p>
       <pre className="update-cmd">{IMAGE_UPDATE_COMMAND}</pre>
       <CopyCommandButton command={IMAGE_UPDATE_COMMAND} />
       <p className="update-muted">
-        默认使用 latest；固定版本时在 .env 设置 MEDIA_TRACK_IMAGE_TAG，例如 {view.available?.tag ?? "vYYYY.MM.DD"}。
+        如通过群晖/威联通/飞牛/Portainer 等直接运行镜像，重新拉取 {fullRef} 并重建容器即可；固定版本可在 .env 设置 MEDIA_TRACK_IMAGE_TAG。
       </p>
     </div>
   );
@@ -111,6 +215,32 @@ export function formatUpdateFinishedAt(iso: string): string {
   }).format(date);
 }
 
+function StatusPill({ view, forkImage }: { view: UpdateView; forkImage: boolean }) {
+  if (forkImage) {
+    if (view.available) {
+      return <span className="service-pill is-on">检测到新镜像，请更新容器</span>;
+    }
+    if (view.status === "offline") {
+      return <span className="service-pill is-off">暂时无法检查更新</span>;
+    }
+    if (view.status === "unknown") {
+      return <span className="service-pill is-off">无法比对镜像版本</span>;
+    }
+    return <span className="service-pill">已是最新镜像</span>;
+  }
+
+  if (view.available) {
+    return <span className="service-pill is-on">有新版本 {view.available.tag}</span>;
+  }
+  if (view.status === "offline") {
+    return <span className="service-pill is-off">暂时查不到新版本</span>;
+  }
+  if (view.status === "unknown") {
+    return <span className="service-pill is-off">无法确认是否最新</span>;
+  }
+  return <span className="service-pill">已是最新</span>;
+}
+
 export function UpdateTab({
   view,
   desktop,
@@ -120,32 +250,27 @@ export function UpdateTab({
   desktop: boolean;
   autoUpdate: { enabled: boolean; time: string };
 }) {
-  const forkImage = view.distribution === "fork-image";
-  const updating = Boolean(view.updater && ACTIVE_UPDATER_PHASES.has(view.updater.phase));
-  const failed = Boolean(view.updater && (view.updater.phase === "rolled_back" || view.updater.phase === "failed"));
+  const forkImage = !desktop && view.distribution === "fork-image";
+  const updating = !forkImage && Boolean(view.updater && ACTIVE_UPDATER_PHASES.has(view.updater.phase));
+  const failed = !forkImage && Boolean(view.updater && (view.updater.phase === "rolled_back" || view.updater.phase === "failed"));
+  const showCheckButton = !desktop && (forkImage || (!updating && !view.available));
+
   return (
     <div className="update-tab">
       <section className="panel update-status">
         <div className="update-status-head">
           <div>
-            <div className="update-faint">当前版本</div>
+            <div className="update-faint">{forkImage ? "当前运行镜像" : "当前版本"}</div>
             <div className="update-version">{view.current.label}</div>
           </div>
           <div className="update-status-side">
-            {view.available ? (
-              <span className="service-pill is-on">有新版本 {view.available.tag}</span>
-            ) : view.status === "offline" ? (
-              <span className="service-pill is-off">暂时查不到新版本</span>
-            ) : view.status === "unknown" ? (
-              <span className="service-pill is-off">无法确认是否最新</span>
-            ) : (
-              <span className="service-pill">已是最新</span>
-            )}
-            {!desktop && !updating && !view.available ? <CheckUpdatesButton /> : null}
+            <StatusPill view={view} forkImage={forkImage} />
+            {showCheckButton ? <CheckUpdatesButton /> : null}
           </div>
         </div>
         {desktop ? <DesktopUpdateHint view={view} /> : null}
-        {!desktop && forkImage ? <ImageUpdateHint view={view} /> : null}
+        {forkImage && view.image ? <ImageMetadataSection image={view.image} /> : null}
+        {forkImage ? <ImageUpdateHint view={view} /> : null}
         {!desktop && !forkImage && view.updater && (updating || (view.available && !view.updater.needsManualRecovery && !view.updater.servingUnknown)) ? (
           <UpdateNowButton tag={updating ? null : (view.available?.tag ?? null)} initial={view.updater} />
         ) : null}
@@ -184,7 +309,23 @@ export function UpdateTab({
       ) : null}
       <section className="panel update-log">
         <h3 className="update-log-title">更新日志</h3>
-        {view.releases.length === 0 ? <p className="update-muted">暂时查不到更新日志。</p> : null}
+        {view.releases.length === 0 ? (
+          forkImage ? (
+            <p className="update-muted">
+              当前跟踪镜像更新记录，可前往{" "}
+              <a href={`${FORK_REPO_URL}/commits/main`} target="_blank" rel="noopener noreferrer">
+                查看提交记录
+              </a>{" "}
+              或{" "}
+              <a href={FORK_RELEASES_URL} target="_blank" rel="noopener noreferrer">
+                查看发布页
+              </a>
+              。
+            </p>
+          ) : (
+            <p className="update-muted">暂时查不到更新日志。</p>
+          )
+        ) : null}
         {view.releases.slice(0, 3).map((release) => (
           <ReleaseBlock key={release.tag} release={release} />
         ))}

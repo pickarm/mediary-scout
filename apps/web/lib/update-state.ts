@@ -1,7 +1,14 @@
 import type { CommitRelation, DesktopRelease, ReleaseEntry } from "./release-feed-server";
 import { compareReleaseTags } from "./release-version";
 import type { UpdaterPhase, UpdaterStatus } from "./updater-client";
-import type { UpdateDistribution } from "./fork-release";
+import {
+  FORK_DEFAULT_IMAGE_TAG,
+  FORK_IMAGE,
+  FORK_REPO_URL,
+  type TrackedImageRef,
+  type UpdateDistribution,
+} from "./fork-release";
+import type { ImageCheckFailureReason, RemoteImageResult } from "./image-update-server";
 
 /** Phases during which an update is in progress (the tab polls; the scheduler must not start another). */
 export const ACTIVE_UPDATER_PHASES: ReadonlySet<UpdaterPhase> = new Set<UpdaterPhase>([
@@ -13,10 +20,10 @@ export const ACTIVE_UPDATER_PHASES: ReadonlySet<UpdaterPhase> = new Set<UpdaterP
 ]);
 
 /**
- * available — a newer release exists (see `available`).
- * latest    — compared, nothing newer: running the newest release, or a build ahead of it.
- * unknown   — could not compare: no stamped commit, or GitHub could not place the build.
- * offline   — no release list (GitHub unreachable, or nothing released yet).
+ * available — a newer release or remote image exists (see `available`).
+ * latest    — compared, nothing newer: running the newest release/image, or a build ahead of it.
+ * unknown   — could not compare: no stamped commit, or remote lacks comparable metadata.
+ * offline   — remote source unreachable / unauthorized / not found / invalid ref.
  */
 export type UpdateStatus = "available" | "latest" | "unknown" | "offline";
 
@@ -26,9 +33,35 @@ export interface DesktopDownload {
   file: "dmg" | "exe" | null;
 }
 
+export type ImageUpdateReason =
+  | ImageCheckFailureReason
+  | "missing_local_commit"
+  | "missing_remote_revision";
+
+export interface ImageUpdateInfo {
+  fullRef: string;
+  registry: string;
+  repository: string;
+  tag: string;
+  currentCommit: string | null;
+  currentVersion: string | null;
+  remoteCommit: string | null;
+  remoteVersion: string | null;
+  remoteCreatedAt: string | null;
+  manifestDigest: string | null;
+  compareUrl: string | null;
+  checkedAt: string;
+  reason?: ImageUpdateReason;
+}
+
 export interface UpdateView {
-  current: { label: string; tag: string | null };
-  /** The newest release strictly newer than what is running, or null. Never a downgrade. */
+  current: {
+    label: string;
+    tag: string | null;
+    commit?: string | null;
+    version?: string | null;
+  };
+  /** The newest release or image strictly different/newer than what is running, or null. */
   available: ReleaseEntry | null;
   status: UpdateStatus;
   releases: Array<ReleaseEntry & { isCurrent: boolean }>;
@@ -39,6 +72,121 @@ export interface UpdateView {
   download: DesktopDownload | null;
   /** Prebuilt image (pull/recreate) or a local source checkout (legacy updater). */
   distribution: UpdateDistribution;
+  /** Prebuilt container image comparison metadata, when in `fork-image` mode. */
+  image?: ImageUpdateInfo | null;
+}
+
+function normalizeDisplayVersion(raw: string | null | undefined): string | null {
+  const trimmed = raw?.trim() ?? "";
+  if (!trimmed || trimmed.toLowerCase() === "unknown") return null;
+  return trimmed;
+}
+
+export function buildImageUpdateView(input: {
+  currentCommit: string | null;
+  currentVersion: string | null;
+  trackedRef: TrackedImageRef;
+  remote: RemoteImageResult;
+  feed?: ReleaseEntry[];
+}): UpdateView {
+  const currentVersion = normalizeDisplayVersion(input.currentVersion);
+  const short = input.currentCommit?.slice(0, 8) ?? null;
+
+  const currentLabel = short
+    ? currentVersion
+      ? `${currentVersion} · ${short}`
+      : input.trackedRef.ok
+        ? `${input.trackedRef.tag} · ${short}`
+        : short
+    : currentVersion
+      ? `${currentVersion} · 本地开发版`
+      : "本地开发版";
+
+  const fallbackRegistry = input.trackedRef.ok ? input.trackedRef.registry : "ghcr.io";
+  const fallbackRepository = input.trackedRef.ok
+    ? input.trackedRef.repository
+    : FORK_IMAGE.replace(/^ghcr\.io\//, "");
+  const fallbackTag = input.trackedRef.ok
+    ? input.trackedRef.tag
+    : input.trackedRef.rawTag.trim() || FORK_DEFAULT_IMAGE_TAG;
+  const fallbackFullRef = input.trackedRef.ok
+    ? input.trackedRef.fullRef
+    : input.trackedRef.rawImage.trim()
+      ? `${input.trackedRef.rawImage.trim()}:${fallbackTag}`
+      : `${FORK_IMAGE}:${fallbackTag}`;
+
+  let status: UpdateStatus;
+  let available: ReleaseEntry | null = null;
+  let reason: ImageUpdateReason | undefined;
+
+  if (!input.trackedRef.ok) {
+    status = "offline";
+    reason = "invalid_ref";
+  } else if (!input.remote.ok) {
+    status = "offline";
+    reason = input.remote.reason;
+  } else if (!input.currentCommit) {
+    status = "unknown";
+    reason = "missing_local_commit";
+  } else if (!input.remote.commit) {
+    status = "unknown";
+    reason = "missing_remote_revision";
+  } else if (input.remote.commit === input.currentCommit) {
+    status = "latest";
+  } else {
+    status = "available";
+    available = {
+      tag: input.remote.tag,
+      date: input.remote.createdAt ? input.remote.createdAt.slice(0, 10) : "",
+      commit: input.remote.commit,
+      notes: [],
+    };
+  }
+
+  const remoteCommit = input.remote.ok ? input.remote.commit : null;
+  const compareBase = (input.remote.ok ? input.remote.sourceUrl : null) ?? FORK_REPO_URL;
+  const compareUrl =
+    input.currentCommit && remoteCommit && input.currentCommit !== remoteCommit
+      ? `${compareBase.replace(/\/+$/, "")}/compare/${input.currentCommit}...${remoteCommit}`
+      : null;
+
+  const image: ImageUpdateInfo = {
+    fullRef: input.remote.ok ? input.remote.fullRef : (input.remote.fullRef ?? fallbackFullRef),
+    registry: input.remote.ok ? input.remote.registry : (input.remote.registry ?? fallbackRegistry),
+    repository: input.remote.ok
+      ? input.remote.repository
+      : (input.remote.repository ?? fallbackRepository),
+    tag: input.remote.ok ? input.remote.tag : (input.remote.tag ?? fallbackTag),
+    currentCommit: input.currentCommit,
+    currentVersion,
+    remoteCommit,
+    remoteVersion: input.remote.ok ? input.remote.version : null,
+    remoteCreatedAt: input.remote.ok ? input.remote.createdAt : null,
+    manifestDigest: input.remote.ok ? input.remote.manifestDigest : null,
+    compareUrl,
+    checkedAt: input.remote.checkedAt,
+    ...(reason ? { reason } : {}),
+  };
+
+  return {
+    current: {
+      label: currentLabel,
+      tag: short ? currentVersion : null,
+      commit: input.currentCommit,
+      version: currentVersion,
+    },
+    available,
+    status,
+    releases: (input.feed ?? []).map((release) => ({
+      ...release,
+      isCurrent: Boolean(input.currentCommit && release.commit === input.currentCommit),
+    })),
+    updater: null,
+    updaterInstalled: false,
+    download: null,
+    distribution: "fork-image",
+    image,
+  };
 }
 
 export function buildUpdateView(input: {

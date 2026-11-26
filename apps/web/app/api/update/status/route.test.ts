@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("next/server", async () => {
   const actual = await vi.importActual<typeof import("next/server")>("next/server");
@@ -30,6 +30,10 @@ describe("GET /api/update/status", () => {
     getUpdaterStatus.mockResolvedValue({ phase: "verifying", message: "正在检查新版本是否正常。" });
   });
 
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("is 404 in demo mode and does not ask the updater", async () => {
     isDemoMode.mockReturnValue(true);
     const response = await GET();
@@ -45,9 +49,18 @@ describe("GET /api/update/status", () => {
     expect(getUpdaterStatus).not.toHaveBeenCalled();
   });
 
-  it("returns the updater status to the owner", async () => {
+  it("returns { updater: null } without calling updater in fork-image (default) mode", async () => {
+    const response = await GET();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ updater: null });
+    expect(getUpdaterStatus).not.toHaveBeenCalled();
+  });
+
+  it("returns the updater status to the owner in local-source mode", async () => {
+    vi.stubEnv("MEDIA_TRACK_DISTRIBUTION", "local-source");
     const response = await GET();
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ updater: { phase: "verifying", message: "正在检查新版本是否正常。" } });
+    expect(getUpdaterStatus).toHaveBeenCalledTimes(1);
   });
 });

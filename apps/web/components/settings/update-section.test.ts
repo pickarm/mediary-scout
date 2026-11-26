@@ -161,14 +161,45 @@ describe("UpdateTab one-click update", () => {
   });
 
   it("shows a NAS how to pull and recreate the Fork image, never how to build source", () => {
+    const currentCommit = "1".repeat(40);
+    const remoteCommit = "c".repeat(40);
     const html = render({
       desktop: false,
-      view: view({ available: newer, status: "available", distribution: "fork-image" }),
+      view: view({
+        current: { label: "edge · 11111111", tag: "edge", commit: currentCommit, version: "edge" },
+        available: newer,
+        status: "available",
+        distribution: "fork-image",
+        image: {
+          fullRef: "ghcr.io/pickarm/mediary-scout:latest",
+          registry: "ghcr.io",
+          repository: "pickarm/mediary-scout",
+          tag: "latest",
+          currentCommit,
+          currentVersion: "edge",
+          remoteCommit,
+          remoteVersion: "latest",
+          remoteCreatedAt: "2026-11-26T08:00:00Z",
+          manifestDigest: "sha256:abcdef0123456789abcdef0123456789",
+          compareUrl: `https://github.com/pickarm/mediary-scout/compare/${currentCommit}...${remoteCommit}`,
+          checkedAt: "2026-11-26T09:00:00Z",
+        },
+      }),
     });
-    expect(html).toContain("新版本 v2026.10.02 已发布");
+    expect(html).toContain("当前运行镜像");
+    expect(html).toContain("检测到新镜像，请更新容器");
+    expect(html).toContain("11111111");
+    expect(html).toContain("cccccccc");
+    expect(html).toContain("查看提交差异");
+    expect(html).toContain(`https://github.com/pickarm/mediary-scout/compare/${currentCommit}...${remoteCommit}`);
+    expect(html).toContain("sha256:abcdef012345");
+    expect(html).toContain("检查更新");
     expect(html).toContain("docker compose -f docker-compose.fork.yml pull web");
     expect(html).toContain("docker compose -f docker-compose.fork.yml up -d --force-recreate web");
     expect(html).toContain("MEDIA_TRACK_IMAGE_TAG");
+    expect(html).toContain("查看提交记录");
+    expect(html).toContain("查看发布页");
+    expect(html).not.toContain("暂时查不到更新日志");
     expect(html).not.toContain("./scripts/deploy.sh");
     expect(html).not.toContain("git pull");
     expect(html).not.toContain(UPDATE_BUTTON);
@@ -177,10 +208,70 @@ describe("UpdateTab one-click update", () => {
 
   it("keeps the pull command visible when the image is already current", () => {
     const html = render({ desktop: false, view: view({ distribution: "fork-image" }) });
-    expect(html).toContain("已是最新");
+    expect(html).toContain("已是最新镜像");
     expect(html).toContain("docker compose -f docker-compose.fork.yml pull web");
     expect(html).not.toContain("./scripts/deploy.sh");
     expect(html).toContain("检查更新");
+  });
+
+  it("renders clear degradation messages for 401, 404, unreachable, and local dev image builds", () => {
+    const baseImage = {
+      fullRef: "ghcr.io/pickarm/mediary-scout:latest",
+      registry: "ghcr.io",
+      repository: "pickarm/mediary-scout",
+      tag: "latest",
+      currentCommit: "1".repeat(40),
+      currentVersion: null,
+      remoteCommit: null,
+      remoteVersion: null,
+      remoteCreatedAt: null,
+      manifestDigest: null,
+      compareUrl: null,
+      checkedAt: "2026-11-26T09:00:00Z",
+    };
+
+    const unauth = render({
+      desktop: false,
+      view: view({
+        status: "offline",
+        distribution: "fork-image",
+        image: { ...baseImage, reason: "unauthorized" },
+      }),
+    });
+    expect(unauth).toContain("暂时无法检查更新");
+    expect(unauth).toContain("GitHub Packages 将包设为 Public");
+
+    const notFound = render({
+      desktop: false,
+      view: view({
+        status: "offline",
+        distribution: "fork-image",
+        image: { ...baseImage, tag: "missing", reason: "not_found" },
+      }),
+    });
+    expect(notFound).toContain("远端未找到镜像标签「missing」");
+
+    const unreachable = render({
+      desktop: false,
+      view: view({
+        status: "offline",
+        distribution: "fork-image",
+        image: { ...baseImage, reason: "unreachable" },
+      }),
+    });
+    expect(unreachable).toContain("暂时无法连接镜像仓库");
+
+    const devBuild = render({
+      desktop: false,
+      view: view({
+        current: { label: "本地开发版", tag: null },
+        status: "unknown",
+        distribution: "fork-image",
+        image: { ...baseImage, currentCommit: null, reason: "missing_local_commit" },
+      }),
+    });
+    expect(devBuild).toContain("无法比对镜像版本");
+    expect(devBuild).toContain("本地开发构建（未记录构建提交）");
   });
 
   it("does not offer 立即更新 after a failed rollback, only the recovery message", () => {

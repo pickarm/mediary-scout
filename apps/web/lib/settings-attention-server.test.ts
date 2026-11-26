@@ -204,10 +204,10 @@ describe("loadSettingsAttentionSummary — per-account state", () => {
     await loadSettingsAttentionSummary({});
     expect(loadUpdateView).not.toHaveBeenCalled();
 
-    // 站主仍照常读取发布视图。
+    // 站主仍照常读取发布视图，且轮询路径关闭 changelog 请求。
     makeRepository([], { acct_bob: { isOwner: true } });
     await loadSettingsAttentionSummary({});
-    expect(loadUpdateView).toHaveBeenCalledWith({ updaterStatus: false });
+    expect(loadUpdateView).toHaveBeenCalledWith({ updaterStatus: false, includeChangelog: false });
   });
 
   it("still offers the update badge on desktop when a newer release exists (links to the update tab)", async () => {
@@ -215,9 +215,39 @@ describe("loadSettingsAttentionSummary — per-account state", () => {
     (resolveIsDesktop as ReturnType<typeof vi.fn>).mockReturnValue(true);
     makeRepository([]);
     const summary = await loadSettingsAttentionSummary({});
-    expect(loadUpdateView).toHaveBeenCalledWith({ updaterStatus: false });
+    expect(loadUpdateView).toHaveBeenCalledWith({ updaterStatus: false, includeChangelog: false });
     const item = summary.items.find((i) => i.kind === "update_available");
     expect(item?.href).toContain("tab=update");
+  });
+
+  it("surfaces image update badge and re-badges on a new commit after dismiss", async () => {
+    (loadUpdateView as ReturnType<typeof vi.fn>).mockResolvedValue({
+      available: { tag: "latest", commit: "a".repeat(40), date: "2026-11-26", notes: [] },
+      current: { label: "latest · 11111111", tag: null },
+      distribution: "fork-image",
+    });
+    const { accountSettings } = makeRepository([]);
+    const first = await loadSettingsAttentionSummary({});
+    const firstItem = first.items.find((i) => i.kind === "update_available");
+    expect(firstItem).toMatchObject({
+      id: "update:aaaaaaa",
+      title: "检测到新镜像，请更新容器",
+    });
+    accountSettings.set(
+      "acct_defaultattention_dismissed",
+      JSON.stringify({ "update:aaaaaaa": new Date(Date.now() + 1000).toISOString() }),
+    );
+    const dismissed = await loadSettingsAttentionSummary({});
+    expect(dismissed.items.some((i) => i.kind === "update_available")).toBe(false);
+
+    (loadUpdateView as ReturnType<typeof vi.fn>).mockResolvedValue({
+      available: { tag: "latest", commit: "b".repeat(40), date: "2026-11-26", notes: [] },
+      current: { label: "latest · 11111111", tag: null },
+      distribution: "fork-image",
+    });
+    const nextCommit = await loadSettingsAttentionSummary({});
+    expect(nextCommit.items.find((i) => i.kind === "update_available")?.id).toBe("update:bbbbbbb");
+    expect(nextCommit.count).toBe(1);
   });
 
   it("never writes attention state for the unauthenticated sentinel", async () => {

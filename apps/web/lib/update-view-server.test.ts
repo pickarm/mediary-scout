@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UpdaterStatus } from "./updater-client";
 
-vi.mock("./deployment-update-server", () => ({ readBuildCommit: vi.fn() }));
+vi.mock("./deployment-update-server", () => ({
+  readBuildCommit: vi.fn(),
+  readBuildVersion: vi.fn(),
+}));
+vi.mock("./image-update-server", () => ({
+  fetchRemoteImageStatus: vi.fn(),
+}));
 vi.mock("./release-feed-server", () => ({
   fetchReleaseFeed: vi.fn(),
   fetchCommitRelation: vi.fn(),
@@ -15,7 +21,8 @@ vi.mock("./workflow-runtime", () => ({
   resolveIsDesktop: vi.fn(() => false),
 }));
 
-import { readBuildCommit } from "./deployment-update-server";
+import { readBuildCommit, readBuildVersion } from "./deployment-update-server";
+import { fetchRemoteImageStatus } from "./image-update-server";
 import { fetchCommitRelation, fetchLatestDesktopRelease, fetchReleaseFeed } from "./release-feed-server";
 import { loadUpdateView } from "./update-view-server";
 import { getUpdaterStatus, isUpdaterInstalled } from "./updater-client";
@@ -41,12 +48,28 @@ const idle: UpdaterStatus = {
   logTail: "",
   repoCommit: "d".repeat(40),
 };
+const remoteNewer = {
+  ok: true as const,
+  registry: "ghcr.io",
+  repository: "pickarm/mediary-scout",
+  tag: "latest",
+  fullRef: "ghcr.io/pickarm/mediary-scout:latest",
+  manifestDigest: "sha256:abcd",
+  configDigest: "sha256:efgh",
+  commit: "c".repeat(40),
+  version: "edge",
+  createdAt: "2026-11-26T08:00:00Z",
+  sourceUrl: "https://github.com/pickarm/mediary-scout",
+  checkedAt: "2026-11-26T09:00:00Z",
+};
 
 describe("loadUpdateView", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(resolveIsDesktop).mockReturnValue(false);
     vi.mocked(readBuildCommit).mockResolvedValue("b".repeat(40));
+    vi.mocked(readBuildVersion).mockResolvedValue(null);
+    vi.mocked(fetchRemoteImageStatus).mockResolvedValue(remoteNewer);
     vi.mocked(fetchReleaseFeed).mockResolvedValue(feed);
     vi.mocked(fetchCommitRelation).mockResolvedValue(null);
     vi.mocked(fetchLatestDesktopRelease).mockResolvedValue(null);
@@ -57,11 +80,48 @@ describe("loadUpdateView", () => {
     vi.unstubAllEnvs();
   });
 
+  it("defaults to GHCR fork-image mode even when MEDIA_TRACK_DISTRIBUTION is unset", async () => {
+    const view = await loadUpdateView();
+    expect(fetchRemoteImageStatus).toHaveBeenCalledWith({ allowStale: true });
+    expect(getUpdaterStatus).not.toHaveBeenCalled();
+    expect(isUpdaterInstalled).not.toHaveBeenCalled();
+    expect(fetchLatestDesktopRelease).not.toHaveBeenCalled();
+    expect(fetchCommitRelation).not.toHaveBeenCalled();
+    expect(view.distribution).toBe("fork-image");
+    expect(view.status).toBe("available");
+    expect(view.available?.commit).toBe("c".repeat(40));
+  });
+
+  it("skips GitHub release feed completely during 8s polling (includeChangelog: false)", async () => {
+    const view = await loadUpdateView({ updaterStatus: false, includeChangelog: false });
+    expect(fetchReleaseFeed).not.toHaveBeenCalled();
+    expect(fetchCommitRelation).not.toHaveBeenCalled();
+    expect(fetchRemoteImageStatus).toHaveBeenCalledWith({ allowStale: true });
+    expect(view.releases).toEqual([]);
+    expect(view.status).toBe("available");
+  });
+
+  it("forces fresh GHCR check when forceImageCheck is true", async () => {
+    await loadUpdateView({ forceImageCheck: true });
+    expect(fetchRemoteImageStatus).toHaveBeenCalledWith({ allowStale: false, force: true });
+  });
+
+  it("keeps the image version independent of a stale updater deploy-folder commit", async () => {
+    vi.stubEnv("MEDIA_TRACK_DISTRIBUTION", "fork-image");
+    vi.mocked(readBuildCommit).mockResolvedValue(null);
+    vi.mocked(getUpdaterStatus).mockResolvedValue({ ...idle, repoCommit: "d".repeat(40) });
+    const view = await loadUpdateView();
+    expect(view.current).toEqual({ label: "本地开发版", tag: null, commit: null, version: null });
+    expect(view.status).toBe("unknown");
+    expect(fetchCommitRelation).not.toHaveBeenCalled();
+  });
+
   it("does not ask the updater on desktop, and still offers the published installer", async () => {
     vi.mocked(resolveIsDesktop).mockReturnValue(true);
     vi.mocked(fetchLatestDesktopRelease).mockResolvedValue(published);
     const view = await loadUpdateView();
     expect(getUpdaterStatus).not.toHaveBeenCalled();
+    expect(fetchRemoteImageStatus).not.toHaveBeenCalled();
     expect(view.updater).toBeNull();
     expect(view.download).not.toBeNull();
     expect(view.available?.tag).toBe("v2026.10.02");
@@ -77,22 +137,27 @@ describe("loadUpdateView", () => {
     expect(view.current.label).toBe("未知版本");
   });
 
-  it("does not ask GitHub for a desktop release on Docker", async () => {
+  it("uses the legacy updater path only when MEDIA_TRACK_DISTRIBUTION=local-source", async () => {
+    vi.stubEnv("MEDIA_TRACK_DISTRIBUTION", "local-source");
     const view = await loadUpdateView();
     expect(fetchLatestDesktopRelease).not.toHaveBeenCalled();
+    expect(fetchRemoteImageStatus).not.toHaveBeenCalled();
     expect(getUpdaterStatus).toHaveBeenCalledTimes(1);
     expect(view.available?.tag).toBe("v2026.10.02");
     expect(view.updater).toBe(idle);
+    expect(view.distribution).toBe("local-source");
   });
 
-  it("skips the updater status when the caller asks, and still uses a stamped commit", async () => {
+  it("skips the updater status in local-source when requested, and still uses a stamped commit", async () => {
+    vi.stubEnv("MEDIA_TRACK_DISTRIBUTION", "local-source");
     const view = await loadUpdateView({ updaterStatus: false });
     expect(getUpdaterStatus).not.toHaveBeenCalled();
     expect(view.updater).toBeNull();
     expect(view.available?.tag).toBe("v2026.10.02");
   });
 
-  it("reuses the commit from the status it already fetched instead of asking again", async () => {
+  it("reuses the commit from the status it already fetched in local-source", async () => {
+    vi.stubEnv("MEDIA_TRACK_DISTRIBUTION", "local-source");
     const older = "d".repeat(40);
     vi.mocked(readBuildCommit).mockResolvedValue(null);
     vi.mocked(getUpdaterStatus).mockResolvedValue({ ...idle, repoCommit: older });
@@ -102,36 +167,17 @@ describe("loadUpdateView", () => {
     expect(view.current.label).toBe("dddddddd · 开发版本");
   });
 
-  it("does not reach the updater for the deploy folder commit either when asked not to", async () => {
-    vi.mocked(readBuildCommit).mockResolvedValue(null);
-    const view = await loadUpdateView({ updaterStatus: false });
-    expect(getUpdaterStatus).not.toHaveBeenCalled();
-    expect(view.current.label).toBe("未知版本");
-  });
-
-  it("uses the deploy folder commit when the image has none, and offers a release it is behind", async () => {
-    const older = "d".repeat(40);
-    vi.mocked(readBuildCommit).mockResolvedValue(null);
-    vi.mocked(getUpdaterStatus).mockResolvedValue({ ...idle, repoCommit: older });
-    vi.mocked(fetchCommitRelation).mockResolvedValue("behind");
-    const view = await loadUpdateView();
-    expect(fetchCommitRelation).toHaveBeenCalledWith("c".repeat(40), older);
-    expect(view.available?.tag).toBe("v2026.10.02");
-    expect(view.current.label).toBe("dddddddd · 开发版本");
-  });
-
-  it("tells an installed updater that did not answer apart from no updater at all", async () => {
+  it("tells an installed updater apart from no updater in local-source", async () => {
+    vi.stubEnv("MEDIA_TRACK_DISTRIBUTION", "local-source");
     vi.mocked(getUpdaterStatus).mockResolvedValue(null);
     vi.mocked(isUpdaterInstalled).mockResolvedValue(true);
     expect((await loadUpdateView()).updaterInstalled).toBe(true);
     vi.mocked(isUpdaterInstalled).mockResolvedValue(false);
     expect((await loadUpdateView()).updaterInstalled).toBe(false);
-    vi.mocked(resolveIsDesktop).mockReturnValue(true);
-    vi.mocked(isUpdaterInstalled).mockResolvedValue(true);
-    expect((await loadUpdateView()).updaterInstalled).toBe(false);
   });
 
-  it("does not report the deploy folder commit as serving while an update runs or a checkout is pending", async () => {
+  it("does not report deploy commit while an update runs or checkout is pending in local-source", async () => {
+    vi.stubEnv("MEDIA_TRACK_DISTRIBUTION", "local-source");
     vi.mocked(readBuildCommit).mockResolvedValue(null);
     for (const status of [
       { ...idle, phase: "building" as const, repoCommit: "c".repeat(40) },
@@ -142,27 +188,5 @@ describe("loadUpdateView", () => {
       expect(view.current.label).toBe("未知版本");
       expect(view.current.tag).toBeNull();
     }
-  });
-
-  it("uses the prebuilt-image path without consulting the old updater", async () => {
-    vi.stubEnv("MEDIA_TRACK_DISTRIBUTION", "fork-image");
-    vi.mocked(isUpdaterInstalled).mockResolvedValue(true);
-    const view = await loadUpdateView();
-    expect(getUpdaterStatus).not.toHaveBeenCalled();
-    expect(isUpdaterInstalled).not.toHaveBeenCalled();
-    expect(fetchLatestDesktopRelease).not.toHaveBeenCalled();
-    expect(view.distribution).toBe("fork-image");
-    expect(view.updater).toBeNull();
-    expect(view.updaterInstalled).toBe(false);
-    expect(view.available?.tag).toBe("v2026.10.02");
-  });
-
-  it("keeps the image version independent of a stale updater deploy-folder commit", async () => {
-    vi.stubEnv("MEDIA_TRACK_DISTRIBUTION", "fork-image");
-    vi.mocked(readBuildCommit).mockResolvedValue(null);
-    vi.mocked(getUpdaterStatus).mockResolvedValue({ ...idle, repoCommit: "d".repeat(40) });
-    const view = await loadUpdateView();
-    expect(view.current).toEqual({ label: "未知版本", tag: null });
-    expect(fetchCommitRelation).not.toHaveBeenCalled();
   });
 });

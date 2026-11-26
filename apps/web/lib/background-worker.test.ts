@@ -294,7 +294,13 @@ describe("defaultRuntime — the legacy auto-update entry", () => {
     vi.unstubAllEnvs();
   });
 
-  it("arms the legacy updater only for a local source deployment", async () => {
+  it("does not arm the legacy updater by default (prebuilt fork-image is default)", async () => {
+    const runtime = await defaultRuntime();
+    expect(runtime.autoUpdate).toBeUndefined();
+  });
+
+  it("arms the legacy updater only for an explicit local-source deployment", async () => {
+    vi.stubEnv("MEDIA_TRACK_DISTRIBUTION", "local-source");
     const runtime = await defaultRuntime();
     expect(runtime.autoUpdate).toBeTypeOf("function");
   });
@@ -305,8 +311,7 @@ describe("defaultRuntime — the legacy auto-update entry", () => {
     expect(runtime.autoUpdate).toBeUndefined();
   });
 
-  it("the production loop never invokes runAutoUpdateIfDue in image mode", async () => {
-    vi.stubEnv("MEDIA_TRACK_DISTRIBUTION", "fork-image");
+  it("the production loop never invokes runAutoUpdateIfDue by default or in fork-image mode", async () => {
     vi.useFakeTimers();
     __resetBackgroundWorkerForTests();
     try {
@@ -382,11 +387,16 @@ describe("defaultRuntime — 巡检调度接线（IGNORE_TIME_GATE 特例已退�
     expect(await runtime.concurrency?.()).toBe(4);
   });
 
-  it("autoUpdate → runAutoUpdateIfDue", async () => {
-    const spy = vi.fn(async () => undefined);
-    const runtime = await loadDefaultRuntime(spy);
-    await runtime.autoUpdate?.();
-    expect(spy).toHaveBeenCalledTimes(1);
+  it("autoUpdate → runAutoUpdateIfDue (local-source only)", async () => {
+    vi.stubEnv("MEDIA_TRACK_DISTRIBUTION", "local-source");
+    try {
+      const spy = vi.fn(async () => undefined);
+      const runtime = await loadDefaultRuntime(spy);
+      await runtime.autoUpdate?.();
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("runScheduled → runScheduledType3 无参调用（无 ignoreTimeGate，即使 env 残留 flag）", async () => {

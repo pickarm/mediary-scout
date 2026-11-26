@@ -131,9 +131,16 @@ export async function loadSettingsAttentionSummary(options?: {
   // 门控），所以非站主不该付这份代价。徽章每 8s 轮询：传 updaterStatus:false 跳过
   // 更新助手往返，只问发布视图有没有更新的发行版。桌面也算——loadUpdateView 在桌面
   // 走桌面发布源，有新安装包时同样给 available，徽章点进「更新」tab 下载。
-  const view = isOwner ? await loadUpdateView({ updaterStatus: false }) : null;
+  const view = isOwner
+    ? await loadUpdateView({ updaterStatus: false, includeChangelog: false })
+    : null;
   const availableUpdate = view?.available
-    ? { tag: view.available.tag, commit: view.available.commit, currentLabel: view.current.label }
+    ? {
+        tag: view.available.tag,
+        commit: view.available.commit,
+        currentLabel: view.current.label,
+        ...(view.distribution === "fork-image" ? { mode: "image" as const } : {}),
+      }
     : null;
 
   const items = buildSettingsAttentionItems({

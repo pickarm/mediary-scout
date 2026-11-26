@@ -1,5 +1,5 @@
 import type { QueueClaimOptions } from "@media-track/workflow";
-import { isForkImageDistribution } from "./fork-release";
+import { resolveUpdateDistribution } from "./fork-release";
 import { isUpdateHoldActive, whileInFlight } from "./update-hold";
 
 /**
@@ -216,7 +216,7 @@ export async function defaultRuntime(): Promise<WorkerRuntime> {
     runScheduled: () => runScheduledType3(),
     // A prebuilt image updates by pulling a new image, not by rebuilding this
     // checkout. Do not even arm the legacy daily updater there.
-    ...(isForkImageDistribution(process.env.MEDIA_TRACK_DISTRIBUTION) ? {} : { autoUpdate: () => runAutoUpdateIfDue() }),
+    ...(resolveUpdateDistribution(process.env) === "local-source" ? { autoUpdate: () => runAutoUpdateIfDue() } : {}),
     recover: () => recoverOrphanedRuns(),
     isDriveConfigured: () => workerHasConfiguredDrive(),
   };

@@ -7,6 +7,7 @@ import { AUTO_UPDATE_HOURS } from "../../lib/auto-update-schedule";
 import { copyText } from "../../lib/copy-text";
 import { ACTIVE_UPDATER_PHASES as ACTIVE } from "../../lib/update-state";
 import type { UpdaterStatus } from "../../lib/updater-client";
+import styles from "./update-section.module.css";
 
 const PROGRESS: Record<string, number> = { waiting: 5, backing_up: 15, building: 50, switching: 80, verifying: 92 };
 
@@ -166,22 +167,38 @@ export function AutoUpdateSwitch({ initial }: { initial: { enabled: boolean; tim
 export function CheckUpdatesButton() {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
+  const [feedback, setFeedback] = useState("");
   return (
-    <button
-      type="button"
-      className="ghost-button"
-      disabled={pending}
-      onClick={() => {
-        startTransition(() => {
-          void checkForUpdatesAction().then(
-            () => router.refresh(),
-            () => undefined,
-          );
-        });
-      }}
-    >
-      {pending ? "检查中…" : "检查更新"}
-    </button>
+    <div className={styles.checkWrap}>
+      <button
+        type="button"
+        className="ghost-button"
+        disabled={pending}
+        onClick={() => {
+          setFeedback("");
+          startTransition(() => {
+            void checkForUpdatesAction().then(
+              (result) => {
+                if (result && typeof result.message === "string" && result.message) {
+                  setFeedback(result.message);
+                }
+                if (!result?.throttled) {
+                  router.refresh();
+                }
+              },
+              () => setFeedback("检查失败，请稍后再试。"),
+            );
+          });
+        }}
+      >
+        {pending ? "检查中…" : "检查更新"}
+      </button>
+      {feedback ? (
+        <span className={styles.checkFeedback} role="status">
+          {feedback}
+        </span>
+      ) : null}
+    </div>
   );
 }
 

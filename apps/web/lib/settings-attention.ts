@@ -59,9 +59,13 @@ export function buildSettingsAttentionItems(input: {
    *  recordPanSouHealth)。**刻意不在这里探活** —— 这个函数在徽章轮询路径上,
    *  每 8s 一次,真打网络等于每 8s 捶一遍用户的 PanSou。 */
   searchSource?: { custom: boolean; reachable: boolean };
-  /** The newer release the 「更新」 tab offers, or null. Owner-only, never in demo mode. On
-   *  desktop it is the newest release with both installers, which the tab offers to download. */
-  availableUpdate: { tag: string; commit: string; currentLabel: string } | null;
+  /** The newer release or image the 「更新」 tab offers, or null. Owner-only, never in demo mode. */
+  availableUpdate: {
+    tag: string;
+    commit: string;
+    currentLabel: string;
+    mode?: "image" | "release";
+  } | null;
   /** Non-primary workspace id — preserved on deep-links so inbox actions don't reset context. */
   activeStorageId?: string;
   settingsHref?: (tab?: SettingsAttentionTab) => string;
@@ -116,15 +120,19 @@ export function buildSettingsAttentionItems(input: {
   }
 
   if (input.isOwner && input.availableUpdate) {
+    const isImage = input.availableUpdate.mode === "image";
+    const remoteShort = input.availableUpdate.commit.slice(0, 7);
     items.push({
       // Release-scoped id (7 hex, matches the dismiss-id pattern): a newer release gets a
       // new id, so it reappears after the user dismissed the older one.
-      id: `update:${input.availableUpdate.commit.slice(0, 7)}`,
+      id: `update:${remoteShort}`,
       kind: "update_available",
       severity: "info",
-      title: "有新版本可用",
-      body: `当前 ${input.availableUpdate.currentLabel} · 新版本 ${input.availableUpdate.tag}。去「更新」看看改了什么。`,
-      actionLabel: "去更新",
+      title: isImage ? "检测到新镜像，请更新容器" : "有新版本可用",
+      body: isImage
+        ? `当前提交 ${input.availableUpdate.currentLabel} · 远端镜像 ${remoteShort}（${input.availableUpdate.tag}）。前往「设置 → 更新」复制容器更新命令。`
+        : `当前 ${input.availableUpdate.currentLabel} · 新版本 ${input.availableUpdate.tag}。去「更新」看看改了什么。`,
+      actionLabel: isImage ? "查看更新" : "去更新",
       href: href("update"),
     });
   }
