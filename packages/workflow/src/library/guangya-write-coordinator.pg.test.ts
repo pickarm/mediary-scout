@@ -27,7 +27,9 @@ pgDescribe("GuangYa write coordinator PostgreSQL integration", () => {
     const databaseUrl = new URL(adminUrl);
     databaseUrl.pathname = `/${dbName}`;
     firstPool = new Pool({ connectionString: databaseUrl.toString(), max: 2, application_name: lockAppName });
+    firstPool.on("error", () => {});
     secondPool = new Pool({ connectionString: databaseUrl.toString(), max: 2 });
+    secondPool.on("error", () => {});
     firstCoordinator = new GuangYaWriteCoordinator(firstPool);
     secondCoordinator = new GuangYaWriteCoordinator(secondPool);
   }, 30_000);
@@ -62,7 +64,7 @@ pgDescribe("GuangYa write coordinator PostgreSQL integration", () => {
 
     await firstCoordinator.run(["guangya:lost"], async () => {
       const result = await admin.query<{ pid: number }>(
-        "SELECT pid FROM pg_stat_activity WHERE application_name = $1 AND datname = $2 LIMIT 1",
+        "SELECT a.pid FROM pg_stat_activity a JOIN pg_locks l ON l.pid = a.pid WHERE a.application_name = $1 AND a.datname = $2 AND l.locktype = 'advisory' AND l.granted LIMIT 1",
         [lockAppName, dbName],
       );
       const pid = result.rows[0]?.pid;

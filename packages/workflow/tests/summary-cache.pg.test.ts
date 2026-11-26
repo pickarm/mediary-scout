@@ -41,6 +41,7 @@ integration("PostgresSummaryCache", () => {
     const dbUrl = new URL(adminUrl);
     dbUrl.pathname = `/${dbName}`;
     pool = new pg.Pool({ connectionString: dbUrl.toString(), max: 4, application_name: `${namespace}-pg` });
+    pool.on("error", () => {});
     databaseIdentity = `127.0.0.1:55439/${dbName}`;
     redisNamespace = `${namespace}:${createHash("sha256").update(databaseIdentity).digest("hex").slice(0, 24)}`;
     redisAdmin = createClient({ url: redisUrl, disableOfflineQueue: true, socket: { connectTimeout: 700 } });
@@ -148,6 +149,7 @@ integration("PostgresSummaryCache", () => {
     const secondaryUrl = new URL(adminUrl!);
     secondaryUrl.pathname = `/${secondaryDbName}`;
     secondaryPool = new pg.Pool({ connectionString: secondaryUrl.toString(), max: 4, application_name: `${namespace}-pg-secondary` });
+    secondaryPool.on("error", () => {});
     await initializeWorkflowPostgresSchema(secondaryPool);
     await secondaryPool.query("INSERT INTO media_titles (id,payload) VALUES ($1,$2::jsonb)", [nativeTitleId, JSON.stringify({ id: nativeTitleId, tmdbId: 919192, type: "tv", title: "另一个数据库", year: 2024 })]);
     await secondaryPool.query(

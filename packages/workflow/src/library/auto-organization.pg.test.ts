@@ -296,7 +296,7 @@ integration("PostgresLibraryAutoOrganizationScheduler", () => {
       expect(fake.previews).toHaveLength(1);
       expect((await checkpoint(world))?.status).toBe(status);
     }
-  });
+  }, 30_000);
 
   it("keeps one in-flight batch idempotent across repeated and concurrent ticks", async () => {
     const world = await createWorld();

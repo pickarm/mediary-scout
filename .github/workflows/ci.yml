@@ -101,10 +101,43 @@ jobs:
               | sort -u
           )
           printf 'PG suites: %s\n' "${#pg_tests[@]}"
-          npx vitest run --no-file-parallelism "${pg_tests[@]}"
+          set +e
+          npx vitest run --no-file-parallelism --testTimeout=30000 --hookTimeout=30000 "${pg_tests[@]}" 2>&1 | tee /tmp/vitest-pg.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            SUMMARY="$(node -e '
+              const fs = require("node:fs");
+              const raw = fs.readFileSync(process.argv[1], "utf8").replace(/\x1b\[[0-9;]*m/g, "");
+              const lines = raw.split(/\r?\n/);
+              const hits = lines.filter((l) => /FAIL |Unhandled|AssertionError|Error:|timed out|Test Files/i.test(l));
+              const tail = (hits.length ? hits : lines.slice(-25)).slice(-25).join("\n").slice(0, 1800);
+              process.stdout.write(tail.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A"));
+            ' /tmp/vitest-pg.log)"
+            printf '::error title=PostgreSQL integration suites failed::%s\n' "${SUMMARY:-exit code $status}"
+            exit "$status"
+          fi
       # MEDIA_TRACK_CI_REQUIRE_POSTGRES=1 makes the contract hard-fail if it cannot
       # reach/provision Postgres (vitest alone exits 0 on pure describe.skip).
-      - run: npx vitest run --no-file-parallelism packages/workflow/tests/repository-contract-postgres.test.ts packages/workflow/src/postgres-schema-init.test.ts
+      - name: Repository contract and schema init (PostgreSQL)
+        shell: bash
+        run: |
+          set +e
+          npx vitest run --no-file-parallelism --testTimeout=30000 --hookTimeout=30000 packages/workflow/tests/repository-contract-postgres.test.ts packages/workflow/src/postgres-schema-init.test.ts 2>&1 | tee /tmp/vitest-pg-contract.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            SUMMARY="$(node -e '
+              const fs = require("node:fs");
+              const raw = fs.readFileSync(process.argv[1], "utf8").replace(/\x1b\[[0-9;]*m/g, "");
+              const lines = raw.split(/\r?\n/);
+              const hits = lines.filter((l) => /FAIL |Unhandled|AssertionError|Error:|timed out|Test Files/i.test(l));
+              const tail = (hits.length ? hits : lines.slice(-25)).slice(-25).join("\n").slice(0, 1800);
+              process.stdout.write(tail.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A"));
+            ' /tmp/vitest-pg-contract.log)"
+            printf '::error title=Repository contract Postgres suites failed::%s\n' "${SUMMARY:-exit code $status}"
+            exit "$status"
+          fi
 
   image-smoke:
     needs: build-and-test

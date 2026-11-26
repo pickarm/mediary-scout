@@ -82,6 +82,8 @@ describe("CI workflow", () => {
     expect(run).toContain("library-import.test.ts");
     expect(run).toContain("fork-migration.test.ts");
     expect(run).toContain("--no-file-parallelism");
+    expect(run).toContain("--testTimeout=30000");
+    expect(run).toContain("--hookTimeout=30000");
   });
 
   it("isolates Non-PostgreSQL unit suites from Postgres/Redis env and serializes contract/schema init", () => {
@@ -96,6 +98,8 @@ describe("CI workflow", () => {
     const contractStep = steps.find((step) => text(step.run).includes("repository-contract-postgres.test.ts"));
     expect(contractStep).toBeDefined();
     expect(text(contractStep?.run)).toContain("--no-file-parallelism");
+    expect(text(contractStep?.run)).toContain("--testTimeout=30000");
+    expect(text(contractStep?.run)).toContain("--hookTimeout=30000");
   });
 
   it("boots the image against an isolated database with fake adapters and no worker", () => {
