@@ -165,6 +165,7 @@ export function LibraryOrganizedDriftPanel({
     <section
       className={`panel ${styles.panel} ${data.counts.drifted === 0 ? styles.panelQuiet : ""}`}
       aria-label="文件名变更提醒"
+      data-testid="drift-panel"
     >
       <div className={styles.header}>
         <div>
@@ -185,6 +186,7 @@ export function LibraryOrganizedDriftPanel({
             <button
               type="button"
               className="primary-button"
+              data-testid="btn-reorganize-all"
               onClick={() => void handleReorganizeAll()}
               disabled={batchBusy || Boolean(busyId)}
             >
@@ -207,6 +209,7 @@ export function LibraryOrganizedDriftPanel({
         <button
           type="button"
           role="tab"
+          data-testid="drift-tab-drifted"
           aria-selected={tab === "drifted"}
           className={`${styles.tabBtn} ${tab === "drifted" ? styles.tabBtnActive : ""}`}
           onClick={() => { setTab("drifted"); setPage(1); }}
@@ -216,6 +219,7 @@ export function LibraryOrganizedDriftPanel({
         <button
           type="button"
           role="tab"
+          data-testid="drift-tab-ignored"
           aria-selected={tab === "ignored"}
           className={`${styles.tabBtn} ${tab === "ignored" ? styles.tabBtnActive : ""}`}
           onClick={() => { setTab("ignored"); setPage(1); }}
@@ -304,7 +308,7 @@ function DriftRow({
     : `${item.identity.title}${item.identity.year ? ` (${item.identity.year})` : ""}${item.identity.episodeCode ? ` · ${item.identity.episodeCode}` : ""}`;
 
   return (
-    <article className={styles.row}>
+    <article className={styles.row} data-testid={`drift-row-${item.fileId}`}>
       <div className={styles.rowTop}>
         <div className={styles.rowTitle}>
           <strong>{titleText}</strong>
@@ -314,16 +318,34 @@ function DriftRow({
           {tab === "drifted" ? (
             <>
               {!frozen && (
-                <button type="button" className="primary-button" disabled={busy} onClick={onReorganize}>
+                <button
+                  type="button"
+                  className="primary-button"
+                  data-testid={`btn-reorganize-${item.fileId}`}
+                  disabled={busy}
+                  onClick={onReorganize}
+                >
                   <RefreshCw size={12} />按模板重新整理
                 </button>
               )}
-              <button type="button" className="secondary-button" disabled={busy} onClick={onIgnore}>
+              <button
+                type="button"
+                className="secondary-button"
+                data-testid={`btn-ignore-${item.fileId}`}
+                disabled={busy}
+                onClick={onIgnore}
+              >
                 <EyeOff size={12} />忽略
               </button>
             </>
           ) : (
-            <button type="button" className="secondary-button" disabled={busy} onClick={onUnignore}>
+            <button
+              type="button"
+              className="secondary-button"
+              data-testid={`btn-unignore-${item.fileId}`}
+              disabled={busy}
+              onClick={onUnignore}
+            >
               <RotateCcw size={12} />恢复提醒
             </button>
           )}

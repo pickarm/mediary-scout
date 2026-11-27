@@ -59,6 +59,7 @@
 ## 7. 验证和交付与常用命令速查
 - **类型与 lint 规范**：使用 TypeScript 严格类型，不以 `any`、关闭 lint 或删测试来绕过问题。每个功能包含行为测试和相关回归证据；最终执行 workflow build、typecheck、lint、web build 和适当的集成测试。
 - **严格区分检查范围**：对本功能的源文件与测试文件一起做严格类型检查；Vitest 转译通过不代表测试类型通过。他人的未完成文件阻塞全局检查时，报告具体位置并单独检查自己负责的完整文件集。Web 功能必须执行 `npx tsc --noEmit --project apps/web/tsconfig.json`，覆盖组件、服务端入口和测试；根目录 `npm run typecheck`（`tsc --noEmit`）只覆盖 `packages/**`，不能作为 Web 功能的类型验证证据。
+- **推送前本地全栈与全按钮无头验收（强制）**：涉及 Web / 界面 / 库整理或接口的改动，推送至 GitHub 触发构建前，必须先在本机 WSL PostgreSQL 18.6 临时容器 + 本地生产服务 + 无头 Chromium 上完整跑通全按钮端到端自动化验收（`npm run test:e2e:library`），不得跳过测试直接推送或把 VPS 生产环境当实验场。
 - **真实夹具与包管理约束**：跨模块测试复用原生注册表、公开 schema 和领域端口构建夹具；不能自造 provider 别名或不兼容的表结构，让实现与错误夹具互相验证。光鸭连接 provider 为 `guangya`。包管理器固定为 npm 与现有 `package-lock.json`；禁止 pnpm/yarn 自动安装、修复或更换依赖布局。共享依赖环境由主代理维护，开发和审核代理只运行现有 npm/npx 命令；缺依赖先报告。
 - **如实报告**：不宣称未运行的检查通过。外部环境不可用时写明未验证项，提供可重复运行的检查。每次完成报告：功能、文件列表、测试命令和结果、剩余风险。代码审核通过前不标记任务完成。
 
@@ -84,6 +85,9 @@ node --preserve-symlinks --preserve-symlinks-main ./node_modules/vitest/vitest.m
 
 # 非 PG 单元测试（与 ci.yml 对齐）
 npx vitest run --configLoader native --exclude '**/*.pg.test.ts' --exclude '**/*.postgres.test.ts' --exclude '**/*-postgres.test.ts' --exclude 'packages/workflow/src/postgres-schema-init.test.ts' --exclude 'packages/workflow/src/library/library-import.test.ts' --exclude 'packages/workflow/src/library-scanner.test.ts' --exclude 'packages/workflow/tests/fork-migration.test.ts' --exclude 'apps/web/lib/workflow-runtime.acquisition-bindings.test.ts' --exclude 'apps/web/lib/workflow-runtime.acquisition-naming.test.ts'
+
+# 本机 WSL 全栈演练与全按钮无头自动化验收（推送前必跑）
+npm run test:e2e:library
 
 # 部署更新与忘记密码逃生口
 docker compose -f docker-compose.fork.yml pull web && docker compose -f docker-compose.fork.yml up -d --force-recreate web

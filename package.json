@@ -11,6 +11,7 @@
     "dev:web": "npm run build:workflow && next dev apps/web --turbopack",
     "build:web": "npm run build:workflow && next build apps/web",
     "test": "vitest run",
+    "test:e2e:library": "node scripts/e2e-library-debug.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "typecheck:migration": "tsc --project tsconfig.fork-migration.json",

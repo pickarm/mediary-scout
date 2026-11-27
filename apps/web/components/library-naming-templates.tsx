@@ -259,6 +259,7 @@ export function LibraryNamingTemplates({
             <span>模板预设</span>
             <select
               aria-label="命名模板预设"
+              data-testid="select-template-preset"
               value={activePreset?.id ?? "custom"}
               onChange={(event) => selectPreset(event.target.value)}
               disabled={disabled}

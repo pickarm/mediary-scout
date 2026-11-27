@@ -672,6 +672,7 @@ export function LibraryScanSettings({
                 <button
                   key={item.id}
                   type="button"
+                  data-testid={`storage-pill-${item.id}`}
                   aria-pressed={item.id === storageId}
                   className={`${styles.storagePill} ${item.id === storageId ? styles.storagePillActive : ""}`}
                   onClick={() => changeStorage(item.id)}
@@ -717,6 +718,7 @@ export function LibraryScanSettings({
                 <span>启用自动整理</span>
                 <input
                   type="checkbox"
+                  data-testid="toggle-auto-organize"
                   checked={autoOrganize}
                   onChange={(event) => setAutoOrganize(event.target.checked)}
                   disabled={formDisabled}
@@ -726,6 +728,7 @@ export function LibraryScanSettings({
                 <span>每日定时扫描</span>
                 <input
                   type="checkbox"
+                  data-testid="toggle-daily-schedule"
                   checked={dailyScheduleEnabled}
                   onChange={(event) => setDailyScheduleEnabled(event.target.checked)}
                   disabled={formDisabled}
@@ -736,6 +739,7 @@ export function LibraryScanSettings({
                   <span>扫描时间</span>
                   <input
                     type="time"
+                    data-testid="input-daily-schedule-time"
                     className={styles.scheduleTimeInput}
                     aria-label="每日定时扫描时间"
                     value={dailyScheduleTime}
@@ -748,6 +752,7 @@ export function LibraryScanSettings({
                 <span>整理并发</span>
                 <select
                   aria-label="整理并发"
+                  data-testid="select-organize-concurrency"
                   value={organizeConcurrency}
                   onChange={(event) => setOrganizeConcurrency(Number(event.target.value))}
                   disabled={formDisabled}
@@ -762,6 +767,7 @@ export function LibraryScanSettings({
               <button
                 className="secondary-button"
                 type="button"
+                data-testid="btn-save-settings"
                 onClick={() => void save()}
                 disabled={!canSaveSettings}
               >
@@ -770,6 +776,7 @@ export function LibraryScanSettings({
               <button
                 className="primary-button"
                 type="button"
+                data-testid="btn-start-scan"
                 onClick={() => void start()}
                 disabled={formDisabled || templatesInvalid || selectedSourceRoots.length === 0}
               >
@@ -779,6 +786,7 @@ export function LibraryScanSettings({
                 <button
                   className={styles.stopButton}
                   type="button"
+                  data-testid="btn-stop-organize-top"
                   onClick={() => void handleStopWork()}
                   disabled={stoppingWork || loading}
                 >

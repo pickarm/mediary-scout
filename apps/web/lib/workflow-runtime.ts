@@ -25,6 +25,7 @@ import {
   episodeCode,
   FakeResourceProvider,
   FakeStorageExecutor,
+  createFileBackedFakeStorageExecutor,
   FINISHED_RUN_RETENTION_MS,
   createAgentModel,
   createAgentModelFromEnv,
@@ -3729,6 +3730,10 @@ async function buildAccountStorageExecutor(
   }
   if (adapter !== "fake") {
     throw new Error(`MEDIA_TRACK_STORAGE_ADAPTER_UNSUPPORTED: ${adapter}`);
+  }
+  const fakeStatePath = (process.env.MEDIA_TRACK_FAKE_STORAGE_STATE_PATH ?? "").trim();
+  if (fakeStatePath) {
+    return attachConfiguredAcquisitionLibraryStore(createFileBackedFakeStorageExecutor(fakeStatePath));
   }
   fakeStorageExecutor ??= new FakeStorageExecutor({
     transferOutcomes: fakeTransferOutcomes(),

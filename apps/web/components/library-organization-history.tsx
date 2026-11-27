@@ -192,7 +192,7 @@ export function LibraryOrganizationHistory({
   const scanRunning = Boolean(latestScan && ["queued", "running", "cancelling"].includes(latestScan.status));
 
   return (
-    <section className={`panel ${styles.panel}`} aria-label="整理记录">
+    <section className={`panel ${styles.panel}`} aria-label="整理记录" data-testid="history-panel">
       <div className={styles.header}>
         <div>
           <div className={styles.headerTitle}>
@@ -211,6 +211,7 @@ export function LibraryOrganizationHistory({
             <button
               type="button"
               className={styles.dangerButton}
+              data-testid="btn-stop-organize-history"
               onClick={() => void handleStop()}
               disabled={stopping || loading}
             >
@@ -222,6 +223,7 @@ export function LibraryOrganizationHistory({
             <button
               type="button"
               className="secondary-button"
+              data-testid="btn-retry-failed"
               onClick={() => void handleRetryFailed()}
               disabled={retrying || loading}
             >
@@ -232,6 +234,7 @@ export function LibraryOrganizationHistory({
           <button
             type="button"
             className="secondary-button"
+            data-testid="btn-toggle-live-refresh"
             onClick={() => setLiveRefresh((current) => !current)}
           >
             {liveRefresh ? <><Pause size={13} />暂停刷新</> : <><Play size={13} />开启实时刷新</>}
@@ -239,6 +242,7 @@ export function LibraryOrganizationHistory({
           <button
             type="button"
             className="secondary-button"
+            data-testid="btn-refresh-history"
             onClick={() => void fetchHistory(storageId, page, pageSize, status, false)}
             disabled={loading}
           >
@@ -248,7 +252,7 @@ export function LibraryOrganizationHistory({
       </div>
 
       {haltNotice && (
-        <div className={styles.haltBanner} role="alert">
+        <div className={styles.haltBanner} role="alert" data-testid="halt-banner">
           <div className={styles.haltBody}>
             <CircleAlert size={17} className={styles.haltIcon} />
             <div>
@@ -313,6 +317,7 @@ export function LibraryOrganizationHistory({
             <button
               key={tab.id}
               type="button"
+              data-testid={`history-filter-${tab.id}`}
               className={`${styles.filterPill} ${status === tab.id ? styles.filterPillActive : ""}`}
               onClick={() => {
                 setStatus(tab.id);
@@ -375,6 +380,7 @@ export function LibraryOrganizationHistory({
           <button
             type="button"
             className="secondary-button"
+            data-testid="history-page-prev"
             onClick={() => setPage((current) => Math.max(1, current - 1))}
             disabled={page <= 1 || loading}
           >
@@ -399,6 +405,7 @@ export function LibraryOrganizationHistory({
           <button
             type="button"
             className="secondary-button"
+            data-testid="history-page-next"
             onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
             disabled={page >= totalPages || loading}
           >

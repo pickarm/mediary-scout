@@ -1,3 +1,5 @@
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import {
   type PackageTreeFile,
   type ResourceCandidate,
@@ -9,6 +11,7 @@ import {
 import { episodeCodeFromFileName } from "./episode-code.js";
 import type {
   ResourceProvider,
+  StorageDirectoryPage,
   StorageExecutor,
   UnparsedVideoFile,
 } from "./ports.js";
@@ -114,6 +117,67 @@ export class FakeStorageExecutor implements StorageExecutor {
   }
 
   private readonly directoryIdsByName = new Map<string, string>();
+
+  async listDirectoryPage(input: {
+    directoryId: string;
+    page: number;
+    pageSize: number;
+    cursor?: string;
+  }): Promise<StorageDirectoryPage> {
+    const childDirs = await this.listChildDirectories(input.directoryId);
+    const verified = this.directories.get(input.directoryId) ?? [];
+    const unparsed = this.unparsedFiles.get(input.directoryId) ?? [];
+    const seen = new Set<string>();
+    const combined: Array<{
+      fileId: string;
+      parentId: string;
+      name: string;
+      isDirectory: boolean;
+      sizeBytes: number | null;
+    }> = [];
+    for (const dir of childDirs) {
+      if (seen.has(dir.id)) continue;
+      seen.add(dir.id);
+      combined.push({
+        fileId: dir.id,
+        parentId: input.directoryId,
+        name: dir.name,
+        isDirectory: true,
+        sizeBytes: null,
+      });
+    }
+    for (const file of verified) {
+      const id = file.providerFileId || file.id;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      combined.push({
+        fileId: id,
+        parentId: input.directoryId,
+        name: file.name,
+        isDirectory: false,
+        sizeBytes: file.sizeBytes,
+      });
+    }
+    for (const file of unparsed) {
+      if (seen.has(file.providerFileId)) continue;
+      seen.add(file.providerFileId);
+      combined.push({
+        fileId: file.providerFileId,
+        parentId: input.directoryId,
+        name: file.name,
+        isDirectory: false,
+        sizeBytes: file.sizeBytes,
+      });
+    }
+    const pageSize = Math.max(1, Math.trunc(input.pageSize));
+    const offset = Math.max(0, Math.trunc(input.page)) * pageSize;
+    const slice = combined.slice(offset, offset + pageSize);
+    const hasMore = offset + pageSize < combined.length;
+    return {
+      items: slice,
+      nextPage: hasMore ? input.page + 1 : null,
+    };
+  }
 
   async createDirectory(input: { name: string; parentId: string }): Promise<string> {
     const nameKey = `${input.parentId}::${input.name}`;
@@ -389,4 +453,197 @@ function cloneTransferOutcomes(transferOutcomes: Record<string, TransferOutcome>
       },
     ]),
   );
+}
+
+export interface FileBackedFakeStorageItem {
+  fileId: string;
+  parentId: string;
+  name: string;
+  isDirectory: boolean;
+  sizeBytes?: number | null;
+}
+
+export interface FileBackedFakeStorageState {
+  items: FileBackedFakeStorageItem[];
+  failWritesRemaining?: number;
+  failErrorMessage?: string;
+}
+
+/** 仅用于本地全栈演练模式的可控文件状态假网盘，外部可随时改写状态文件模拟改名、删除与写限流。 */
+export function createFileBackedFakeStorageExecutor(stateFilePath: string): StorageExecutor {
+  const readState = (): FileBackedFakeStorageState => {
+    if (!existsSync(stateFilePath)) return { items: [] };
+    const raw = readFileSync(stateFilePath, "utf8").trim();
+    if (!raw) return { items: [] };
+    const parsed = JSON.parse(raw) as Partial<FileBackedFakeStorageState>;
+    return {
+      items: Array.isArray(parsed.items) ? parsed.items : [],
+      ...(typeof parsed.failWritesRemaining === "number" ? { failWritesRemaining: parsed.failWritesRemaining } : {}),
+      ...(typeof parsed.failErrorMessage === "string" ? { failErrorMessage: parsed.failErrorMessage } : {}),
+    };
+  };
+
+  const writeState = (state: FileBackedFakeStorageState): void => {
+    mkdirSync(dirname(stateFilePath), { recursive: true });
+    const tempPath = `${stateFilePath}.${process.pid}.${Date.now()}.tmp`;
+    writeFileSync(tempPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+    renameSync(tempPath, stateFilePath);
+  };
+
+  const consumeWriteFault = (state: FileBackedFakeStorageState): void => {
+    if (typeof state.failWritesRemaining === "number" && state.failWritesRemaining > 0) {
+      const next = {
+        ...state,
+        failWritesRemaining: state.failWritesRemaining - 1,
+      };
+      writeState(next);
+      throw new Error(state.failErrorMessage?.trim() || "模拟网盘写入限流 429");
+    }
+  };
+
+  return {
+    async getSpace() {
+      return { totalBytes: 1024 ** 4, usedBytes: 1024 ** 3 };
+    },
+    async listDirectoryPage({ directoryId, page, pageSize }) {
+      const state = readState();
+      const children = state.items
+        .filter((item) => item.parentId === directoryId)
+        .sort((a, b) => a.fileId.localeCompare(b.fileId));
+      const safeSize = Math.max(1, Math.trunc(pageSize));
+      const offset = Math.max(0, Math.trunc(page)) * safeSize;
+      const items = children.slice(offset, offset + safeSize).map((item) => ({
+        fileId: item.fileId,
+        parentId: item.parentId,
+        name: item.name,
+        isDirectory: item.isDirectory,
+        sizeBytes: item.isDirectory ? null : (item.sizeBytes ?? 1024),
+      }));
+      return {
+        items,
+        nextPage: offset + safeSize < children.length ? page + 1 : null,
+      };
+    },
+    async createDirectory({ name, parentId }) {
+      const state = readState();
+      consumeWriteFault(state);
+      const existing = state.items.find(
+        (item) => item.parentId === parentId && item.isDirectory && item.name.toLocaleLowerCase("en-US") === name.toLocaleLowerCase("en-US"),
+      );
+      if (existing) return existing.fileId;
+      const fileId = `fake_dir_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      state.items.push({ fileId, parentId, name, isDirectory: true, sizeBytes: null });
+      writeState(state);
+      return fileId;
+    },
+    async listVideoFiles(directoryId) {
+      const state = readState();
+      return state.items
+        .filter((item) => item.parentId === directoryId && !item.isDirectory)
+        .flatMap((item) => {
+          const ep = episodeCodeFromFileName(item.name);
+          if (!ep) return [];
+          return [{
+            id: item.fileId,
+            providerFileId: item.fileId,
+            storageDirectoryId: directoryId,
+            name: item.name,
+            sizeBytes: item.sizeBytes ?? 1024,
+            episodeCode: ep,
+          }];
+        });
+    },
+    async listUnparsedVideoFiles(directoryId) {
+      const state = readState();
+      return state.items
+        .filter((item) => item.parentId === directoryId && !item.isDirectory && episodeCodeFromFileName(item.name) === null)
+        .map((item) => ({
+          providerFileId: item.fileId,
+          name: item.name,
+          sizeBytes: item.sizeBytes ?? 1024,
+        }));
+    },
+    async renameFile({ directoryId, fileId, newName }) {
+      const state = readState();
+      consumeWriteFault(state);
+      const target = state.items.find((item) => item.fileId === fileId && item.parentId === directoryId);
+      if (!target) {
+        throw new Error(`假盘改名失败：目录 ${directoryId} 中找不到文件 ${fileId}`);
+      }
+      target.name = newName;
+      writeState(state);
+    },
+    async transfer() {
+      return {
+        id: `fake_tx_${Date.now()}`,
+        workflowRunId: "fake",
+        candidateId: "fake",
+        status: "failed",
+        providerMessage: "文件状态假盘仅用于库整理演练",
+        materializedFileIds: [],
+      };
+    },
+    async flattenDirectory() {
+      return { moved: [], removed: [] };
+    },
+    async deleteFiles({ directoryId, fileIds }) {
+      const state = readState();
+      consumeWriteFault(state);
+      const removeSet = new Set(fileIds);
+      const deleted: string[] = [];
+      state.items = state.items.filter((item) => {
+        if (item.parentId === directoryId && removeSet.has(item.fileId)) {
+          deleted.push(item.fileId);
+          return false;
+        }
+        return true;
+      });
+      writeState(state);
+      return { deleted };
+    },
+    async removeDirectory(directoryId) {
+      const state = readState();
+      consumeWriteFault(state);
+      const before = state.items.length;
+      state.items = state.items.filter((item) => item.fileId !== directoryId && item.parentId !== directoryId);
+      writeState(state);
+      return { removed: state.items.length < before };
+    },
+    async listTree({ directoryId }) {
+      const state = readState();
+      return state.items
+        .filter((item) => item.parentId === directoryId && !item.isDirectory)
+        .map((item) => ({
+          path: item.name,
+          providerFileId: item.fileId,
+          sizeBytes: item.sizeBytes ?? 1024,
+        }));
+    },
+    async listSubdirectories({ directoryId }) {
+      const state = readState();
+      return state.items
+        .filter((item) => item.parentId === directoryId && item.isDirectory)
+        .map((item) => ({ id: item.fileId, path: item.name }));
+    },
+    async listChildDirectories(directoryId) {
+      const state = readState();
+      return state.items
+        .filter((item) => item.parentId === directoryId && item.isDirectory)
+        .map((item) => ({ id: item.fileId, name: item.name }));
+    },
+    async moveFiles({ fileIds, targetDirectoryId }) {
+      const state = readState();
+      consumeWriteFault(state);
+      const wanted = new Set(fileIds);
+      const moved: string[] = [];
+      for (const item of state.items) {
+        if (wanted.has(item.fileId)) {
+          item.parentId = targetDirectoryId;
+          moved.push(item.fileId);
+        }
+      }
+      writeState(state);
+      return { moved };
+    },
+  };
 }

@@ -315,7 +315,7 @@ describe.skipIf(!adminURL)("F08c PostgreSQL runtime recovery with a fake cloud",
         "SELECT task_id, status FROM library_scan_tasks WHERE account_id='acct' AND connected_storage_id='drive' AND task_id IN ('task_active','msg_task_1')",
       );
       expect(Object.fromEntries(scanStatuses.rows.map((r) => [r.task_id, r.status]))).toEqual({
-        task_active: "paused",
+        task_active: "cancelled",
         msg_task_1: "queued",
       });
     } finally {

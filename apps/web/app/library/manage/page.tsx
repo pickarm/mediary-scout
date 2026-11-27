@@ -25,7 +25,7 @@ function ManageShell({ busy = false }: { busy?: boolean }) {
     <div className="app-shell">
       <AppSidebar active="library-manage" />
       <main className="main product-main" aria-busy={busy}>
-        <div className="section-heading library-heading"><div><h1>库管理</h1><p>新片入库即自动按模板重命名归类，告别繁琐定时扫描；支持按需整理存量目录</p></div></div>
+        <div className="section-heading library-heading"><div><h1>库管理</h1><p>新片入库即自动按模板重命名归类，支持定时增量扫描与按需整理存量目录</p></div></div>
       </main>
     </div>
   );
@@ -55,7 +55,7 @@ async function ManageSurface() {
       <AppSidebar active="library-manage" />
       <main className="main product-main">
         <div className="section-heading library-heading">
-          <div><h1>库管理</h1><p>新片入库即自动按模板重命名归类，告别繁琐定时扫描；支持按需整理存量目录</p></div>
+          <div><h1>库管理</h1><p>新片入库即自动按模板重命名归类，支持定时增量扫描与按需整理存量目录</p></div>
         </div>
         <LibraryManagement storages={storages} defaultTemplates={DEFAULT_NAMING_TEMPLATES} settingsHref="/settings" />
       </main>

@@ -392,7 +392,7 @@ export async function stopLibraryOrganizationForStorage(
     ),
     pool.query(
       `UPDATE library_scan_tasks
-          SET status='paused',
+          SET status='cancelled',
               lease_id=NULL,
               lease_expires_at=NULL,
               updated_at=$3
