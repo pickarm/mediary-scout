@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { MediaTitle } from "../src/domain.js";
-import { identifyScanFile, type IdentificationTmdbPort, type IdentityCandidate, type IdentificationTitleDetails, type ScanFileFactInput } from "../src/library/identification.js";
+import { identifyScanFile, inspectFilenameForReuse, type IdentificationTmdbPort, type IdentityCandidate, type IdentificationTitleDetails, type ScanFileFactInput } from "../src/library/identification.js";
 
 const film: IdentityCandidate = { tmdbId: 27205, mediaType: "movie", title: "盗梦空间", originalTitle: "Inception", year: 2010, reason: "TMDB" };
 const series: IdentityCandidate = { tmdbId: 42009, mediaType: "tv", title: "黑镜", originalTitle: "Black Mirror", year: 2011, reason: "TMDB" };
@@ -344,5 +344,43 @@ describe("library identification", () => {
     expect(result.status).toBe("confirmed");
     expect(result.evidence.some((entry) => entry.kind === "tmdb_marker" && entry.value === "generic:27205")).toBe(true);
     expect(tmdb.search).toHaveBeenCalledWith("盗梦空间", "movie");
+  });
+
+  it("validates local reuse eligibility cleanly without network lookups", () => {
+    expect(inspectFilenameForReuse({
+      file: facts("unknown.mkv"),
+      mediaKind: "mixed",
+      candidate: { mediaType: "movie", tmdbId: 27205, seasonNumber: 1, episodeCodes: ["S01E01"] },
+    })).toEqual({ action: "reuse" });
+
+    expect(inspectFilenameForReuse({
+      file: facts("盗梦空间 (2010) [tmdbid=27205].mkv"),
+      mediaKind: "movie",
+      candidate: { mediaType: "movie", tmdbId: 27205, seasonNumber: 1, episodeCodes: ["S01E01"] },
+    })).toEqual({ action: "reuse" });
+
+    expect(inspectFilenameForReuse({
+      file: facts("Show (2020) S01E01.mkv"),
+      mediaKind: "tv",
+      candidate: { mediaType: "tv", tmdbId: 42009, seasonNumber: 1, episodeCodes: ["S01E02"] },
+    })).toMatchObject({ action: "conflict" });
+
+    expect(inspectFilenameForReuse({
+      file: facts("Show {tmdb-99999}.mkv"),
+      mediaKind: "mixed",
+      candidate: { mediaType: "movie", tmdbId: 27205, seasonNumber: 1, episodeCodes: ["S01E01"] },
+    })).toMatchObject({ action: "conflict" });
+
+    expect(inspectFilenameForReuse({
+      file: facts("unknown.mkv"),
+      mediaKind: "movie",
+      candidate: { mediaType: "tv", tmdbId: 42009, seasonNumber: 1, episodeCodes: ["S01E01"] },
+    })).toMatchObject({ action: "conflict" });
+
+    expect(inspectFilenameForReuse({
+      file: facts("movie.zh-Hans.forced.ass"),
+      mediaKind: "mixed",
+      candidate: { mediaType: "movie", tmdbId: 27205, seasonNumber: 1, episodeCodes: ["S01E01"] },
+    })).toMatchObject({ action: "ignore" });
   });
 });

@@ -1,9 +1,11 @@
 import pg from "pg";
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { IdentificationTmdbPort } from "./identification.js";
 import { IdentificationService } from "./identification-service.js";
 import { PostgresIdentificationStore } from "./identification-store.js";
+import { PostgresOrganizationStore } from "./organization-store.js";
+import { LibraryOrganizer } from "./organizer.js";
 import { LibraryImportConflictError, PostgresLibraryStore } from "./store.js";
 import { PostgresScanStore } from "./scan-store.js";
 import { LibraryScanner, type ScanConfiguration, type ScanFileFact, type ScanScope } from "./scanner.js";
@@ -281,5 +283,148 @@ integration("PostgresIdentificationService", () => {
     expect((await jobs.getJob(scope, task.taskId))?.afterFileId).toBeNull();
     const imported = await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM media_titles WHERE id='tmdb_tv_88001'");
     expect(imported.rows[0]?.count).toBe(beforeTitles.rows[0]?.count);
+  }, 30_000);
+
+  it("reuses prior library_file_bindings on later scans with zero TMDB or AI calls", async () => {
+    const scope = await createScope();
+    const jobs = new PostgresIdentificationStore(pool);
+    const first = await scanOneFile(scope, "task_reuse_first", "unknown.mkv", "reusable-manual-file");
+    const firstService = new IdentificationService({ pool, identificationStore: jobs, scanStore: first.scans, tmdb: tmdb() });
+    await firstService.confirmFile({
+      scope, taskId: first.task.taskId, fileId: "reusable-manual-file", tmdbId: 88001, mediaType: "tv", seasonNumber: 1, episodeNumbers: [2],
+    });
+
+    const second = await scanOneFile(scope, "task_reuse_second", "unknown.mkv", "reusable-manual-file");
+    await jobs.enqueueForScan(scope, second.task.taskId);
+    const search = vi.fn(async () => []);
+    const getTitle = vi.fn(async () => { throw new Error("should not call getTitle"); });
+    const getSeason = vi.fn(async () => { throw new Error("should not call getSeason"); });
+    const suggester = vi.fn(async () => { throw new Error("should not call AI suggester"); });
+    const secondService = new IdentificationService({
+      pool, identificationStore: jobs, scanStore: second.scans, tmdb: { search, getTitle, getSeason }, suggester,
+    });
+    await secondService.processTaskBatch(scope, second.task.taskId);
+
+    expect(search).not.toHaveBeenCalled();
+    expect(getTitle).not.toHaveBeenCalled();
+    expect(getSeason).not.toHaveBeenCalled();
+    expect(suggester).not.toHaveBeenCalled();
+    const summary = await jobs.getSummary(scope, second.task.taskId);
+    expect(summary).toMatchObject({ confirmed: 1, imported: 1, reused: 1, job: { status: "completed" } });
+    const results = await jobs.listResults(scope, second.task.taskId, { limit: 10 });
+    expect(results[0]).toMatchObject({
+      fileId: "reusable-manual-file",
+      status: "confirmed",
+      importStatus: "imported",
+      tmdbId: 88001,
+      episodeCodes: ["S01E02"],
+    });
+    expect(results[0]?.evidence).toEqual([
+      expect.objectContaining({ kind: "library_reuse", value: "library_file_bindings:tv:88001:S01E02" }),
+    ]);
+  }, 30_000);
+
+  it("reuses prior episode_copies acquisition records with zero TMDB calls, preserves autoAcquire, and feeds organization", async () => {
+    const scope = await createScope();
+    const movieTitle = {
+      id: "tmdb_movie_99001", tmdbId: 99001, type: "movie", title: "沙丘2", originalTitle: "Dune: Part Two", year: 2024, aliases: ["沙丘2"],
+    };
+    const movieSeason = {
+      id: "tmdb_movie_99001_movie", mediaTitleId: "tmdb_movie_99001", seasonNumber: 1, status: "completed",
+      qualityPreference: "4k", storageDirectoryId: "src-dir", totalEpisodes: 1, latestAiredEpisode: 1, latestAiredSource: "manual", autoAcquire: false,
+    };
+    const tvTitle = {
+      id: "tmdb_tv_99002", tmdbId: 99002, type: "tv", title: "人生切割术", originalTitle: "Severance", year: 2022, aliases: ["人生切割术"],
+    };
+    const tvSeason = {
+      id: "tmdb_tv_99002_s1", mediaTitleId: "tmdb_tv_99002", seasonNumber: 1, status: "active",
+      qualityPreference: "4k", storageDirectoryId: "src-dir", totalEpisodes: 9, latestAiredEpisode: 9, latestAiredSource: "metadata", autoAcquire: true,
+    };
+    await pool.query("INSERT INTO media_titles (id, payload) VALUES ($1, $2::jsonb), ($3, $4::jsonb) ON CONFLICT (id) DO NOTHING",
+      [movieTitle.id, JSON.stringify(movieTitle), tvTitle.id, JSON.stringify(tvTitle)]);
+    await pool.query("INSERT INTO tracked_seasons (id, media_title_id, account_id, connected_storage_id, payload) VALUES ($1,$2,$3,$4,$5::jsonb), ($6,$7,$3,$4,$8::jsonb)",
+      [movieSeason.id, movieTitle.id, scope.accountId, scope.connectedStorageId, JSON.stringify(movieSeason),
+       tvSeason.id, tvTitle.id, JSON.stringify(tvSeason)]);
+    await pool.query("INSERT INTO episode_copies (tracked_season_id, episode_code, storage_id, file_ids, size_bytes, quality, run_id, recorded_at) VALUES ($1,'S01E01',$2,'[\"acq-movie-1\"]'::jsonb,2000,'2160p','run-acq-1',now()::text), ($3,'S01E03',$2,'[\"acq-tv-1\"]'::jsonb,1000,'2160p','run-acq-2',now()::text)",
+      [movieSeason.id, scope.connectedStorageId, tvSeason.id]);
+
+    const scans = new PostgresScanStore(pool);
+    const savedConfig: ScanConfiguration = {
+      configId: `config_acq_reuse_${scope.accountId}`,
+      scope,
+      sourceRoots: [{ directoryId: "src-dir", name: "入库落地区" }],
+      movieTargetDirectoryId: "movie-target",
+      tvTargetDirectoryId: "tv-target",
+      mediaKind: "mixed",
+      dailyScheduleEnabled: false,
+      dailyScheduleTime: null,
+      dailyScheduleTimezone: "Asia/Shanghai",
+      autoOrganize: true,
+      autoAcquire: false,
+      templates: {},
+    };
+    await scans.saveConfiguration(savedConfig);
+    const scanner = new LibraryScanner({
+      store: scans,
+      reader: {
+        async listPage(input) {
+          if (input.directoryId === "src-dir") {
+            return {
+              items: [
+                { fileId: "acq-movie-1", parentDirectoryId: "src-dir", name: "2024_final_cut.2160p.REMUX.DV.HEVC.TrueHD.Atmos-CHD.mkv", path: "入库落地区/2024_final_cut.2160p.REMUX.DV.HEVC.TrueHD.Atmos-CHD.mkv", isDirectory: false, sizeBytes: 2000, modifiedAt: null },
+                { fileId: "acq-tv-1", parentDirectoryId: "src-dir", name: "opaque_episode_release.2160p.WEB-DL.DV.HEVC-NTb.mkv", path: "入库落地区/opaque_episode_release.2160p.WEB-DL.DV.HEVC-NTb.mkv", isDirectory: false, sizeBytes: 1000, modifiedAt: null },
+              ],
+              nextPage: null,
+            };
+          }
+          return { items: [], nextPage: null };
+        },
+      },
+      idFactory: () => "task_acq_reuse",
+    });
+    await scanner.start(scope, savedConfig.configId);
+    const task = await scanner.waitForIdle(scope, "task_acq_reuse");
+    expect(task.status).toBe("completed");
+
+    const jobs = new PostgresIdentificationStore(pool);
+    await jobs.enqueueForScan(scope, task.taskId);
+    const search = vi.fn(async () => { throw new Error("should not call TMDB search"); });
+    const getTitle = vi.fn(async () => { throw new Error("should not call TMDB getTitle"); });
+    const getSeason = vi.fn(async () => { throw new Error("should not call TMDB getSeason"); });
+    const suggester = vi.fn(async () => { throw new Error("should not call AI suggester"); });
+    const service = new IdentificationService({
+      pool, identificationStore: jobs, scanStore: scans, tmdb: { search, getTitle, getSeason }, suggester,
+    });
+    await service.processTaskBatch(scope, task.taskId);
+
+    expect(search).not.toHaveBeenCalled();
+    expect(getTitle).not.toHaveBeenCalled();
+    expect(getSeason).not.toHaveBeenCalled();
+    expect(suggester).not.toHaveBeenCalled();
+    expect(await jobs.getSummary(scope, task.taskId)).toMatchObject({ confirmed: 2, imported: 2, reused: 2, job: { status: "completed" } });
+
+    const tracked = await pool.query<{ payload: { autoAcquire?: boolean } }>("SELECT payload FROM tracked_seasons WHERE id=$1 AND connected_storage_id=$2", [tvSeason.id, scope.connectedStorageId]);
+    expect(tracked.rows[0]?.payload.autoAcquire).toBe(true);
+
+    const library = new PostgresLibraryStore(pool);
+    const bindings = await library.listPhysicalFileBindings({ ...scope, limit: 10 });
+    expect(bindings.map((row) => row.fileId).sort()).toEqual(["acq-movie-1", "acq-tv-1"]);
+
+    const orgStore = new PostgresOrganizationStore(pool);
+    const planInput = await orgStore.derivePlanInput(scope, task.taskId, { fileIds: ["acq-movie-1", "acq-tv-1"], limit: 2, operationKey: "reuse-org-1" });
+    const plan = await new LibraryOrganizer({
+      store: orgStore,
+      storage: {
+        async list() { return []; },
+        async read() { return null; },
+        async createDir() { return "unused"; },
+        async rename() {},
+        async move() {},
+      },
+    }).plan(planInput);
+    expect(plan.operations.map((op) => op.targetRelativePath).sort()).toEqual([
+      "人生切割术 (2022) [tmdbid=99002]/Season 01/人生切割术 - S01E03 - 2160p.WEB-DL.DV.HEVC-NTb.mkv",
+      "沙丘2 (2024) [tmdbid=99001]/沙丘2 (2024) - 2160p.REMUX.DV.HEVC.TrueHD.Atmos-CHD.mkv",
+    ]);
   }, 30_000);
 });

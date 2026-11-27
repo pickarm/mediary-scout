@@ -29,7 +29,7 @@ export interface IdentificationResultItem {
 }
 export interface IdentificationPage {
   summary: { status: "waiting" | "pending" | "running" | "completed" | "cancelled" | "failed"; scanStatus: string; afterFileId: string | null; attempts: number; lastError: string | null } | null;
-  counts: { total: number; confirmed: number; pending: number; ignored: number; failed: number; imported: number };
+  counts: { total: number; confirmed: number; pending: number; ignored: number; failed: number; imported: number; reused?: number };
   items: IdentificationResultItem[];
   nextCursor: string | null;
   hasMore: boolean;

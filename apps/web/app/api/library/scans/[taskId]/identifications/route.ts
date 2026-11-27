@@ -30,7 +30,7 @@ export async function GET(request: NextRequest, context: RouteContext): Promise<
     });
     return Response.json({
       summary: page.summary.job ? { status: page.summary.job.status, scanStatus: page.summary.job.scanStatus, afterFileId: page.summary.job.afterFileId, attempts: page.summary.job.attempts, lastError: page.summary.job.lastError } : null,
-      counts: { total: page.summary.total, confirmed: page.summary.confirmed, pending: page.summary.pending, ignored: page.summary.ignored, failed: page.summary.failed, imported: page.summary.imported },
+      counts: { total: page.summary.total, confirmed: page.summary.confirmed, pending: page.summary.pending, ignored: page.summary.ignored, failed: page.summary.failed, imported: page.summary.imported, reused: page.summary.reused },
       items: page.items,
       nextCursor: page.nextCursor === null ? null : encodeCursor(page.nextCursor),
       hasMore: page.hasMore,

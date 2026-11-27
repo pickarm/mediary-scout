@@ -6,6 +6,7 @@ import type { ScanConfiguration, ScanScope, ScanTask } from "./scanner.js";
 import { PostgresScanStore } from "./scan-store.js";
 import {
   identifyScanFile,
+  inspectFilenameForReuse,
   type IdentityEvidence,
   type IdentitySuggester,
   type IdentificationResult,
@@ -124,6 +125,8 @@ export class IdentificationService {
       const after = job.afterFileId;
       const files = await this.identificationStore.listNextUnidentifiedFiles(scope, taskId, after, IDENTIFICATION_BATCH_SIZE + 1);
       const batch = files.slice(0, IDENTIFICATION_BATCH_SIZE);
+      if (batch.length > 0) await this.library.ensureSchema();
+      const reusableBindings = await this.identificationStore.listReusableBindings(scope, batch.map((file) => file.fileId));
       const records = await mapConcurrent(batch, NETWORK_CONCURRENCY, async (file) => {
         try {
           const current = await this.scans.getTask(scope, taskId);
@@ -132,10 +135,75 @@ export class IdentificationService {
           const directoryMap = new Map(ancestors.map((directory) => [directory.directoryId, directory]));
           const orderedAncestors = [...directoryMap.values()];
           const parentDirectoryName = orderedAncestors[0]?.name;
+          const ancestorDirectoryNames = orderedAncestors.map((directory) => directory.name);
+          const scanFile = { fileId: file.fileId, parentDirectoryId: file.parentDirectoryId, name: file.name, path: file.path, sizeBytes: file.sizeBytes, modifiedAt: file.modifiedAt, isDirectory: file.isDirectory };
+          const reused = reusableBindings.get(file.fileId);
+          if (reused) {
+            const reuseDecision = inspectFilenameForReuse({
+              file: scanFile,
+              ...(parentDirectoryName === undefined ? {} : { parentDirectoryName }),
+              ancestorDirectoryNames,
+              mediaKind: config.mediaKind,
+              candidate: {
+                mediaType: reused.title.type,
+                tmdbId: reused.title.tmdbId,
+                seasonNumber: reused.season.seasonNumber,
+                episodeCodes: reused.episodeCodes,
+              },
+            });
+            if (reuseDecision.action === "ignore") {
+              const ignoredResult: IdentificationResult = {
+                status: "ignored",
+                fileId: file.fileId,
+                reason: reuseDecision.reason,
+                evidence: [],
+                candidates: [],
+                episodes: [],
+                existingMediaFiles: [],
+                autoAcquire: false,
+                directoryExclusive: false,
+              };
+              return { result: ignoredResult, ancestors: orderedAncestors };
+            }
+            if (reuseDecision.action === "reuse") {
+              const totalEpisodes = Math.max(1, reused.season.totalEpisodes);
+              const reusedResult: IdentificationResult = {
+                status: "confirmed",
+                fileId: file.fileId,
+                reason: reused.source === "episode_copies"
+                  ? "已直接复用巡影入库记录（免重新识别）"
+                  : "已直接复用历史扫描绑定（免重新识别）",
+                evidence: [{
+                  kind: "library_reuse",
+                  value: `${reused.source}:${reused.title.type}:${reused.title.tmdbId}:${reused.episodeCodes.join("+")}`,
+                  source: "metadata",
+                }],
+                candidates: [],
+                title: reused.title,
+                season: reused.season,
+                episodes: createEpisodeStates({
+                  trackedSeasonId: reused.season.id,
+                  seasonNumber: reused.season.seasonNumber,
+                  totalEpisodes,
+                  latestAiredEpisode: reused.season.latestAiredEpisode,
+                }),
+                existingMediaFiles: reused.episodeCodes.map((code) => ({
+                  fileId: file.fileId,
+                  parentDirectoryId: file.parentDirectoryId,
+                  episodeCode: code,
+                  sizeBytes: file.sizeBytes,
+                  quality: reused.quality,
+                })),
+                autoAcquire: false,
+                directoryExclusive: false,
+              };
+              return { result: reusedResult, ancestors: orderedAncestors };
+            }
+          }
           const result = await identifyScanFile({
-            file: { fileId: file.fileId, parentDirectoryId: file.parentDirectoryId, name: file.name, path: file.path, sizeBytes: file.sizeBytes, modifiedAt: file.modifiedAt, isDirectory: file.isDirectory },
+            file: scanFile,
             ...(parentDirectoryName === undefined ? {} : { parentDirectoryName }),
-            ancestorDirectoryNames: orderedAncestors.map((directory) => directory.name),
+            ancestorDirectoryNames,
             mediaKind: config.mediaKind,
           }, { tmdb: this.cachedTmdb(scope, taskId), ...(this.suggester ? { suggester: this.suggester } : {}) });
           return { result, ancestors: orderedAncestors };

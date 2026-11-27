@@ -64,6 +64,7 @@ export function LibraryScanSettings({
   const [starting, setStarting] = useState(false);
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
+  const [scanNotice, setScanNotice] = useState<string | null>(null);
   const [pickerKind, setPickerKind] = useState<PickerKind | null>(null);
   const [pickerPath, setPickerPath] = useState<Array<{ id: string; label: string }>>([]);
   const [directoryItems, setDirectoryItems] = useState<LibraryDirectoryChoice[]>([]);
@@ -154,7 +155,7 @@ export function LibraryScanSettings({
     pickerController.current?.abort();
     pickerController.current = null;
     setPickerKind(null);
-    setLoading(false); setSaving(false); setStarting(false); setBusyTaskId(null); setDirectoryLoading(false);
+    setLoading(false); setSaving(false); setStarting(false); setBusyTaskId(null); setDirectoryLoading(false); setScanNotice(null);
     const controller = new AbortController();
     mainController.current = controller;
     if (storageId) void loadStorageData(storageId, controller.signal, currentGeneration);
@@ -199,6 +200,7 @@ export function LibraryScanSettings({
   const changeStorage = (id: string) => {
     selectionVersion.current += 1;
     setStorageId(id);
+    setScanNotice(null);
     applyConfiguration(null);
     setSelectedConfigId(null);
     setSelectedTaskId(null);
@@ -330,7 +332,7 @@ export function LibraryScanSettings({
     const selectionAtStart = selectionVersion.current;
     const id = storageId; const scopeGeneration = generation.current; const signal = mainController.current?.signal;
     if (!signal) return;
-    setStarting(true); setPageError(null);
+    setStarting(true); setPageError(null); setScanNotice(null);
     try {
       const saved = await persistConfiguration(id, scopeGeneration, signal);
       if (!isCurrentScope(id, scopeGeneration, signal)) return;
@@ -339,6 +341,7 @@ export function LibraryScanSettings({
       setTasks((current) => isCurrentScope(id, scopeGeneration, signal)
         ? [task, ...current.filter((item) => item.taskId !== task.taskId)] : current);
       if (selectionVersion.current === selectionAtStart) selectTask(task, saved);
+      setScanNotice("已启动存量扫描：已入库影片将直接复用数据库身份（免重新识别），并按当前模板自动整理。");
     } catch (error) { if (isCurrentScope(id, scopeGeneration, signal)) setPageError(error instanceof Error ? error.message : "开始扫描失败。"); }
     finally { if (isCurrentScope(id, scopeGeneration, signal)) setStarting(false); }
   };
@@ -457,6 +460,7 @@ export function LibraryScanSettings({
 
           {storage?.status === "frozen" && <div className={styles.notice} style={{ marginTop: 12 }}>该网盘连接已冻结，可查看已有配置和任务；恢复连接后才能修改配置或开始扫描。</div>}
           {pageError && <div className={styles.error} role="alert" style={{ marginTop: 12 }}><CircleAlert size={17} /><span>{pageError}</span><button className="secondary-button" onClick={reload}><RefreshCw size={14} />重试</button></div>}
+          {scanNotice && <div className={styles.notice} role="status" style={{ marginTop: 12, color: "var(--accent)", background: "color-mix(in srgb, var(--accent) 10%, transparent)", borderColor: "color-mix(in srgb, var(--accent) 28%, transparent)" }}><span>{scanNotice}</span>{onSwitchTab && activeTab !== "pending" && <button className="secondary-button" type="button" onClick={() => onSwitchTab("pending")}>查看扫描与识别进度</button>}</div>}
           {dirty && <div className={styles.notice} role="status" style={{ marginTop: 12 }}>有未保存的配置或模板修改；整理预览只使用已保存的配置。</div>}
           {loading && configurations.length === 0 && <div className={styles.loading}><LoaderCircle size={18} className={styles.spin} />正在读取已保存配置与扫描任务…</div>}
         </section>

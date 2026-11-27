@@ -177,6 +177,7 @@ export function LibraryIdentificationResults({ storageId, configId, taskId, froz
       : <>
         {page && <div className={styles.counts} aria-label="识别结果数量">
           <span>文件 {page.counts.total}</span><span>已确认 {page.counts.confirmed}</span><span>待确认 {page.counts.pending}</span><span>失败 {page.counts.failed}</span><span>已导入 {page.counts.imported}</span>
+          {Boolean(page.counts.reused) && <span className={styles.reusedCount}>已复用入库 {page.counts.reused}</span>}
           {page.summary && <span>识别状态：{jobStatusLabel(page.summary.status)}{page.summary.lastError ? ` · ${page.summary.lastError}` : ""}</span>}
         </div>}
         {error && <div className={styles.error} role="alert"><CircleAlert size={16} /><span>{error}</span><button className="secondary-button" type="button" onClick={reload}>重试读取</button></div>}
@@ -237,8 +238,10 @@ function IdentificationCard({ item, frozen, busy, onConfirm }: {
     await onConfirm(item, payload);
   };
   const status = { confirmed: "已确认", pending: "待确认", ignored: "已忽略", failed: "识别失败" }[item.status];
+  const reuseEvidence = evidence.find((entry) => entry.kind === "library_reuse");
+  const reuseSourceLabel = reuseEvidence?.value.startsWith("episode_copies:") ? "巡影入库记录" : "历史扫描绑定";
   return <article className={styles.card}>
-    <div className={styles.fileHeader}><div><span className={styles.status}>{status}</span><h3>{item.file?.name ?? item.fileId}</h3><p title={item.file?.path}>{item.file?.path ?? "扫描文件事实暂不可用"}</p></div>
+    <div className={styles.fileHeader}><div><div className={styles.statusRow}><span className={styles.status}>{status}</span>{reuseEvidence && <span className={styles.reuseBadge} title={`复用来源：${reuseSourceLabel}`}>已复用入库数据 · 免重新识别</span>}</div><h3>{item.file?.name ?? item.fileId}</h3><p title={item.file?.path}>{item.file?.path ?? "扫描文件事实暂不可用"}</p></div>
       {busy && <span className={styles.busy}><LoaderCircle size={15} className={styles.spin} />提交中</span>}
     </div>
     {item.file && <p className={styles.fileMeta}>{item.file.sizeBytes === null ? "大小未知" : formatBytes(item.file.sizeBytes)}{item.file.modifiedAt ? ` · 修改时间 ${formatDate(item.file.modifiedAt)}` : ""}</p>}

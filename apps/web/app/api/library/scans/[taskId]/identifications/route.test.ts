@@ -23,7 +23,7 @@ describe("scan identifications route", () => {
     runtime.getLibraryIdentificationService.mockResolvedValue(service);
     runtime.getLibraryReadIdentificationService.mockResolvedValue(service);
     runtime.watchLibraryScanForIdentification.mockResolvedValue(undefined);
-    service.list.mockResolvedValue({ summary: { job: { status: "completed", scanStatus: "completed", afterFileId: "file-1", attempts: 1, lastError: null }, total: 1, confirmed: 1, pending: 0, ignored: 0, failed: 0, imported: 1 }, items: [], nextCursor: null, hasMore: false });
+    service.list.mockResolvedValue({ summary: { job: { status: "completed", scanStatus: "completed", afterFileId: "file-1", attempts: 1, lastError: null }, total: 1, confirmed: 1, pending: 0, ignored: 0, failed: 0, imported: 1, reused: 1 }, items: [], nextCursor: null, hasMore: false });
     service.identificationStore.getJob.mockResolvedValue({ status: "pending" });
     service.retryFailed.mockResolvedValue(true);
   });
@@ -32,6 +32,7 @@ describe("scan identifications route", () => {
     const request = new NextRequest("http://localhost/api/library/scans/task-1/identifications?storageId=storage-1&limit=20");
     const response = await GET(request, { params: Promise.resolve({ taskId: "task-1" }) });
     expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ counts: { total: 1, confirmed: 1, imported: 1, reused: 1 } });
     expect(runtime.getLibraryReadIdentificationService).toHaveBeenCalledWith({ accountId: "account_test", connectedStorageId: "storage-1" });
     expect(service.list).toHaveBeenCalledWith("task-1", { limit: 20 });
     expect(runtime.getLibraryIdentificationService).not.toHaveBeenCalled();

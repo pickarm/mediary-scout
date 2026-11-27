@@ -89,13 +89,91 @@ function base(fileId: string, status: IdentificationStatus, reason: string, evid
   return { status, fileId, reason, evidence, candidates, episodes: [], existingMediaFiles: [], autoAcquire: false, directoryExclusive: false };
 }
 
+function checkIgnorableScanFile(file: ScanFileFactInput): string | null {
+  if (file.isDirectory) return "目录由遍历上下文处理";
+  const ext = file.name.split(".").at(-1)?.toLowerCase() ?? "";
+  if (SUBTITLE_EXTENSIONS.has(ext)) return "字幕文件不是视频资源";
+  if (!VIDEO_EXTENSIONS.has(ext)) return "不支持的媒体文件扩展名";
+  if (/(?:sample|trailer|preview|teaser|featurette|幕前花絮|预告|預告|样片|樣片)/i.test(file.name)) return "样片或预告片不作为正片导入";
+  return null;
+}
+
+export interface ReusableIdentityCandidate {
+  readonly mediaType: MediaType;
+  readonly tmdbId: number;
+  readonly seasonNumber: number;
+  readonly episodeCodes: readonly string[];
+}
+
+export type ReuseCompatibilityCheckResult =
+  | { readonly action: "ignore"; readonly reason: string }
+  | { readonly action: "reuse" }
+  | { readonly action: "conflict"; readonly reason: string };
+
+/** 纯本地零网络体检：判断扫描文件是否可安全直接复用库中既有身份绑定。 */
+export function inspectFilenameForReuse(input: {
+  file: ScanFileFactInput;
+  parentDirectoryName?: string;
+  ancestorDirectoryNames?: readonly string[];
+  mediaKind: IdentificationMediaKind;
+  candidate: ReusableIdentityCandidate;
+}): ReuseCompatibilityCheckResult {
+  const ignored = checkIgnorableScanFile(input.file);
+  if (ignored) return { action: "ignore", reason: ignored };
+
+  const { candidate } = input;
+  if (input.mediaKind === "movie" && candidate.mediaType !== "movie") {
+    return { action: "conflict", reason: "已有绑定为剧集，与当前电影扫描类型不一致" };
+  }
+  if (input.mediaKind === "tv" && candidate.mediaType === "movie") {
+    return { action: "conflict", reason: "已有绑定为电影，与当前剧集扫描类型不一致" };
+  }
+
+  const fileParsed = parseName(input.file.name.replace(/\.[^.]+$/, ""));
+  const fallbackParent = input.parentDirectoryName ?? input.file.path.split(/[\\/]/).filter(Boolean).at(-2) ?? "";
+  const directoryNames = [...new Set([...(fallbackParent ? [fallbackParent] : []), ...(input.ancestorDirectoryNames ?? [])])];
+  const directories = directoryNames.map((name) => ({ name, parsed: parseName(name) }));
+  const markers = [fileParsed.marker, ...directories.map(({ parsed }) => parsed.marker)]
+    .filter((value): value is NonNullable<typeof value> => value !== undefined);
+  for (const marker of markers) {
+    if (marker.id !== candidate.tmdbId) {
+      return { action: "conflict", reason: "文件中的 TMDB 标记与已有库绑定 ID 不一致" };
+    }
+    if (marker.type !== undefined && ((marker.type === "movie") !== (candidate.mediaType === "movie"))) {
+      return { action: "conflict", reason: "文件中的 TMDB 标记类型与已有库绑定不一致" };
+    }
+  }
+
+  const directorySeason = directories.find(({ parsed }) => parsed.season !== undefined)?.parsed;
+  const fileHasNumberOnly = /^\d{1,3}$/.test(fileParsed.title);
+  const explicitFileEpisodes = fileParsed.eps.length > 0
+    ? { season: fileParsed.season ?? directorySeason?.season, eps: fileParsed.eps }
+    : fileHasNumberOnly && input.mediaKind !== "movie" && directorySeason?.season !== undefined
+      ? { season: directorySeason.season, eps: [Number(fileParsed.title)] }
+      : null;
+
+  if (candidate.mediaType === "movie") {
+    if (explicitFileEpisodes && explicitFileEpisodes.eps.length > 0) {
+      return { action: "conflict", reason: "已有绑定为电影，但文件名含剧集季集号" };
+    }
+    return { action: "reuse" };
+  }
+
+  if (explicitFileEpisodes && explicitFileEpisodes.season !== undefined && explicitFileEpisodes.eps.length > 0) {
+    const parsedCodes = [...new Set(explicitFileEpisodes.eps.map((epNo) => episodeCode(explicitFileEpisodes.season!, epNo)))].sort();
+    const boundCodes = [...new Set(candidate.episodeCodes)].sort();
+    if (JSON.stringify(parsedCodes) !== JSON.stringify(boundCodes)) {
+      return { action: "conflict", reason: "文件名解析季集号与已有库绑定集号不一致" };
+    }
+  }
+
+  return { action: "reuse" };
+}
+
 export async function identifyScanFile(input: IdentifyScanFileInput, deps: IdentifyScanFileDependencies): Promise<IdentificationResult> {
   const f = input.file;
-  if (f.isDirectory) return base(f.fileId, "ignored", "目录由遍历上下文处理");
-  const ext = f.name.split(".").at(-1)?.toLowerCase() ?? "";
-  if (SUBTITLE_EXTENSIONS.has(ext)) return base(f.fileId, "ignored", "字幕文件不是视频资源");
-  if (!VIDEO_EXTENSIONS.has(ext)) return base(f.fileId, "ignored", "不支持的媒体文件扩展名");
-  if (/(?:sample|trailer|preview|teaser|featurette|幕前花絮|预告|預告|样片|樣片)/i.test(f.name)) return base(f.fileId, "ignored", "样片或预告片不作为正片导入");
+  const ignored = checkIgnorableScanFile(f);
+  if (ignored) return base(f.fileId, "ignored", ignored);
 
   const fileParsed = parseName(f.name.replace(/\.[^.]+$/, ""));
   const fallbackParent = input.parentDirectoryName ?? f.path.split(/[\\/]/).filter(Boolean).at(-2) ?? "";

@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import type { MediaTitle, TrackedSeason } from "../domain.js";
 import { initializeWorkflowPostgresSchema } from "../postgres.js";
 import { PostgresScanStore } from "./scan-store.js";
 import type { ScanScope, ScanTaskStatus } from "./scanner.js";
@@ -94,6 +95,14 @@ export interface IdentificationTrackingFact {
   autoAcquire: boolean | null;
 }
 export interface IdentificationDirectoryFact { directoryId: string; parentDirectoryId: string | null; name: string; path: string }
+export interface ReusableFileBinding {
+  readonly fileId: string;
+  readonly source: "library_file_bindings" | "episode_copies";
+  readonly title: MediaTitle;
+  readonly season: TrackedSeason;
+  readonly episodeCodes: readonly string[];
+  readonly quality: string | null;
+}
 
 export class IdentificationStoreScopeError extends Error {
   constructor(message: string) { super(message); this.name = "IdentificationStoreScopeError"; }
@@ -231,6 +240,111 @@ export class PostgresIdentificationStore {
       [scope.accountId, scope.connectedStorageId, [...fileIds]],
     );
     return result.rows.map((row) => ({ fileId: row.file_id, trackedSeasonId: row.tracked_season_id, autoAcquire: typeof row.auto_acquire === "boolean" ? row.auto_acquire : null }));
+  }
+
+  /** 按物理 file_id 批量反查已绑定/已入库的作品身份，用于存量整理免重新识别。 */
+  async listReusableBindings(scope: ScanScope, fileIds: readonly string[]): Promise<Map<string, ReusableFileBinding>> {
+    if (fileIds.length > 500) throw new IdentificationStoreInputError("单批复用身份查询不能超过 500 个文件");
+    const uniqueIds = [...new Set(fileIds)];
+    const resolved = new Map<string, ReusableFileBinding>();
+    if (uniqueIds.length === 0) return resolved;
+    await this.ensureSchema();
+
+    const boundRows = await this.pool.query<{
+      file_id: string;
+      episode_codes: unknown;
+      quality: string | null;
+      title_payload: unknown;
+      season_payload: unknown;
+    }>(
+      "SELECT b.file_id, b.episode_codes, b.quality, mt.payload AS title_payload, ts.payload AS season_payload " +
+      "FROM library_file_bindings b " +
+      "JOIN tracked_seasons ts ON ts.id=b.tracked_season_id AND ts.account_id=b.account_id AND ts.connected_storage_id=b.connected_storage_id " +
+      "JOIN media_titles mt ON mt.id=b.media_title_id " +
+      "WHERE b.account_id=$1 AND b.connected_storage_id=$2 AND b.file_id=ANY($3::text[])",
+      [scope.accountId, scope.connectedStorageId, uniqueIds],
+    );
+
+    for (const row of boundRows.rows) {
+      const title = normalizeTitlePayload(row.title_payload);
+      const season = title ? normalizeSeasonPayload(row.season_payload, title.id) : null;
+      const episodeCodes = [...new Set(jsonStringArray(row.episode_codes))];
+      if (!title || !season || episodeCodes.length === 0) continue;
+      resolved.set(row.file_id, {
+        fileId: row.file_id,
+        source: "library_file_bindings",
+        title,
+        season,
+        episodeCodes,
+        quality: typeof row.quality === "string" && row.quality.trim() ? row.quality : null,
+      });
+    }
+
+    const remainingIds = uniqueIds.filter((fileId) => !resolved.has(fileId));
+    if (remainingIds.length === 0) return resolved;
+
+    const copyRows = await this.pool.query<{
+      file_id: string;
+      tracked_season_id: string;
+      episode_code: string;
+      quality: string | null;
+      title_payload: unknown;
+      season_payload: unknown;
+    }>(
+      "SELECT fid.file_id, c.tracked_season_id, c.episode_code, c.quality, mt.payload AS title_payload, ts.payload AS season_payload " +
+      "FROM episode_copies c " +
+      "CROSS JOIN LATERAL jsonb_array_elements_text(c.file_ids) AS fid(file_id) " +
+      "JOIN tracked_seasons ts ON ts.id=c.tracked_season_id AND ts.connected_storage_id=c.storage_id AND ts.account_id=$1 " +
+      "JOIN media_titles mt ON mt.id=ts.media_title_id " +
+      "WHERE c.storage_id=$2 AND fid.file_id=ANY($3::text[]) " +
+      "ORDER BY fid.file_id, c.tracked_season_id, c.episode_code",
+      [scope.accountId, scope.connectedStorageId, remainingIds],
+    );
+
+    const grouped = new Map<string, {
+      ambiguous: boolean;
+      title: MediaTitle | null;
+      season: TrackedSeason | null;
+      codes: Set<string>;
+      quality: string | null;
+    }>();
+    for (const row of copyRows.rows) {
+      const title = normalizeTitlePayload(row.title_payload);
+      const season = title ? normalizeSeasonPayload(row.season_payload, title.id) : null;
+      if (!title || !season || !row.episode_code.trim()) continue;
+      const entry = grouped.get(row.file_id);
+      if (!entry) {
+        grouped.set(row.file_id, {
+          ambiguous: false,
+          title,
+          season,
+          codes: new Set([row.episode_code]),
+          quality: typeof row.quality === "string" && row.quality.trim() ? row.quality : null,
+        });
+        continue;
+      }
+      if (entry.ambiguous) continue;
+      if (entry.title?.id !== title.id || entry.season?.id !== season.id) {
+        entry.ambiguous = true;
+        continue;
+      }
+      entry.codes.add(row.episode_code);
+      if (!entry.quality && typeof row.quality === "string" && row.quality.trim()) entry.quality = row.quality;
+    }
+
+    for (const [fileId, entry] of grouped) {
+      if (entry.ambiguous || !entry.title || !entry.season || entry.codes.size === 0) continue;
+      resolved.set(fileId, {
+        fileId,
+        source: "episode_copies",
+        title: entry.title,
+        season: entry.season,
+        episodeCodes: [...entry.codes].sort(),
+        quality: entry.quality,
+      });
+    }
+
+    return resolved;
   }
 
   async listNextUnidentifiedFiles(scope: ScanScope, taskId: string, afterFileId: string | null, limit: number): Promise<IdentificationScanFact[]> {
@@ -374,15 +488,22 @@ export class PostgresIdentificationStore {
     return result.rows.map((row) => ({ fileId: row.file_id, status: row.status, reason: row.reason, evidence: jsonArray(row.evidence), candidates: jsonArray(row.candidates), mediaType: row.media_type, tmdbId: row.tmdb_id, seasonNumber: row.season_number, episodeCodes: jsonStringArray(row.episode_codes), importStatus: row.import_status, manual: row.manual, updatedAt: row.updated_at }));
   }
 
-  async getSummary(scope: ScanScope, taskId: string): Promise<{ job: IdentificationJob | null; total: number; confirmed: number; pending: number; ignored: number; failed: number; imported: number }> {
+  async getSummary(scope: ScanScope, taskId: string): Promise<{ job: IdentificationJob | null; total: number; confirmed: number; pending: number; ignored: number; failed: number; imported: number; reused: number }> {
     await this.ensureSchema();
     const job = await this.withTransaction((client) => this.selectJob(client, scope, taskId));
-    const counts = await this.pool.query<{ status: string; import_status: string; count: string }>("SELECT status,import_status,count(*)::text AS count FROM library_scan_identifications WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 GROUP BY status,import_status", [scope.accountId, scope.connectedStorageId, taskId]);
-    const summary = { total: 0, confirmed: 0, pending: 0, ignored: 0, failed: 0, imported: 0 };
+    const counts = await this.pool.query<{ status: string; import_status: string; is_reused: boolean; count: string }>(
+      "SELECT status,import_status,(evidence @> '[{\"kind\":\"library_reuse\"}]'::jsonb) AS is_reused,count(*)::text AS count " +
+      "FROM library_scan_identifications WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 GROUP BY status,import_status,is_reused",
+      [scope.accountId, scope.connectedStorageId, taskId],
+    );
+    const summary = { total: 0, confirmed: 0, pending: 0, ignored: 0, failed: 0, imported: 0, reused: 0 };
     for (const row of counts.rows) {
       const count = Number(row.count); summary.total += count;
-      if (row.status in summary && row.status !== "total" && row.status !== "imported") summary[row.status as "confirmed" | "pending" | "ignored" | "failed"] += count;
+      if (row.status === "confirmed" || row.status === "pending" || row.status === "ignored" || row.status === "failed") {
+        summary[row.status] += count;
+      }
       if (row.import_status === "imported") summary.imported += count;
+      if (row.is_reused) summary.reused += count;
     }
     return { job, ...summary };
   }
@@ -417,3 +538,55 @@ export class PostgresIdentificationStore {
 
 function jsonArray(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
 function jsonStringArray(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; }
+
+function normalizeTitlePayload(value: unknown): MediaTitle | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const type = raw.type;
+  if (type !== "movie" && type !== "tv" && type !== "anime") return null;
+  if (typeof raw.id !== "string" || !raw.id.trim() || typeof raw.title !== "string" || !raw.title.trim()) return null;
+  if (typeof raw.tmdbId !== "number" || !Number.isSafeInteger(raw.tmdbId) || raw.tmdbId < 1) return null;
+  if (typeof raw.year !== "number" || !Number.isSafeInteger(raw.year) || raw.year < 0) return null;
+  const originalTitle = typeof raw.originalTitle === "string" && raw.originalTitle.trim() ? raw.originalTitle : raw.title;
+  const aliases = Array.isArray(raw.aliases) ? raw.aliases.filter((entry): entry is string => typeof entry === "string" && Boolean(entry.trim())) : [];
+  const originCountries = Array.isArray(raw.originCountries) ? raw.originCountries.filter((entry): entry is string => typeof entry === "string") : undefined;
+  return {
+    id: raw.id,
+    tmdbId: raw.tmdbId,
+    type,
+    title: raw.title,
+    originalTitle,
+    year: raw.year,
+    aliases: aliases.length ? aliases : [...new Set([raw.title, originalTitle])],
+    ...(originCountries ? { originCountries } : {}),
+    ...(raw.releaseDate === null || typeof raw.releaseDate === "string" ? { releaseDate: raw.releaseDate } : {}),
+    ...(raw.posterPath === null || typeof raw.posterPath === "string" ? { posterPath: raw.posterPath } : {}),
+    ...(raw.backdropPath === null || typeof raw.backdropPath === "string" ? { backdropPath: raw.backdropPath } : {}),
+    ...(typeof raw.overview === "string" ? { overview: raw.overview } : {}),
+  };
+}
+
+function normalizeSeasonPayload(value: unknown, expectedTitleId: string): TrackedSeason | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.id !== "string" || !raw.id.trim()) return null;
+  const mediaTitleId = typeof raw.mediaTitleId === "string" && raw.mediaTitleId.trim() ? raw.mediaTitleId : expectedTitleId;
+  if (mediaTitleId !== expectedTitleId) return null;
+  if (typeof raw.seasonNumber !== "number" || !Number.isSafeInteger(raw.seasonNumber) || raw.seasonNumber < 0) return null;
+  const totalEpisodes = typeof raw.totalEpisodes === "number" && Number.isSafeInteger(raw.totalEpisodes) && raw.totalEpisodes >= 0 ? raw.totalEpisodes : 1;
+  const latestAiredEpisode = typeof raw.latestAiredEpisode === "number" && Number.isSafeInteger(raw.latestAiredEpisode) && raw.latestAiredEpisode >= 0 ? raw.latestAiredEpisode : 0;
+  const status = raw.status === "completed" || raw.status === "active" ? raw.status : "active";
+  const source = raw.latestAiredSource === "metadata" || raw.latestAiredSource === "manual" || raw.latestAiredSource === "unknown" ? raw.latestAiredSource : "unknown";
+  return {
+    id: raw.id,
+    mediaTitleId,
+    seasonNumber: raw.seasonNumber,
+    status,
+    qualityPreference: typeof raw.qualityPreference === "string" ? raw.qualityPreference : "",
+    storageDirectoryId: typeof raw.storageDirectoryId === "string" ? raw.storageDirectoryId : "",
+    totalEpisodes,
+    latestAiredEpisode,
+    latestAiredSource: source,
+    autoAcquire: raw.autoAcquire === true,
+  };
+}
