@@ -81,6 +81,8 @@ export function LibraryScanSettings({
   const [includeTvSource, setIncludeTvSource] = useState(Boolean(initialStorage?.defaultTvDirectory));
   const [extraRoots, setExtraRoots] = useState<ExtraSourceRoot[]>([]);
   const [mediaKind, setMediaKind] = useState<"movie" | "tv" | "mixed">("mixed");
+  const [dailyScheduleEnabled, setDailyScheduleEnabled] = useState(false);
+  const [dailyScheduleTime, setDailyScheduleTime] = useState("03:00");
   const [autoOrganize, setAutoOrganize] = useState(true);
   const [organizeConcurrency, setOrganizeConcurrency] = useState<number>(DEFAULT_ORGANIZE_CONCURRENCY);
   const [templates, setTemplates] = useState<TemplateSet>(defaultTemplates);
@@ -135,9 +137,11 @@ export function LibraryScanSettings({
     movieTarget: movieTarget?.directoryId ?? null,
     tvTarget: tvTarget?.directoryId ?? null,
     mediaKind,
+    dailyScheduleEnabled,
+    dailyScheduleTime: dailyScheduleEnabled ? (dailyScheduleTime || "03:00") : null,
     autoOrganize,
     organizeConcurrency,
-  }), [autoOrganize, mediaKind, movieTarget?.directoryId, organizeConcurrency, selectedSourceRoots, tvTarget?.directoryId]);
+  }), [autoOrganize, dailyScheduleEnabled, dailyScheduleTime, mediaKind, movieTarget?.directoryId, organizeConcurrency, selectedSourceRoots, tvTarget?.directoryId]);
 
   const savedShape = useMemo(() => {
     if (selectedConfiguration) {
@@ -146,6 +150,10 @@ export function LibraryScanSettings({
         movieTarget: selectedConfiguration.movieTargetDirectoryId,
         tvTarget: selectedConfiguration.tvTargetDirectoryId,
         mediaKind: selectedConfiguration.mediaKind,
+        dailyScheduleEnabled: selectedConfiguration.dailyScheduleEnabled,
+        dailyScheduleTime: selectedConfiguration.dailyScheduleEnabled
+          ? (selectedConfiguration.dailyScheduleTime ?? "03:00")
+          : null,
         autoOrganize: selectedConfiguration.autoOrganize,
         organizeConcurrency: clampConcurrency(selectedConfiguration.organizeConcurrency),
       };
@@ -160,6 +168,8 @@ export function LibraryScanSettings({
       movieTarget: storage?.defaultMovieDirectory?.directoryId ?? null,
       tvTarget: storage?.defaultTvDirectory?.directoryId ?? null,
       mediaKind: "mixed",
+      dailyScheduleEnabled: false,
+      dailyScheduleTime: null,
       autoOrganize: true,
       organizeConcurrency: DEFAULT_ORGANIZE_CONCURRENCY,
     };
@@ -191,6 +201,8 @@ export function LibraryScanSettings({
       setIncludeTvSource(Boolean(defTv));
       setExtraRoots([]);
       setMediaKind("mixed");
+      setDailyScheduleEnabled(false);
+      setDailyScheduleTime("03:00");
       setAutoOrganize(true);
       setOrganizeConcurrency(DEFAULT_ORGANIZE_CONCURRENCY);
       setTemplates(defaultTemplates);
@@ -228,6 +240,8 @@ export function LibraryScanSettings({
         .map((root) => ({ directoryId: root.directoryId, name: root.name, checked: true })),
     );
     setMediaKind(configuration.mediaKind);
+    setDailyScheduleEnabled(configuration.dailyScheduleEnabled);
+    setDailyScheduleTime(configuration.dailyScheduleTime ?? "03:00");
     setAutoOrganize(configuration.autoOrganize);
     setOrganizeConcurrency(clampConcurrency(configuration.organizeConcurrency));
     setTemplates(normalizeTemplates(configuration.templates, defaultTemplates));
@@ -461,10 +475,10 @@ export function LibraryScanSettings({
     tvTargetDirectoryId: tvTarget?.directoryId ?? null,
     ...(tvTarget?.selectionToken ? { tvTargetSelectionToken: tvTarget.selectionToken } : {}),
     mediaKind,
-    dailyScheduleEnabled: false,
+    dailyScheduleEnabled,
     autoOrganize,
     organizeConcurrency,
-    dailyScheduleTime: null,
+    dailyScheduleTime: dailyScheduleEnabled ? (dailyScheduleTime || "03:00") : null,
     templates,
   });
 
@@ -695,7 +709,7 @@ export function LibraryScanSettings({
                   <span>{autoOrganize ? "入库自动整理已默认开启" : "当前网盘自动整理已暂停"}</span>
                   <span className={styles.heroBadge}>{autoOrganize ? "实时自动整理" : "手动暂停中"}</span>
                 </div>
-                <p>新片获取、追更或机器人转存落盘后直接并发整理归档；勾选下方目录可随时执行单次整理。</p>
+                <p>新片获取、追更或机器人转存落盘后直接并发整理归档；定时扫描自动跳过已整理且未变动文件，仅处理新增与被修改项。</p>
               </div>
             </div>
             <div className={styles.heroActions}>
@@ -708,6 +722,28 @@ export function LibraryScanSettings({
                   disabled={formDisabled}
                 />
               </label>
+              <label className={styles.switchCard}>
+                <span>每日定时扫描</span>
+                <input
+                  type="checkbox"
+                  checked={dailyScheduleEnabled}
+                  onChange={(event) => setDailyScheduleEnabled(event.target.checked)}
+                  disabled={formDisabled}
+                />
+              </label>
+              {dailyScheduleEnabled && (
+                <label className={styles.inlineSelectField}>
+                  <span>扫描时间</span>
+                  <input
+                    type="time"
+                    className={styles.scheduleTimeInput}
+                    aria-label="每日定时扫描时间"
+                    value={dailyScheduleTime}
+                    onChange={(event) => setDailyScheduleTime(event.target.value)}
+                    disabled={formDisabled}
+                  />
+                </label>
+              )}
               <label className={styles.inlineSelectField}>
                 <span>整理并发</span>
                 <select

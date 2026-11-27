@@ -12,6 +12,7 @@ export * from "./preparation.js";
 export * from "./preparation-store.js";
 export * from "./organizer.js";
 export * from "./organization-store.js";
+export * from "./organized-index-store.js";
 export * from "./guangya-write-coordinator.js";
 export * from "./auto-organization.js";
 export * from "./auto-organization-store.js";

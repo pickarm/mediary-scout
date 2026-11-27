@@ -2,7 +2,8 @@ import type { Pool, PoolClient } from "pg";
 import { STORAGE_BRANDS } from "../storage-brands.js";
 import { DEFAULT_NAMING_TEMPLATES, deriveSubtitlePath, type NamingTemplateKind } from "./naming.js";
 import { DEFAULT_ORGANIZE_CONCURRENCY, MAX_ORGANIZE_CONCURRENCY, MIN_ORGANIZE_CONCURRENCY } from "./scanner.js";
-import { DEFAULT_MAX_CONSECUTIVE_FAILURES, type OrganizationGraph, type OrganizationIdentity, type OrganizationOperation, type OrganizationPlan, type OrganizationPlanInput, type OrganizationScope, type OrganizationTaskStatus } from "./organizer.js";
+import { DEFAULT_MAX_CONSECUTIVE_FAILURES, computeNamingTemplatesFingerprint, type OrganizationGraph, type OrganizationIdentity, type OrganizationOperation, type OrganizationPlan, type OrganizationPlanInput, type OrganizationScope, type OrganizationTaskStatus } from "./organizer.js";
+import { PostgresOrganizedIndexStore } from "./organized-index-store.js";
 
 export const LIBRARY_ORGANIZATION_SCHEMA_ADVISORY_LOCK_KEY = 4_011_989_144;
 const REGISTERED_STORAGE_PROVIDERS = STORAGE_BRANDS.map(({ provider }) => provider);
@@ -174,7 +175,12 @@ export class PostgresOrganizationStore implements OrganizationStore {
         if (!isWithinRoots(file.parentDirectoryId,context.sourceRootIds,context.directoryParents)) throw new Error(`文件 ${file.fileId} 不属于该扫描任务的已授权来源根`);
         const binding = identities.get(file.fileId);
         if (!binding || binding.parent_directory_id !== file.parentDirectoryId || !identityMatchesBinding(file.identity,binding)) throw new Error(`文件 ${file.fileId} 的整理身份/目录与F02导入绑定不一致`);
-        return { ...file,confirmed:true as const,identity:identityFromBinding(file.identity,binding) };
+        return {
+          ...file,
+          confirmed: true as const,
+          identity: identityFromBinding(file.identity, binding),
+          ...(file.tagSourceName !== undefined ? { tagSourceName: file.tagSourceName } : {}),
+        };
       });
       const targetRootByMediaType: Partial<Record<OrganizationPlanInput["confirmedFiles"][number]["identity"]["mediaType"],string>> = {};
       for (const file of authorizedFiles) {
@@ -225,6 +231,19 @@ export class PostgresOrganizationStore implements OrganizationStore {
       if (requested.length === 0) throw new Error("没有可整理的已导入文件");
       const context = await loadScanAuthorization(client,scope,taskId,requested);
       const identities = await loadBoundIdentities(client,scope,requested);
+      const indexNames = new Map<string, string>();
+      const idxCheck = await client.query<{ exists: string | null }>("SELECT to_regclass('library_organized_index')::text AS exists");
+      if (idxCheck.rows[0]?.exists && requested.length > 0) {
+        const idxRows = await client.query<{ file_id: string; organized_name: string }>(
+          `SELECT file_id, organized_name
+             FROM library_organized_index
+            WHERE account_id=$1 AND connected_storage_id=$2 AND file_id=ANY($3::text[])`,
+          [scope.accountId, scope.connectedStorageId, requested],
+        );
+        for (const idxRow of idxRows.rows) {
+          indexNames.set(idxRow.file_id, idxRow.organized_name);
+        }
+      }
       const confirmedFiles: OrganizationPlanInput["confirmedFiles"][number][] = [];
       const preSkippedFiles: Array<{fileId:string;reason:string}> = [];
       for (const fileId of requested) {
@@ -240,7 +259,10 @@ export class PostgresOrganizationStore implements OrganizationStore {
         const season = asRecord(binding.season_payload);
         const episodeCode = codes[0];
         const episodeMatch = episodeCode ? /^S\d{2}E(\d+)$/u.exec(episodeCode) : null;
-        confirmedFiles.push({fileId,parentDirectoryId:fact.parentDirectoryId,name:fact.name,isDirectory:false,confirmed:true,identity:{
+        const tagSourceName = indexNames.get(fileId);
+        confirmedFiles.push({fileId,parentDirectoryId:fact.parentDirectoryId,name:fact.name,isDirectory:false,confirmed:true,
+          ...(tagSourceName ? { tagSourceName } : {}),
+          identity:{
           mediaTitleId:binding.media_title_id,trackedSeasonId:binding.tracked_season_id,mediaType:binding.media_type as OrganizationIdentity["mediaType"],
           title:String(title.title ?? ""),originalTitle:String(title.originalTitle ?? ""),year:Number(title.year),tmdbId:Number(binding.tmdb_id),
           season:Number(season.seasonNumber ?? 1),...(episodeCode ? {episodeCode} : {}),...(episodeMatch ? {episode:Number(episodeMatch[1])} : {}),
@@ -297,6 +319,7 @@ export class PostgresOrganizationStore implements OrganizationStore {
   }
 
   private async initialize(): Promise<void> {
+    await new PostgresOrganizedIndexStore(this.pool).ensureSchema();
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -571,6 +594,24 @@ export class PostgresOrganizationStore implements OrganizationStore {
     } finally {
       client.release();
     }
+  }
+
+  async getTaskTemplateFingerprint(scope: OrganizationScope, taskId: string): Promise<string> {
+    await this.ensureSchema();
+    const result = await this.pool.query<{ templates: unknown }>(
+      `SELECT c.configuration->'templates' AS templates
+         FROM library_scan_tasks t
+         JOIN library_scan_configs c
+           ON c.account_id=t.account_id AND c.connected_storage_id=t.connected_storage_id AND c.config_id=t.config_id
+        WHERE t.account_id=$1 AND t.connected_storage_id=$2 AND t.task_id=$3`,
+      [scope.accountId, scope.connectedStorageId, taskId],
+    );
+    const raw = result.rows[0]?.templates;
+    return computeNamingTemplatesFingerprint(
+      raw && typeof raw === "object" && !Array.isArray(raw)
+        ? (raw as Partial<Record<NamingTemplateKind, string>>)
+        : undefined,
+    );
   }
 
   async getTaskOrganizeConcurrency(scope: OrganizationScope, taskId: string): Promise<number> {

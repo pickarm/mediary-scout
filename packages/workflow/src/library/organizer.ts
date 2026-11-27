@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import type { GuangYaClient } from "../guangya-client.js";
 import {
@@ -15,7 +16,12 @@ import { PostgresOrganizationStore, type OrganizationStore } from "./organizatio
 export interface OrganizationScope { accountId: string; connectedStorageId: string; }
 export interface OrganizationDirectoryFact { directoryId: string; parentDirectoryId: string | null; name: string; }
 export interface OrganizationFileFact { fileId: string; parentDirectoryId: string; name: string; isDirectory: false; }
-export interface OrganizationAuthorizedFile extends OrganizationFileFact { confirmed: true; identity: OrganizationIdentity; }
+export interface OrganizationAuthorizedFile extends OrganizationFileFact {
+  confirmed: true;
+  identity: OrganizationIdentity;
+  /** 可选技术标签参考文件名（如历史已整理标准名，在被篡改后重整时保留清晰度/音轨标签）。 */
+  tagSourceName?: string;
+}
 export interface OrganizationIdentity {
   mediaTitleId: string;
   trackedSeasonId: string;
@@ -387,6 +393,51 @@ export class LibraryOrganizer {
   }
 }
 
+export function computeNamingTemplatesFingerprint(templates?: Partial<Record<NamingTemplateKind, string>>): string {
+  const merged = { ...DEFAULT_NAMING_TEMPLATES, ...templates };
+  const canonical = {
+    movieDirectory: merged.movieDirectory,
+    movieFile: merged.movieFile,
+    tvDirectory: merged.tvDirectory,
+    seasonDirectory: merged.seasonDirectory,
+    episodeFile: merged.episodeFile,
+  };
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex").slice(0, 32);
+}
+
+export function renderExpectedVideoTarget(
+  identity: OrganizationIdentity,
+  sourceFilename: string,
+  templates?: Partial<Record<NamingTemplateKind, string>>,
+  tagSourceName?: string,
+): { relativeDirectory: string; fileName: string; relativePath: string } {
+  const merged = { ...DEFAULT_NAMING_TEMPLATES, ...templates };
+  const parsed = Object.fromEntries(Object.entries(merged).map(([kind, template]) => {
+    const result = parseNamingTemplate(template);
+    if (!result.ok) throw new OrganizationConflictError(`模板 ${kind} 无效：${result.errors.join("；")}`);
+    return [kind, result.template];
+  })) as Record<NamingTemplateKind, ReturnType<typeof parseNamingTemplate> extends { ok: true; template: infer T } ? T : never>;
+  return renderExpectedVideoTargetWithParsed(identity, sourceFilename, parsed, tagSourceName);
+}
+
+function renderExpectedVideoTargetWithParsed(
+  identity: OrganizationIdentity,
+  sourceFilename: string,
+  parsed: Record<NamingTemplateKind, ReturnType<typeof parseNamingTemplate> extends { ok: true; template: infer T } ? T : never>,
+  tagSourceName?: string,
+): { relativeDirectory: string; fileName: string; relativePath: string } {
+  const values = namingValues(identity, sourceFilename, tagSourceName);
+  const isMovie = identity.mediaType === "movie";
+  const dirKind: NamingTemplateKind = isMovie ? "movieDirectory" : "tvDirectory";
+  const directoryPath = renderParsedNamingTemplate(parsed[dirKind], values);
+  const relativeDirectory = isMovie ? directoryPath : `${directoryPath}/${renderParsedNamingTemplate(parsed.seasonDirectory, values)}`;
+  const filePath = renderParsedNamingTemplate(isMovie ? parsed.movieFile : parsed.episodeFile, values);
+  if (filePath.includes("/")) throw new OrganizationConflictError("文件模板只能渲染单个文件名，不能包含目录层级");
+  const fileName = filePath.slice(filePath.lastIndexOf("/") + 1);
+  assertSameExtension(sourceFilename, fileName);
+  return { relativeDirectory, fileName, relativePath: `${relativeDirectory}/${fileName}` };
+}
+
 export function buildOrganizationPlan(input: OrganizationPlanInput, idFactory: () => string = () => globalThis.crypto.randomUUID()): OrganizationPlan {
   validateInput(input);
   const templates = { ...DEFAULT_NAMING_TEMPLATES, ...input.templates };
@@ -446,16 +497,8 @@ export function buildOrganizationPlan(input: OrganizationPlanInput, idFactory: (
   }
   for (const video of videos) {
     const identity = video.identity;
-    const values = namingValues(identity, video.name);
-    const isMovie = identity.mediaType === "movie";
-    const dirKind: NamingTemplateKind = isMovie ? "movieDirectory" : "tvDirectory";
-    const directoryPath = renderParsedNamingTemplate(parsed[dirKind], values);
-    const relativeDirectory = isMovie ? directoryPath : `${directoryPath}/${renderParsedNamingTemplate(parsed.seasonDirectory, values)}`;
-    const filePath = renderParsedNamingTemplate(isMovie ? parsed.movieFile : parsed.episodeFile, values);
-    if (filePath.includes("/")) throw new OrganizationConflictError("文件模板只能渲染单个文件名，不能包含目录层级");
-    const fileName = filePath.slice(filePath.lastIndexOf("/") + 1);
-    assertSameExtension(video.name, fileName);
-    const desired = `${relativeDirectory}/${fileName}`;
+    const rendered = renderExpectedVideoTargetWithParsed(identity, video.name, parsed, video.tagSourceName);
+    const { relativeDirectory, fileName, relativePath: desired } = rendered;
     const targetRootId = targetRootByMediaType[identity.mediaType]!;
     const currentRelativeDir = directoryRelativePath(video.parentDirectoryId,targetRootId,dirById);
     const uniquePath = currentRelativeDir === relativeDirectory && video.name === fileName
@@ -538,12 +581,31 @@ function directoryRelativePath(directoryId: string, targetRootId: string, direct
   }
   return current === targetRootId ? segments.join("/") : null;
 }
-function namingValues(identity: OrganizationIdentity, fileName: string): NamingValues {
+function namingValues(identity: OrganizationIdentity, fileName: string, tagSourceName?: string): NamingValues {
   const { stem, extension } = stripExtension(fileName);
-  const tech = extractMediaTechTags(fileName, {
+  const sourceTech = extractMediaTechTags(fileName, {
     resolution: identity.resolution,
     edition: identity.edition,
   });
+  const fallbackTech = tagSourceName
+    ? extractMediaTechTags(tagSourceName, {
+        resolution: identity.resolution,
+        edition: identity.edition,
+      })
+    : null;
+  const tech = fallbackTech
+    ? {
+        resolution: sourceTech.resolution || fallbackTech.resolution,
+        videoSource: sourceTech.videoSource || fallbackTech.videoSource,
+        dynamicRange: sourceTech.dynamicRange || fallbackTech.dynamicRange,
+        videoCodec: sourceTech.videoCodec || fallbackTech.videoCodec,
+        audioCodec: sourceTech.audioCodec || fallbackTech.audioCodec,
+        fps: sourceTech.fps || fallbackTech.fps,
+        edition: sourceTech.edition || fallbackTech.edition,
+        releaseGroup: sourceTech.releaseGroup || fallbackTech.releaseGroup,
+        mediaTags: sourceTech.mediaTags || fallbackTech.mediaTags,
+      }
+    : sourceTech;
   return {
     title: identity.title,
     originalTitle: identity.originalTitle,

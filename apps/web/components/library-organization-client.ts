@@ -275,3 +275,92 @@ export async function stopOrganizations(
     body: JSON.stringify({ storageId, action: "stop" }),
   });
 }
+
+export interface OrganizedDriftItem {
+  fileId: string;
+  parentDirectoryId: string;
+  targetRootId: string;
+  organizedName: string;
+  organizedRelativePath: string;
+  templateFingerprint: string;
+  source: "acquisition" | "organization";
+  identity: OrganizationHistoryIdentity;
+  driftStatus: "clean" | "drifted" | "ignored";
+  driftReason: string | null;
+  observedTaskId: string | null;
+  observedParentDirectoryId: string | null;
+  observedName: string | null;
+  observedRelativePath: string | null;
+  expectedName: string | null;
+  expectedRelativePath: string | null;
+  expectedTemplateFingerprint: string | null;
+  ignoredAt: string | null;
+  updatedAt: string;
+}
+
+export interface OrganizedIndexPage {
+  items: OrganizedDriftItem[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  counts: {
+    totalIndexed: number;
+    drifted: number;
+    ignored: number;
+  };
+}
+
+export async function loadOrganizedDrifts(
+  storageId: string,
+  input: { status: "drifted" | "ignored"; page: number; pageSize: number },
+  signal?: AbortSignal,
+): Promise<OrganizedIndexPage> {
+  const query = new URLSearchParams({
+    storageId,
+    status: input.status,
+    page: String(input.page),
+    pageSize: String(input.pageSize),
+  });
+  return requestJson<OrganizedIndexPage>(`/api/library/organized-index?${query}`, signal ? { signal } : {});
+}
+
+export async function ignoreOrganizedDrifts(
+  storageId: string,
+  fileIds: readonly string[],
+  signal?: AbortSignal,
+): Promise<{ updatedCount: number; accepted: boolean }> {
+  return requestJson<{ updatedCount: number; accepted: boolean }>("/api/library/organized-index", {
+    method: "POST",
+    ...(signal ? { signal } : {}),
+    body: JSON.stringify({ storageId, action: "ignore", fileIds }),
+  });
+}
+
+export async function unignoreOrganizedDrifts(
+  storageId: string,
+  fileIds: readonly string[],
+  signal?: AbortSignal,
+): Promise<{ updatedCount: number; accepted: boolean }> {
+  return requestJson<{ updatedCount: number; accepted: boolean }>("/api/library/organized-index", {
+    method: "POST",
+    ...(signal ? { signal } : {}),
+    body: JSON.stringify({ storageId, action: "unignore", fileIds }),
+  });
+}
+
+export async function reorganizeDriftedFiles(
+  storageId: string,
+  input: { fileIds?: readonly string[]; allDrifted?: boolean },
+  signal?: AbortSignal,
+): Promise<{ queuedPlans: number; queuedFiles: number }> {
+  return requestJson<{ queuedPlans: number; queuedFiles: number }>("/api/library/organized-index", {
+    method: "POST",
+    ...(signal ? { signal } : {}),
+    body: JSON.stringify({
+      storageId,
+      action: "reorganize",
+      ...(input.allDrifted ? { allDrifted: true } : { fileIds: input.fileIds ?? [] }),
+    }),
+  });
+}

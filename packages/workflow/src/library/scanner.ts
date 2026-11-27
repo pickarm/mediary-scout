@@ -94,7 +94,7 @@ export interface ScanStore {
   getTask(scope: ScanScope, taskId: string): Promise<ScanTask | null>;
   claimTask(scope: ScanScope, taskId: string, leaseId: string, now: string, leaseExpiresAt: string): Promise<boolean>;
   renewTaskLease(scope: ScanScope, taskId: string, leaseId: string, leaseExpiresAt: string, now: string): Promise<boolean>;
-  listDirectories(scope: ScanScope, taskId: string, statuses: readonly ScanDirectoryStatus[]): Promise<ScanDirectoryCheckpoint[]>;
+  listDirectories(scope: ScanScope, taskId: string, statuses: readonly ScanDirectoryStatus[], limit?: number): Promise<ScanDirectoryCheckpoint[]>;
   commitPage(input: {
     scope: ScanScope;
     taskId: string;
@@ -120,6 +120,7 @@ export interface ScannerOptions {
   maxDirectories?: number;
   maxDepth?: number;
   leaseDurationMs?: number;
+  concurrency?: number;
   idFactory?: () => string;
   now?: () => string;
 }
@@ -144,6 +145,7 @@ export class LibraryScanner {
   private readonly maxDirectories: number;
   private readonly maxDepth: number;
   private readonly leaseDurationMs: number;
+  private readonly concurrency: number;
   private readonly idFactory: () => string;
   private readonly now: () => string;
   private readonly active = new Map<string, Promise<void>>();
@@ -156,6 +158,7 @@ export class LibraryScanner {
     this.maxDirectories = boundedInteger(options.maxDirectories ?? DEFAULT_MAX_DIRECTORIES, 1, 1_000_000, "maxDirectories");
     this.maxDepth = boundedInteger(options.maxDepth ?? DEFAULT_MAX_DEPTH, 1, 4096, "maxDepth");
     this.leaseDurationMs = boundedInteger(options.leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS, 1_000, 3_600_000, "leaseDurationMs");
+    this.concurrency = boundedInteger(options.concurrency ?? 1, 1, 4, "concurrency");
     this.idFactory = options.idFactory ?? (() => globalThis.crypto.randomUUID());
     this.now = options.now ?? (() => new Date().toISOString());
   }
@@ -241,7 +244,7 @@ export class LibraryScanner {
       if (task.status !== "running") return;
       const leaseExpiresAt = new Date(Date.parse(this.now()) + this.leaseDurationMs).toISOString();
       if (!(await this.store.renewTaskLease(scope, taskId, leaseId, leaseExpiresAt, this.now()))) return;
-      const pending = await this.store.listDirectories(scope, taskId, ["pending", "running"]);
+      const pending = await this.store.listDirectories(scope, taskId, ["pending", "running"], this.concurrency);
       if (pending.length === 0) {
         const finalStatus: ScanTaskStatus = task.failures.length === 0
           ? "completed"
@@ -249,52 +252,53 @@ export class LibraryScanner {
         await this.store.finishTask({ scope, taskId, leaseId, status: finalStatus as "completed" | "partial" | "failed", now: this.now() });
         return;
       }
-      const directory = pending[0]!;
-      if (task.directoriesDiscovered > this.maxDirectories) {
-        await this.store.failPage({ scope, taskId, leaseId, directoryId: directory.directoryId, page: directory.nextPage, message: "扫描目录数超过安全上限", now: this.now() });
-        continue;
-      }
-      if (pathDepth(directory.path) > this.maxDepth) {
-        await this.store.failPage({ scope, taskId, leaseId, directoryId: directory.directoryId, page: directory.nextPage, message: "目录深度超过安全上限", now: this.now() });
-        continue;
-      }
-      if (directory.nextPage >= this.maxPagesPerDirectory) {
-        await this.store.failPage({ scope, taskId, leaseId, directoryId: directory.directoryId, page: directory.nextPage, message: "目录页数超过安全上限", now: this.now() });
-        continue;
-      }
-      try {
-        const page = await this.reader.listPage({
-          directoryId: directory.directoryId,
-          directoryPath: directory.path,
-          page: directory.nextPage,
-          pageSize: this.pageSize,
-          ...(directory.nextCursor !== undefined ? { cursor: directory.nextCursor } : {}),
-        });
-        validatePage(directory, page);
-        const children = page.items.filter((fact) => fact.isDirectory).map((fact) => ({
-          directoryId: fact.fileId,
-          parentDirectoryId: directory.directoryId,
-          path: fact.path,
-          nextPage: 0,
-          status: "pending" as const,
-        }));
-        await this.store.commitPage({
-          scope,
-          taskId,
-          leaseId,
-          directory,
-          facts: page.items,
-          childDirectories: children,
-          nextPage: page.nextPage,
-          nextCursor: page.nextCursor ?? null,
-          now: this.now(),
-        });
-      } catch (error) {
-        const currentTask = await this.requireTask(scope, taskId);
-        if (currentTask.status !== "running") return;
-        const message = safeError(error);
-        await this.store.failPage({ scope, taskId, leaseId, directoryId: directory.directoryId, page: directory.nextPage, message, now: this.now() });
-      }
+      await Promise.all(pending.map(async (directory) => {
+        if (task.directoriesDiscovered > this.maxDirectories) {
+          await this.store.failPage({ scope, taskId, leaseId, directoryId: directory.directoryId, page: directory.nextPage, message: "扫描目录数超过安全上限", now: this.now() });
+          return;
+        }
+        if (pathDepth(directory.path) > this.maxDepth) {
+          await this.store.failPage({ scope, taskId, leaseId, directoryId: directory.directoryId, page: directory.nextPage, message: "目录深度超过安全上限", now: this.now() });
+          return;
+        }
+        if (directory.nextPage >= this.maxPagesPerDirectory) {
+          await this.store.failPage({ scope, taskId, leaseId, directoryId: directory.directoryId, page: directory.nextPage, message: "目录页数超过安全上限", now: this.now() });
+          return;
+        }
+        try {
+          const page = await this.reader.listPage({
+            directoryId: directory.directoryId,
+            directoryPath: directory.path,
+            page: directory.nextPage,
+            pageSize: this.pageSize,
+            ...(directory.nextCursor !== undefined ? { cursor: directory.nextCursor } : {}),
+          });
+          validatePage(directory, page);
+          const children = page.items.filter((fact) => fact.isDirectory).map((fact) => ({
+            directoryId: fact.fileId,
+            parentDirectoryId: directory.directoryId,
+            path: fact.path,
+            nextPage: 0,
+            status: "pending" as const,
+          }));
+          await this.store.commitPage({
+            scope,
+            taskId,
+            leaseId,
+            directory,
+            facts: page.items,
+            childDirectories: children,
+            nextPage: page.nextPage,
+            nextCursor: page.nextCursor ?? null,
+            now: this.now(),
+          });
+        } catch (error) {
+          const currentTask = await this.requireTask(scope, taskId);
+          if (currentTask.status !== "running") return;
+          const message = safeError(error);
+          await this.store.failPage({ scope, taskId, leaseId, directoryId: directory.directoryId, page: directory.nextPage, message, now: this.now() });
+        }
+      }));
     }
   }
 }

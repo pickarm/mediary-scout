@@ -320,6 +320,22 @@
       "columns": ["account_id", "connected_storage_id", "media_type", "tmdb_id", "workflow_run_id", "file_id", "attempt_id", "kind", "original_directory_id", "original_name", "target_directory_id", "target_name", "episode_codes", "status", "reason", "updated_at"],
       "group": "library",
       "required": false
+    },
+    {
+      "id": "library_organized_index",
+      "table": "library_organized_index",
+      "columns": [
+        "account_id", "connected_storage_id", "file_id", "parent_directory_id", "target_root_id",
+        "organized_name", "organized_relative_path", "template_fingerprint", "source",
+        "media_title_id", "tracked_season_id", "identity",
+        "drift_status", "drift_reason",
+        "observed_task_id", "observed_parent_directory_id", "observed_name", "observed_relative_path",
+        "expected_name", "expected_relative_path", "expected_template_fingerprint",
+        "ignored_name", "ignored_parent_directory_id", "ignored_template_fingerprint", "ignored_at",
+        "organized_at", "last_seen_at", "updated_at"
+      ],
+      "group": "library",
+      "required": false
     }
   ],
   "gate": {

@@ -146,7 +146,8 @@ export async function getLibraryServices(scope: ScanScope): Promise<{
   const reader = createLibraryDirectoryReader(scope, storage.provider);
   let scanner = scanners.get(key);
   if (!scanner || scannerCredentialFingerprints.get(key) !== fingerprint) {
-    scanner = new LibraryScanner({ store, reader });
+    const scanConcurrency = getStorageBrand(storage.provider).provider === "guangya" ? 1 : 3;
+    scanner = new LibraryScanner({ store, reader, concurrency: scanConcurrency });
     scanners.set(key, scanner);
     scannerCredentialFingerprints.set(key, fingerprint);
   }

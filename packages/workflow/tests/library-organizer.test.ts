@@ -1,5 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
-import { LibraryOrganizer, buildOrganizationPlan, createGuangYaOrganizationStorage, type OrganizationFileFact, type OrganizationPlan, type OrganizationScope, type OrganizationOperation, type OrganizationAuthorizedFile, type OrganizationStorage } from "../src/library/organizer.js";
+import {
+  LibraryOrganizer,
+  buildOrganizationPlan,
+  computeNamingTemplatesFingerprint,
+  createGuangYaOrganizationStorage,
+  renderExpectedVideoTarget,
+  type OrganizationFileFact,
+  type OrganizationPlan,
+  type OrganizationScope,
+  type OrganizationOperation,
+  type OrganizationAuthorizedFile,
+  type OrganizationStorage,
+} from "../src/library/organizer.js";
 import type { OrganizationStore } from "../src/library/organization-store.js";
 
 const scope: OrganizationScope = { accountId:"acct",connectedStorageId:"drive" };
@@ -315,5 +327,27 @@ describe("safe library organizer", () => {
       "planned",
       "planned",
     ]);
+  });
+
+  it("computes stable template fingerprints and restores missing tech tags from tagSourceName during reorganization", () => {
+    const fpA = computeNamingTemplatesFingerprint();
+    const fpB = computeNamingTemplatesFingerprint({});
+    const fpC = computeNamingTemplatesFingerprint({ movieFile: "{title} ({year}){ext}" });
+    expect(fpA).toBe(fpB);
+    expect(fpC).not.toBe(fpA);
+
+    const rendered = renderExpectedVideoTarget(
+      identity,
+      "TamperedName.mp4",
+      undefined,
+      "Film (2024) - 2160p.REMUX.DV.HEVC-CHD.mkv",
+    );
+    expect(rendered.fileName).toBe("Film (2024) - 2160p.REMUX.DV.HEVC-CHD.mp4");
+    expect(rendered.relativePath).toBe("Film (2024) [tmdbid=123]/Film (2024) - 2160p.REMUX.DV.HEVC-CHD.mp4");
+
+    const plan = buildOrganizationPlan(
+      input([confirmed("v-tampered", "src", "TamperedName.mkv", { tagSourceName: "Film (2024) - 2160p.BluRay.HEVC-CHD.mkv" })]),
+    );
+    expect(plan.operations[0]?.targetRelativePath).toBe("Film (2024) [tmdbid=123]/Film (2024) - 2160p.BluRay.HEVC-CHD.mkv");
   });
 });

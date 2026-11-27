@@ -4,7 +4,9 @@ import { LIBRARY_SCAN_SCHEMA_ADVISORY_LOCK_KEY, PostgresScanStore } from "./scan
 import { PostgresIdentificationStore } from "./identification-store.js";
 import { PostgresLibraryStore } from "./store.js";
 import { PostgresOrganizationStore } from "./organization-store.js";
-import type { OrganizationScope } from "./organizer.js";
+import { PostgresOrganizedIndexStore } from "./organized-index-store.js";
+import { computeNamingTemplatesFingerprint, type OrganizationScope } from "./organizer.js";
+import type { NamingTemplateKind } from "./naming.js";
 import type {
   AutoOrganizationBatch,
   AutoOrganizationCandidate,
@@ -96,6 +98,7 @@ export class PostgresAutoOrganizationStore implements AutoOrganizationStore {
     await new PostgresLibraryStore(this.pool).ensureSchema();
     await new PostgresIdentificationStore(this.pool).ensureSchema();
     await new PostgresOrganizationStore(this.pool).ensureSchema();
+    await new PostgresOrganizedIndexStore(this.pool).ensureSchema();
     const client = await this.pool.connect();
     try {
       await client.query("SELECT pg_advisory_lock($1)", [LIBRARY_SCAN_SCHEMA_ADVISORY_LOCK_KEY]);
@@ -264,6 +267,20 @@ export class PostgresAutoOrganizationStore implements AutoOrganizationStore {
       const row = checkpoint.rows[0];
       if (!row || (row.status !== "idle" && row.status !== "completed")) return null;
       if (!(await isEligible(client, input.scope, input.taskId, input.configId))) return null;
+      const cfgRes = await client.query<{ configuration: unknown }>(
+        `SELECT configuration FROM library_scan_configs
+          WHERE account_id=$1 AND connected_storage_id=$2 AND config_id=$3`,
+        [input.scope.accountId, input.scope.connectedStorageId, input.configId],
+      );
+      const rawCfg = cfgRes.rows[0]?.configuration;
+      const rawTemplates = rawCfg && typeof rawCfg === "object" && !Array.isArray(rawCfg)
+        ? (rawCfg as Record<string, unknown>).templates
+        : undefined;
+      const templateFingerprint = computeNamingTemplatesFingerprint(
+        rawTemplates && typeof rawTemplates === "object" && !Array.isArray(rawTemplates)
+          ? (rawTemplates as Partial<Record<NamingTemplateKind, string>>)
+          : undefined,
+      );
       const files = await client.query<{ file_id: string }>(
         `SELECT f.file_id
            FROM library_scan_task_files f
@@ -278,8 +295,22 @@ export class PostgresAutoOrganizationStore implements AutoOrganizationStore {
                WHERE existing.account_id=f.account_id AND existing.connected_storage_id=f.connected_storage_id
                  AND existing.task_id=f.task_id AND existing.file_id=f.file_id AND existing.status <> 'cancelled'
             )
+            AND NOT EXISTS (
+              SELECT 1 FROM library_organized_index idx
+               WHERE idx.account_id=f.account_id AND idx.connected_storage_id=f.connected_storage_id
+                 AND idx.file_id=f.file_id
+                 AND (
+                   idx.drift_status IN ('drifted','ignored')
+                   OR (
+                     idx.drift_status='clean'
+                     AND idx.parent_directory_id=f.parent_directory_id
+                     AND idx.organized_name=f.name
+                     AND idx.template_fingerprint=$5
+                   )
+                 )
+            )
           ORDER BY f.file_id LIMIT $4`,
-        [input.scope.accountId, input.scope.connectedStorageId, input.taskId, limit],
+        [input.scope.accountId, input.scope.connectedStorageId, input.taskId, limit, templateFingerprint],
       );
       const fileIds = files.rows.map((file) => file.file_id);
       if (!fileIds.length) return null;

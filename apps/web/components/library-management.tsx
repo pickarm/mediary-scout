@@ -5,6 +5,7 @@ import { LibraryScanSettings, type LibraryWorkspaceTab } from "./library-scan-se
 import { LibraryIdentificationResults } from "./library-identification-results";
 import { LibraryOrganization } from "./library-organization";
 import { LibraryOrganizationHistory } from "./library-organization-history";
+import { LibraryOrganizedDriftPanel } from "./library-organized-drift-panel";
 import type { SafeLibraryStorage } from "./library-scan-client";
 import type { NamingTemplateKind } from "@media-track/workflow/library";
 import styles from "./library-management.module.css";
@@ -70,12 +71,20 @@ export function LibraryManagement({ storages, defaultTemplates, settingsHref }: 
       />
 
       {activeTab === "organize" && (
-        <LibraryOrganizationHistory
-          storageId={selection.storageId}
-          refreshTrigger={historyRefreshTrigger}
-          frozen={frozen}
-          onActiveWorkChange={setHasActiveWork}
-        />
+        <>
+          <LibraryOrganizedDriftPanel
+            storageId={selection.storageId}
+            refreshTrigger={historyRefreshTrigger}
+            frozen={frozen}
+            onReorganized={onScanStarted}
+          />
+          <LibraryOrganizationHistory
+            storageId={selection.storageId}
+            refreshTrigger={historyRefreshTrigger}
+            frozen={frozen}
+            onActiveWorkChange={setHasActiveWork}
+          />
+        </>
       )}
 
       {activeTab === "pending" && (

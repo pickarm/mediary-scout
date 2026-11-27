@@ -4,6 +4,7 @@ import { createEpisodeStates, episodeCode, movieAnchorSeason, type EpisodeState,
 import { ExistingMediaImportHookError, LibraryImportConflictError, LibraryStorageScopeError, PostgresLibraryStore } from "./store.js";
 import type { ScanConfiguration, ScanScope, ScanTask } from "./scanner.js";
 import { PostgresScanStore } from "./scan-store.js";
+import { PostgresOrganizedIndexStore } from "./organized-index-store.js";
 import {
   identifyScanFile,
   inspectFilenameForReuse,
@@ -60,6 +61,7 @@ export class IdentificationService {
   readonly identificationStore: PostgresIdentificationStore;
   private readonly scans: PostgresScanStore;
   private readonly library: PostgresLibraryStore;
+  private readonly organizedIndex: PostgresOrganizedIndexStore;
   private readonly tmdb: IdentificationTmdbPort;
   private readonly suggester: IdentitySuggester | undefined;
   private readonly now: () => string;
@@ -71,6 +73,7 @@ export class IdentificationService {
     this.identificationStore = options.identificationStore ?? new PostgresIdentificationStore(options.pool);
     this.scans = options.scanStore ?? new PostgresScanStore(options.pool);
     this.library = options.libraryStore ?? new PostgresLibraryStore(options.pool);
+    this.organizedIndex = new PostgresOrganizedIndexStore(options.pool);
     this.tmdb = {
       search: (query, kind) => networkGate.run(() => options.tmdb.search(query, kind)),
       getTitle: (id, type) => networkGate.run(() => options.tmdb.getTitle(id, type)),
@@ -123,6 +126,9 @@ export class IdentificationService {
 
     try {
       const after = job.afterFileId;
+      if (after === null && !task.configId.startsWith("msg_")) {
+        await this.organizedIndex.reconcileScanTask({ scope, taskId, now: this.now() });
+      }
       const files = await this.identificationStore.listNextUnidentifiedFiles(scope, taskId, after, IDENTIFICATION_BATCH_SIZE + 1);
       const batch = files.slice(0, IDENTIFICATION_BATCH_SIZE);
       if (batch.length > 0) await this.library.ensureSchema();

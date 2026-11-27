@@ -389,15 +389,16 @@ export class PostgresScanStore implements ScanStore {
     });
   }
 
-  async listDirectories(scope: ScanScope, taskId: string, statuses: readonly ScanDirectoryStatus[]): Promise<ScanDirectoryCheckpoint[]> {
+  async listDirectories(scope: ScanScope, taskId: string, statuses: readonly ScanDirectoryStatus[], limit = 1): Promise<ScanDirectoryCheckpoint[]> {
     await this.ensureSchema();
+    const safeLimit = Math.max(1, Math.min(10, Math.trunc(limit)));
     return this.withTransaction(async (client) => {
       await this.assertTaskScope(client, scope, taskId);
       if (statuses.length === 0) return [];
       const result = await client.query<DirectoryRow>(
         "SELECT directory_id,parent_directory_id,path,next_page,next_cursor,status FROM library_scan_directories " +
-          "WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND status=ANY($4::text[]) ORDER BY path,directory_id LIMIT 1",
-        [scope.accountId, scope.connectedStorageId, taskId, statuses],
+          "WHERE account_id=$1 AND connected_storage_id=$2 AND task_id=$3 AND status=ANY($4::text[]) ORDER BY path,directory_id LIMIT $5",
+        [scope.accountId, scope.connectedStorageId, taskId, statuses, safeLimit],
       );
       return result.rows.map(directoryFromRow);
     });
@@ -423,24 +424,59 @@ export class PostgresScanStore implements ScanStore {
       );
       const row = current.rows[0];
       if (!row || Number(row.next_page) !== input.directory.nextPage || (row.status !== "pending" && row.status !== "running")) return false;
-      for (const fact of input.facts) {
+      if (input.facts.length > 0) {
+        const dedupedFacts = [...new Map(input.facts.map((fact) => [fact.fileId, fact])).values()];
+        const fileIds = dedupedFacts.map((fact) => fact.fileId);
+        const parentIds = dedupedFacts.map((fact) => fact.parentDirectoryId);
+        const names = dedupedFacts.map((fact) => fact.name);
+        const isDirs = dedupedFacts.map((fact) => fact.isDirectory);
+        const sizes = dedupedFacts.map((fact) => fact.sizeBytes);
+        const paths = dedupedFacts.map((fact) => fact.path);
+        const modifiedAts = dedupedFacts.map((fact) => fact.modifiedAt);
         await client.query(
-          "INSERT INTO library_scan_files (account_id,connected_storage_id,file_id,parent_directory_id,name,is_directory,size_bytes,path,modified_at) " +
-            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) " +
-            "ON CONFLICT (account_id,connected_storage_id,file_id) DO UPDATE SET parent_directory_id=EXCLUDED.parent_directory_id,name=EXCLUDED.name,is_directory=EXCLUDED.is_directory,size_bytes=EXCLUDED.size_bytes,path=EXCLUDED.path,modified_at=EXCLUDED.modified_at",
-          [input.scope.accountId,input.scope.connectedStorageId,fact.fileId,fact.parentDirectoryId,fact.name,fact.isDirectory,fact.sizeBytes,fact.path,fact.modifiedAt],
+          `INSERT INTO library_scan_files (account_id,connected_storage_id,file_id,parent_directory_id,name,is_directory,size_bytes,path,modified_at)
+           SELECT $1,$2,v.file_id,v.parent_directory_id,v.name,v.is_directory,v.size_bytes,v.path,v.modified_at
+             FROM unnest($3::text[],$4::text[],$5::text[],$6::boolean[],$7::bigint[],$8::text[],$9::text[])
+                  AS v(file_id,parent_directory_id,name,is_directory,size_bytes,path,modified_at)
+           ON CONFLICT (account_id,connected_storage_id,file_id) DO UPDATE SET
+             parent_directory_id=EXCLUDED.parent_directory_id,
+             name=EXCLUDED.name,
+             is_directory=EXCLUDED.is_directory,
+             size_bytes=EXCLUDED.size_bytes,
+             path=EXCLUDED.path,
+             modified_at=EXCLUDED.modified_at`,
+          [input.scope.accountId, input.scope.connectedStorageId, fileIds, parentIds, names, isDirs, sizes, paths, modifiedAts],
         );
         await client.query(
-          "INSERT INTO library_scan_task_files (account_id,connected_storage_id,task_id,file_id,parent_directory_id,name,is_directory,size_bytes,path,modified_at) " +
-            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) " +
-            "ON CONFLICT (account_id,connected_storage_id,task_id,file_id) DO UPDATE SET parent_directory_id=EXCLUDED.parent_directory_id,name=EXCLUDED.name,is_directory=EXCLUDED.is_directory,size_bytes=EXCLUDED.size_bytes,path=EXCLUDED.path,modified_at=EXCLUDED.modified_at",
-          [input.scope.accountId,input.scope.connectedStorageId,input.taskId,fact.fileId,fact.parentDirectoryId,fact.name,fact.isDirectory,fact.sizeBytes,fact.path,fact.modifiedAt],
+          `INSERT INTO library_scan_task_files (account_id,connected_storage_id,task_id,file_id,parent_directory_id,name,is_directory,size_bytes,path,modified_at)
+           SELECT $1,$2,$3,v.file_id,v.parent_directory_id,v.name,v.is_directory,v.size_bytes,v.path,v.modified_at
+             FROM unnest($4::text[],$5::text[],$6::text[],$7::boolean[],$8::bigint[],$9::text[],$10::text[])
+                  AS v(file_id,parent_directory_id,name,is_directory,size_bytes,path,modified_at)
+           ON CONFLICT (account_id,connected_storage_id,task_id,file_id) DO UPDATE SET
+             parent_directory_id=EXCLUDED.parent_directory_id,
+             name=EXCLUDED.name,
+             is_directory=EXCLUDED.is_directory,
+             size_bytes=EXCLUDED.size_bytes,
+             path=EXCLUDED.path,
+             modified_at=EXCLUDED.modified_at`,
+          [input.scope.accountId, input.scope.connectedStorageId, input.taskId, fileIds, parentIds, names, isDirs, sizes, paths, modifiedAts],
         );
       }
-      for (const child of input.childDirectories) {
+      if (input.childDirectories.length > 0) {
+        const dedupedChildren = [...new Map(input.childDirectories.map((child) => [child.directoryId, child])).values()];
         await client.query(
-          "INSERT INTO library_scan_directories (account_id,connected_storage_id,task_id,directory_id,parent_directory_id,path,next_page,status) VALUES ($1,$2,$3,$4,$5,$6,0,'pending') ON CONFLICT (account_id,connected_storage_id,task_id,directory_id) DO NOTHING",
-          [input.scope.accountId,input.scope.connectedStorageId,input.taskId,child.directoryId,child.parentDirectoryId,child.path],
+          `INSERT INTO library_scan_directories (account_id,connected_storage_id,task_id,directory_id,parent_directory_id,path,next_page,status)
+           SELECT $1,$2,$3,v.directory_id,v.parent_directory_id,v.path,0,'pending'
+             FROM unnest($4::text[],$5::text[],$6::text[]) AS v(directory_id,parent_directory_id,path)
+           ON CONFLICT (account_id,connected_storage_id,task_id,directory_id) DO NOTHING`,
+          [
+            input.scope.accountId,
+            input.scope.connectedStorageId,
+            input.taskId,
+            dedupedChildren.map((child) => child.directoryId),
+            dedupedChildren.map((child) => child.parentDirectoryId),
+            dedupedChildren.map((child) => child.path),
+          ],
         );
       }
       const complete = input.nextPage === null;

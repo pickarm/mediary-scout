@@ -1,0 +1,224 @@
+.panel {
+  padding: 18px 22px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, var(--divider));
+  background: radial-gradient(circle at top right, color-mix(in srgb, var(--warning) 8%, transparent), transparent 52%), var(--bg-panel);
+}
+
+.panelQuiet {
+  border-color: var(--divider);
+  background: var(--bg-panel);
+}
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.titleRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.titleRow h2 {
+  font-size: 16.5px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.warnIcon {
+  color: var(--warning);
+}
+
+.indexBadge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 9px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.driftCountBadge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 9px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--warning) 18%, transparent);
+  color: var(--warning);
+}
+
+.sub {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.controls .secondary-button,
+.controls .primary-button {
+  min-height: 32px;
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
+.tabs {
+  display: flex;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.tabBtn {
+  border: 1px solid var(--divider);
+  background: var(--bg-card);
+  color: var(--text-muted);
+  padding: 4px 12px;
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tabBtnActive {
+  color: #101010;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.notice,
+.error {
+  margin-top: 10px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.notice {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+.error {
+  color: var(--negative);
+  background: color-mix(in srgb, var(--negative) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--negative) 26%, transparent);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin-top: 12px;
+}
+
+.row {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--divider);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rowTop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rowTitle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.rowTitle strong {
+  font-size: 13.5px;
+  color: var(--text);
+}
+
+.reasonTag {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  color: var(--warning);
+}
+
+.rowActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.rowActions .secondary-button,
+.rowActions .primary-button {
+  min-height: 29px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+}
+
+.diffBox {
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: var(--bg-base);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  word-break: break-all;
+}
+
+.currentName {
+  color: var(--warning);
+}
+
+.expectedName {
+  color: var(--accent);
+}
+
+.empty {
+  margin-top: 12px;
+  padding: 16px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.pager {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.pager .secondary-button {
+  min-height: 28px;
+  padding: 4px 10px;
+  font-size: 12px;
+}

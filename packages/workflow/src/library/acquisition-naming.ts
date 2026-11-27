@@ -15,6 +15,12 @@ import {
   type NamingTemplateKind,
   type NamingValues,
 } from "./naming.js";
+import {
+  computeNamingTemplatesFingerprint,
+  renderExpectedVideoTarget,
+  type OrganizationIdentity,
+} from "./organizer.js";
+import { PostgresOrganizedIndexStore } from "./organized-index-store.js";
 
 export const ACQUISITION_NAMING_SCHEMA_ADVISORY_LOCK_KEY = 4_011_989_149;
 const ACQUISITION_NAMING_DATABASE = Symbol.for("media-track.acquisition-naming-database");
@@ -123,6 +129,16 @@ export interface AcquisitionNamingDatabase {
     mediaType: MediaTitle["type"];
     tmdbId: number;
   }): Promise<AcquisitionNamingFileIntent[]>;
+  recordOrganizedVideo?(input: {
+    scope: AcquisitionNamingScope;
+    fileId: string;
+    parentDirectoryId: string;
+    targetRootId: string;
+    organizedName: string;
+    organizedRelativePath: string;
+    templateFingerprint: string;
+    identity: OrganizationIdentity;
+  }): Promise<void>;
 }
 
 interface NamingDatabaseAttachment {
@@ -635,6 +651,22 @@ export class PostgresAcquisitionNamingDatabase implements AcquisitionNamingDatab
   async ensureSchema(): Promise<void> {
     this.schemaReady ??= this.installSchema();
     return this.schemaReady;
+  }
+
+  async recordOrganizedVideo(input: {
+    scope: AcquisitionNamingScope;
+    fileId: string;
+    parentDirectoryId: string;
+    targetRootId: string;
+    organizedName: string;
+    organizedRelativePath: string;
+    templateFingerprint: string;
+    identity: OrganizationIdentity;
+  }): Promise<void> {
+    await new PostgresOrganizedIndexStore(this.pool).upsertOrganized({
+      ...input,
+      source: "acquisition",
+    });
   }
 
   private async ensureScanSchema(): Promise<void> {
@@ -1449,6 +1481,45 @@ export function withAcquisitionNaming(input: AcquisitionNamingDecorationInput): 
     return addStableCollisionSuffix(name, fileId);
   };
 
+  const recordOrganizedVideoIndex = async (
+    fileId: string,
+    directoryId: string,
+    targetName: string,
+    codes: readonly string[],
+  ): Promise<void> => {
+    if (!database.recordOrganizedVideo) return;
+    try {
+      const epCode = codes[0];
+      const epParts = kind === "movie" ? null : epCode ? episodePartsFromCode(epCode) : null;
+      const seasonNumber = epParts?.seasonNumber ?? 1;
+      const trackedSeasonId = kind === "movie" ? `${title.id}_movie` : `${title.id}_s${seasonNumber}`;
+      const orgIdentity: OrganizationIdentity = {
+        mediaTitleId: title.id,
+        trackedSeasonId,
+        mediaType: title.type,
+        title: title.title,
+        originalTitle: title.originalTitle || title.title,
+        year: title.year,
+        tmdbId: title.tmdbId,
+        season: seasonNumber,
+        ...(epParts ? { episode: epParts.episodeNumber, episodeCode: epCode } : {}),
+      };
+      const expected = renderExpectedVideoTarget(orgIdentity, targetName, policy.templates);
+      await database.recordOrganizedVideo({
+        scope,
+        fileId,
+        parentDirectoryId: directoryId,
+        targetRootId: policy.targetRootId,
+        organizedName: targetName,
+        organizedRelativePath: `${expected.relativeDirectory}/${targetName}`,
+        templateFingerprint: computeNamingTemplatesFingerprint(policy.templates),
+        identity: orgIdentity,
+      });
+    } catch {
+      // 索引写入失败不阻断已成功核验的入库改名主流程
+    }
+  };
+
   const applyOneFile = async (
     directoryId: string,
     entry: MaterializedFile,
@@ -1523,6 +1594,9 @@ export function withAcquisitionNaming(input: AcquisitionNamingDecorationInput): 
     if (currentName === persistedTargetName) {
       if (entry.kind === "video") rememberVideoTarget(codes[0]!, currentPath.path, persistedTargetName);
       await database.markFileVerified(identity, directoryId);
+      if (entry.kind === "video") {
+        await recordOrganizedVideoIndex(entry.fileId, directoryId, persistedTargetName, codes);
+      }
       return;
     }
     let writeError: unknown;
@@ -1563,7 +1637,10 @@ export function withAcquisitionNaming(input: AcquisitionNamingDecorationInput): 
       );
     }
     await database.markFileVerified(identity, directoryId);
-    if (entry.kind === "video") rememberVideoTarget(codes[0]!, currentPath.path, persistedTargetName);
+    if (entry.kind === "video") {
+      rememberVideoTarget(codes[0]!, currentPath.path, persistedTargetName);
+      await recordOrganizedVideoIndex(entry.fileId, directoryId, persistedTargetName, codes);
+    }
   };
 
   const applyMaterializedFiles = async (

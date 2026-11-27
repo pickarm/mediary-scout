@@ -935,6 +935,7 @@ export async function initializeNativeSchema(connectionString) {
     await new library.PostgresPreparationStore(pool).ensureSchema();
     await new library.PostgresAutoOrganizationStore(pool).ensureSchema();
     await new library.PostgresAcquisitionNamingDatabase(pool).ensureSchema();
+    await new library.PostgresOrganizedIndexStore(pool).ensureSchema();
   } finally {
     await pool.end();
   }

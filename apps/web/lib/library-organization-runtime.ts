@@ -10,6 +10,7 @@ import {
   PostgresAutoOrganizationStore,
   PostgresIdentificationStore,
   PostgresOrganizationStore,
+  PostgresOrganizedIndexStore,
   PostgresLibraryStore,
   PostgresScanStore,
   type OrganizationPlan,
@@ -40,6 +41,7 @@ interface OrganizationRuntimeOptions {
 
 export class OrganizationRuntimeService {
   readonly store: PostgresOrganizationStore;
+  readonly organizedIndexStore: PostgresOrganizedIndexStore;
   private readonly libraryStore: PostgresLibraryStore;
 
   constructor(
@@ -51,6 +53,7 @@ export class OrganizationRuntimeService {
     private readonly primeSourceAncestors = false,
   ) {
     this.store = new PostgresOrganizationStore(pool);
+    this.organizedIndexStore = new PostgresOrganizedIndexStore(pool);
     this.libraryStore = new PostgresLibraryStore(pool);
   }
 
@@ -90,10 +93,13 @@ export class OrganizationRuntimeService {
       });
       await this.assertWriteFence();
       await this.syncVerifiedLocations(execution.plan, storage);
+      const templateFingerprint = await this.store.getTaskTemplateFingerprint(this.scope, taskId);
+      const latestPlan = (await this.store.get(this.scope, taskId, operationKey)) ?? execution.plan;
+      await this.recordVerifiedIndexEntries(latestPlan, templateFingerprint);
       if (execution.circuitBreaker) {
         await this.markAutoOrganizationHalted(taskId, operationKey, execution.circuitBreaker);
       }
-      return (await this.store.get(this.scope,taskId,operationKey)) ?? execution.plan;
+      return latestPlan;
     });
   }
 
@@ -157,6 +163,25 @@ export class OrganizationRuntimeService {
 
   private async storageFor(sourceRoots: readonly string[], targetRoots: readonly string[]): Promise<OrganizationStorage> {
     return this.options.storageFactory([...new Set([...sourceRoots, ...targetRoots])]);
+  }
+
+  private async recordVerifiedIndexEntries(plan: OrganizationPlan, templateFingerprint: string): Promise<void> {
+    const now = new Date().toISOString();
+    for (const op of plan.operations) {
+      if (op.status !== "verified" || op.fileId !== op.pairedFileId || !op.targetParentId) continue;
+      await this.organizedIndexStore.upsertOrganized({
+        scope: this.scope,
+        fileId: op.fileId,
+        parentDirectoryId: op.targetParentId,
+        targetRootId: op.targetRootId,
+        organizedName: op.targetName,
+        organizedRelativePath: op.targetRelativePath,
+        templateFingerprint,
+        source: "organization",
+        identity: op.identity,
+        now,
+      });
+    }
   }
 
   /** 连续失败触发熔断时同步标记对应自动整理检查点，避免后台自动续批重试。 */
