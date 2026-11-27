@@ -68,6 +68,17 @@ describe.skipIf(!adminURL)("F08c PostgreSQL runtime recovery with a fake cloud",
       expect(cloud.writeCount).toBe(3);
       expect(await service.store.listVerifiedLocationPlanKeys(scope,10)).toEqual([]);
 
+      expect(await service.store.getTaskOrganizeConcurrency(scope, "task")).toBe(3);
+      const historyPage = await service.store.listOperationHistory(scope, { page: 1, pageSize: 20, status: "verified" });
+      expect(historyPage).toMatchObject({
+        page: 1,
+        pageSize: 20,
+        total: 1,
+        totalPages: 1,
+        counts: { all: 1, running: 0, planned: 0, verified: 1, failed: 0 },
+      });
+      expect(historyPage.items[0]?.fileId).toBe("file");
+
       fence.failNextAssertion=true;
       await expect(service.executeSlice("task",plan.operationKey)).rejects.toThrow("FENCE_LOST");
       expect(cloud.writeCount).toBe(3);

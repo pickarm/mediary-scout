@@ -259,6 +259,8 @@ export function resolveAcquisitionNamingPolicyFromConfigurations(input: {
       typeof candidate.configId === "string"
         ? candidate.configId
         : nonEmpty(configuration.configId, "configId");
+    // 消息机器人直转临时扫库配置自带默认模板，不应与用户在库管理自定义的新片命名模板互相冲突。
+    if (configId.startsWith("msg_")) continue;
     matching.push({
       configId,
       templates: effectiveTemplates(configuration.templates, input.kind, configId),

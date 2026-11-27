@@ -44,25 +44,22 @@ browserDescribe("automatic organization configuration", () => {
       await checkbox.waitFor();
       await expect.poll(() => checkbox.isChecked()).toBe(initialValue);
       // Saving a different field must preserve the previously loaded automatic organization setting.
-      await page.getByRole("radio", { name: "电影", exact: true }).check();
-      await page.getByRole("button", { name: "保存配置", exact: true }).click();
+      await page.getByRole("radio", { name: "仅电影", exact: true }).check();
+      await page.getByRole("button", { name: "保存设置", exact: true }).click();
       await expect.poll(() => posts.length).toBe(1);
       expect(posts[0]).toBe(initialValue);
       await expect.poll(() => checkbox.isEnabled()).toBe(true);
       await checkbox.setChecked(!initialValue);
-      await page.getByText("有未保存的配置或模板修改；整理预览只使用已保存的配置。", { exact: true }).waitFor();
-      await page.getByRole("button", { name: "保存配置", exact: true }).click();
+      await page.getByText("设置或命名规则尚未保存；点击「保存设置」或「开始单次整理」即可生效。", { exact: true }).waitFor();
+      await page.getByRole("button", { name: "保存设置", exact: true }).click();
       await expect.poll(() => posts.length).toBe(2);
       expect(posts[1]).toBe(!initialValue);
       await expect.poll(() => checkbox.isEnabled()).toBe(true);
       await page.reload();
       await expect.poll(() => checkbox.isChecked()).toBe(!initialValue);
       // The deterministic frozen fixture must exercise a disabled editor.
-      const storages = page.getByRole("combobox", { name: "当前网盘" });
-      const frozenId = await storages.locator("option").evaluateAll((options) =>
-        options.find((option) => option.textContent?.includes("已冻结"))?.getAttribute("value") ?? null);
-      expect(frozenId).not.toBeNull();
-      await storages.selectOption(frozenId!);
+      const storageGroup = page.getByRole("group", { name: "当前网盘" });
+      await storageGroup.getByRole("button", { name: /已冻结/ }).click();
       await expect.poll(() => checkbox.isDisabled()).toBe(true);
       expect(posts).toHaveLength(2);
     } finally {

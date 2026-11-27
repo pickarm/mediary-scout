@@ -1,22 +1,23 @@
 .root { display: flex; flex-direction: column; gap: 16px; max-width: 1240px; }
-.panel { padding: 22px; border-radius: 14px; border: 1px solid var(--divider); }
-.panelHeader, .pickerHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+.panel { padding: 20px 22px; border-radius: 14px; border: 1px solid var(--divider); }
+.panelHeader, .pickerHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .panelHeader h2, .pickerHeader h2 { font-size: 18px; font-weight: 700; }
 .panelHeader p, .pickerHeader p { margin-top: 4px; font-size: 12.5px; color: var(--text-muted); }
 
-/* 头部网盘切换与配置工具栏 */
-.toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; }
-.storageSwitchGroup { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+/* 头部纯胶囊网盘切换 */
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
 .storagePills { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px; border-radius: var(--radius-pill); background: var(--bg-base); border: 1px solid var(--divider); }
-.storagePill { border: 0; background: transparent; color: var(--text-muted); padding: 7px 14px; border-radius: var(--radius-pill); font-size: 12.5px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 7px; transition: all .15s ease; }
+.storagePill { border: 0; background: transparent; color: var(--text-muted); padding: 7px 15px; border-radius: var(--radius-pill); font-size: 12.5px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 7px; transition: all .15s ease; }
 .storagePill:hover { color: var(--text); background: var(--bg-raised); }
 .storagePillActive { background: var(--bg-card); color: var(--text); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent); }
 .pillFrozen { font-size: 10px; padding: 1px 6px; border-radius: var(--radius-pill); background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
 
-.storageField { display: flex; flex-direction: column; gap: 5px; min-width: 190px; color: var(--text-muted); font-size: 12px; }
-.storageField select { min-height: 38px; padding: 0 12px; color: var(--text); background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; font: inherit; }
-.storageField select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
-.storageField select:disabled { opacity: .55; }
+.inlineSelectField { display: inline-flex; align-items: center; gap: 8px; padding: 4px 10px 4px 12px; border-radius: var(--radius-pill); background: var(--bg-card); border: 1px solid var(--border); color: var(--text-muted); font-size: 12px; }
+.inlineSelectField span { font-weight: 600; white-space: nowrap; }
+.inlineSelectField select { min-height: 28px; padding: 0 6px; color: var(--text); background: transparent; border: 0; font: inherit; font-weight: 700; cursor: pointer; }
+.inlineSelectField select option { background: var(--bg-card); color: var(--text); }
+.inlineSelectField select:focus { outline: none; }
+.inlineSelectField select:disabled { opacity: .55; cursor: default; }
 
 /* 核心状态条：入库自动整理 */
 .autoHero {
@@ -25,7 +26,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 18px 20px;
+  padding: 16px 18px;
   border-radius: 14px;
   background: radial-gradient(circle at top right, color-mix(in srgb, var(--accent) 14%, transparent), transparent 55%), var(--bg-raised);
   border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--divider));
@@ -35,7 +36,7 @@
   background: radial-gradient(circle at top right, color-mix(in srgb, var(--warning) 10%, transparent), transparent 55%), var(--bg-raised);
   border-color: color-mix(in srgb, var(--warning) 35%, var(--divider));
 }
-.heroLeft { display: flex; align-items: flex-start; gap: 13px; flex: 1; min-width: 260px; }
+.heroLeft { display: flex; align-items: flex-start; gap: 13px; flex: 1; min-width: 240px; }
 .heroIcon { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; flex-shrink: 0; background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
 .autoHeroPaused .heroIcon { background: color-mix(in srgb, var(--warning) 16%, transparent); color: var(--warning); }
 .heroTitle { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 15px; font-weight: 700; }
@@ -47,8 +48,8 @@
 .switchCard {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  padding: 7px 12px 7px 14px;
+  gap: 9px;
+  padding: 6px 12px 6px 14px;
   border-radius: var(--radius-pill);
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -58,80 +59,110 @@
 .switchCard span { font-size: 12.5px; font-weight: 700; }
 .switchCard input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
 
-.notice, .error { display: flex; align-items: center; gap: 8px; padding: 11px 14px; border-radius: 9px; font-size: 13px; }
+.notice, .successNotice, .error { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 11px 14px; border-radius: 9px; font-size: 13px; }
 .notice { color: var(--warning); background: color-mix(in srgb, var(--warning) 10%, transparent); border: 1px solid color-mix(in srgb, var(--warning) 24%, transparent); }
+.successNotice { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent); }
+.successNotice span { flex: 1; }
 .error { color: var(--negative); background: color-mix(in srgb, var(--negative) 10%, transparent); border: 1px solid color-mix(in srgb, var(--negative) 24%, transparent); }
 .error span { flex: 1; }
 .loading { display: flex; align-items: center; gap: 9px; padding: 18px 4px; color: var(--text-muted); }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.configSelectRow { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
-.configSelectRow .storageField { min-width: 210px; flex: 1; max-width: 340px; }
+/* 勾选整理目录区 */
+.headerExtraActions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.headerExtraActions .secondary-button,
+.dirCheckOps .secondary-button,
+.namingCompactRight .secondary-button { min-height: 32px; padding: 5px 12px; font-size: 12px; }
 
-/* 目录流向映射卡片 */
-.dirFlowGrid {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto minmax(260px, 1.3fr);
-  gap: 16px;
-  align-items: center;
-  margin-top: 14px;
-  padding: 16px;
-  border-radius: 10px;
-  background: var(--bg-card);
-  border: 1px solid var(--divider);
-}
-.dirNode { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.dirNodeLabel { font-size: 11.5px; font-weight: 700; color: var(--text-faint); }
-.sourceList { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; min-height: 36px; }
-.directoryChip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 6px 8px 6px 10px; color: var(--text); background: var(--bg-raised); border: 1px solid var(--border); border-radius: 8px; font-size: 12px; }
-.directoryChip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.directoryChip button, .clearTarget { display: inline-grid; place-items: center; padding: 1px; color: var(--text-muted); background: transparent; border: 0; cursor: pointer; }
-.directoryChip button:hover, .clearTarget:hover { color: var(--negative); }
-.directoryChip button:disabled, .clearTarget:disabled { opacity: .4; cursor: default; }
-
-.flowBridge { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 0 6px; }
-.flowArrowPill { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: var(--radius-pill); background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); font-size: 12px; font-weight: 700; border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent); white-space: nowrap; }
-.mediaKindRow { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
-.mediaKindPill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: var(--radius-pill); background: var(--bg-raised); border: 1px solid var(--divider); font-size: 11.5px; color: var(--text-soft); cursor: pointer; }
+.mediaKindRow { display: flex; flex-wrap: wrap; gap: 6px; }
+.mediaKindPill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-pill); background: var(--bg-raised); border: 1px solid var(--divider); font-size: 11.5px; color: var(--text-soft); cursor: pointer; }
 .mediaKindPill input { accent-color: var(--accent); }
-.flowCaps { display: flex; flex-wrap: wrap; justify-content: center; gap: 5px; max-width: 240px; }
-.flowCaps span { font-size: 11px; color: var(--text-muted); background: var(--bg-raised); border: 1px solid var(--divider); padding: 2px 7px; border-radius: 5px; }
 
-.targetChipCard { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 9px; padding: 9px 11px; border-radius: 9px; background: var(--bg-raised); border: 1px solid var(--border); }
-.targetTag { font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 6px; background: color-mix(in srgb, var(--info) 16%, transparent); color: var(--info); }
-.targetTagTv { background: color-mix(in srgb, #c084fc 16%, transparent); color: #c084fc; }
-.targetValue { overflow: hidden; color: var(--text); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
-
-.hint { color: var(--text-faint); font-size: 12px; }
-.actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
-
-/* 命名工坊 */
-.workshopFieldset { margin: 0; padding: 0; border: 0; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
-.workshopHead { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px; }
-.workshopTitle { padding: 0; font-size: 17px; font-weight: 700; }
-.presetsGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-.presetCard {
-  background: var(--bg-card);
-  border: 1px solid var(--divider);
-  border-radius: 10px;
-  padding: 13px;
-  text-align: left;
-  cursor: pointer;
+.directoryChecklist {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  transition: all .15s ease;
+  gap: 8px;
+  margin-top: 14px;
 }
-.presetCard:hover { border-color: var(--border-soft); background: var(--bg-card-alt); }
-.presetActive { border-color: var(--accent); background: linear-gradient(160deg, color-mix(in srgb, var(--accent) 12%, transparent), var(--bg-card)); }
-.presetTop { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-.presetTop strong { font-size: 13.5px; }
-.presetBadge { font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: var(--radius-pill); background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
-.presetCard p { margin: 0; font-size: 11.5px; color: var(--text-muted); }
-.presetSample { display: block; margin-top: 2px; padding: 6px 8px; border-radius: 6px; background: var(--bg-base); border: 1px solid var(--divider); font-size: 11px; color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.workshopSplit { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr); gap: 16px; align-items: start; }
+.dirCheckRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 13px;
+  border-radius: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--divider);
+}
+
+.dirCheckMain {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 220px;
+  cursor: pointer;
+}
+.dirCheckMain input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.dirCheckPath {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text);
+}
+.dirCheckOps {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.targetTag { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 6px; background: color-mix(in srgb, var(--info) 16%, transparent); color: var(--info); white-space: nowrap; }
+.targetTagTv { background: color-mix(in srgb, #c084fc 16%, transparent); color: #c084fc; }
+.targetTagExtra { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.clearTarget { display: inline-grid; place-items: center; padding: 4px; color: var(--text-muted); background: transparent; border: 0; cursor: pointer; }
+.clearTarget:hover { color: var(--negative); }
+.clearTarget:disabled { opacity: .4; cursor: default; }
+
+.dividerLine {
+  height: 1px;
+  background: var(--divider);
+  margin: 18px 0 16px;
+}
+
+/* 极简命名方案条与可展开工坊 */
+.workshopFieldset { margin: 0; padding: 0; border: 0; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.namingCompactBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+.namingCompactLeft { display: flex; flex-direction: column; gap: 5px; flex: 1; min-width: 240px; }
+.namingCompactRight { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.workshopTitle { padding: 0; font-size: 15px; font-weight: 700; }
+.compactSample {
+  display: inline-block;
+  padding: 5px 9px;
+  border-radius: 7px;
+  background: var(--bg-base);
+  border: 1px solid var(--divider);
+  font-size: 11.5px;
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+
+.workshopSplit { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr); gap: 16px; align-items: start; margin-top: 4px; }
 .templateColumn { display: flex; flex-direction: column; gap: 11px; min-width: 0; }
 .namingField { display: grid; gap: 5px; min-width: 0; color: var(--text-soft); font-size: 12px; }
 .namingLabel { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 700; }
@@ -181,6 +212,8 @@
 .afterCode { color: var(--accent); }
 .subCode { color: var(--info); font-size: 11.5px; }
 
+.hint { color: var(--text-faint); font-size: 12px; }
+
 /* 扫描任务区 */
 .taskList { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
 .task { padding: 15px; border: 1px solid var(--divider); border-radius: 10px; background: var(--bg-card-alt); }
@@ -197,7 +230,7 @@
 .taskStats { display: flex; flex-wrap: wrap; gap: 18px; margin: 11px 0 0 17px; color: var(--text-muted); font-size: 12px; }
 .taskStats b { color: var(--text); }
 .taskActions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin: 12px 0 0 17px; }
-.taskActions .secondary-button, .configSelectRow .secondary-button, .directoryRow .secondary-button, .pickerFooter .secondary-button, .error .secondary-button, .panelHeader > .secondary-button, .root > .panel > .secondary-button { min-height: 31px; padding: 5px 12px; font-size: 11.5px; }
+.taskActions .secondary-button, .directoryRow .secondary-button, .pickerFooter .secondary-button, .error .secondary-button, .panelHeader > .secondary-button, .root > .panel > .secondary-button { min-height: 31px; padding: 5px 12px; font-size: 11.5px; }
 .busyLabel { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 11px; }
 .failures { margin: 10px 0 0 17px; color: var(--warning); font-size: 12px; }
 .failures summary { cursor: pointer; }
@@ -227,17 +260,11 @@
 .pickerFooter { display: flex; justify-content: flex-end; }
 
 @media (max-width: 980px) {
-  .presetsGrid { grid-template-columns: 1fr; }
   .workshopSplit { grid-template-columns: 1fr; }
-  .dirFlowGrid { grid-template-columns: 1fr; }
 }
 @media (max-width: 720px) {
   .panel { padding: 16px; }
   .panelHeader { flex-direction: column; }
-  .storageField { width: 100%; }
-  .configSelectRow { align-items: stretch; flex-direction: column; }
-  .actions { justify-content: stretch; }
-  .actions > button { flex: 1; justify-content: center; }
   .taskStats { gap: 8px 14px; }
   .directoryRow { align-items: flex-start; }
 }

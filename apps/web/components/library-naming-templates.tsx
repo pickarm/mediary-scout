@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import {
   DEFAULT_NAMING_TEMPLATES,
   NAMING_TEMPLATE_PRESETS,
@@ -130,18 +131,24 @@ export function LibraryNamingTemplates({
   movieRootLabel?: string;
   tvRootLabel?: string;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const [focusedKind, setFocusedKind] = useState<NamingTemplateKind>("movieFile");
   const [scenarioId, setScenarioId] = useState<string>("dune");
   const [mediaType, setMediaType] = useState<"movie" | "tv">("movie");
   const [rawFilename, setRawFilename] = useState<string>(SCENARIOS[0]!.filename);
   const inputRefs = useRef<Partial<Record<NamingTemplateKind, HTMLInputElement | null>>>({});
 
-  const activePresetId = useMemo(() => {
-    const matched = NAMING_TEMPLATE_PRESETS.find((preset) =>
+  const activePreset = useMemo(() => {
+    return NAMING_TEMPLATE_PRESETS.find((preset) =>
       TEMPLATE_ITEMS.every(({ kind }) => preset.templates[kind] === value[kind]),
-    );
-    return matched?.id ?? null;
+    ) ?? null;
   }, [value]);
+
+  const hasInvalidTemplate = useMemo(
+    () => TEMPLATE_ITEMS.some(({ kind }) => validateNamingTemplate(value[kind]).length > 0),
+    [value],
+  );
+  const showEditor = expanded || hasInvalidTemplate;
 
   const activeScenario = SCENARIOS.find((item) => item.id === scenarioId) ?? SCENARIOS[0]!;
 
@@ -168,6 +175,10 @@ export function LibraryNamingTemplates({
     const tvDirRes = previewNamingTemplate(value.tvDirectory, values);
     const seasonDirRes = previewNamingTemplate(value.seasonDirectory, values);
     const episodeFileRes = previewNamingTemplate(value.episodeFile, values);
+
+    const compactSample = movieDirRes.ok && movieFileRes.ok
+      ? `${movieDirRes.path}/${movieFileRes.path}`
+      : (activePreset?.sample ?? DEFAULT_NAMING_TEMPLATES.movieFile);
 
     let fullAfter = "";
     let subtitleAfter = "";
@@ -207,8 +218,13 @@ export function LibraryNamingTemplates({
       tech.releaseGroup ? { text: `组:${tech.releaseGroup}`, tone: "group" as const } : null,
     ].filter((item): item is NonNullable<typeof item> => item !== null);
 
-    return { effectiveFilename, fullAfter, subtitleAfter, badges };
-  }, [activeScenario, mediaType, movieRootLabel, rawFilename, tvRootLabel, value]);
+    return { effectiveFilename, fullAfter, subtitleAfter, badges, compactSample };
+  }, [activePreset?.sample, activeScenario, mediaType, movieRootLabel, rawFilename, tvRootLabel, value]);
+
+  const selectPreset = (presetId: string) => {
+    const matched = NAMING_TEMPLATE_PRESETS.find((preset) => preset.id === presetId);
+    if (matched) onChange({ ...matched.templates });
+  };
 
   const insertToken = (token: string) => {
     if (disabled) return;
@@ -230,170 +246,170 @@ export function LibraryNamingTemplates({
 
   return (
     <fieldset className={styles.workshopFieldset}>
-      <div className={styles.workshopHead}>
-        <div>
-          <legend className={styles.workshopTitle}>完美命名工坊</legend>
+      <div className={styles.namingCompactBar}>
+        <div className={styles.namingCompactLeft}>
+          <legend className={styles.workshopTitle}>命名规则</legend>
           <p className={styles.hint}>
-            默认采用参考 MoviePilot 最佳实践的「完美全息版」规则；支持 <code>{"{{...}}"}</code> 可选片段，缺失画质或压制组时自动隐藏分隔符。
+            {activePreset ? `${activePreset.name}：${activePreset.description}` : "已自定义命名模板（可随时下拉切回预设方案）"}
           </p>
+          <code className={styles.compactSample}>效果示例：{sandbox.compactSample}</code>
         </div>
-        {!activePresetId && (
+        <div className={styles.namingCompactRight}>
+          <label className={styles.inlineSelectField}>
+            <span>模板预设</span>
+            <select
+              aria-label="命名模板预设"
+              value={activePreset?.id ?? "custom"}
+              onChange={(event) => selectPreset(event.target.value)}
+              disabled={disabled}
+            >
+              {NAMING_TEMPLATE_PRESETS.map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.id === "perfect" ? `${preset.name}（推荐默认）` : preset.name}
+                </option>
+              ))}
+              {!activePreset && <option value="custom" disabled>自定义模板</option>}
+            </select>
+          </label>
           <button
             type="button"
             className="secondary-button"
-            onClick={() => onChange({ ...DEFAULT_NAMING_TEMPLATES })}
-            disabled={disabled}
+            onClick={() => setExpanded((current) => !current)}
+            aria-expanded={showEditor}
           >
-            恢复默认全息版
+            {showEditor ? <><ChevronUp size={14} />收起自定义</> : <><ChevronDown size={14} />自定义与预览</>}
           </button>
-        )}
+        </div>
       </div>
 
-      <div className={styles.presetsGrid} role="group" aria-label="命名预设模板">
-        {NAMING_TEMPLATE_PRESETS.map((preset) => (
-          <button
-            key={preset.id}
-            type="button"
-            className={`${styles.presetCard} ${activePresetId === preset.id ? styles.presetActive : ""}`}
-            onClick={() => onChange({ ...preset.templates })}
-            disabled={disabled}
-          >
-            <div className={styles.presetTop}>
-              <strong>{preset.name}</strong>
-              <span className={styles.presetBadge}>{preset.badge}</span>
-            </div>
-            <p>{preset.description}</p>
-            <code className={styles.presetSample}>{preset.sample}</code>
-          </button>
-        ))}
-      </div>
-
-      <div className={styles.workshopSplit}>
-        <div className={styles.templateColumn}>
-          {TEMPLATE_ITEMS.map(({ kind, label }) => {
-            const errors = validateNamingTemplate(value[kind]);
-            const dirty = value[kind] !== savedValue[kind];
-            return (
-              <label className={styles.namingField} key={kind}>
-                <span className={styles.namingLabel}>
-                  <span>
-                    {label}
-                    {dirty && <em className={styles.namingDirty}>未保存</em>}
+      {showEditor && (
+        <div className={styles.workshopSplit}>
+          <div className={styles.templateColumn}>
+            {TEMPLATE_ITEMS.map(({ kind, label }) => {
+              const errors = validateNamingTemplate(value[kind]);
+              const dirty = value[kind] !== savedValue[kind];
+              return (
+                <label className={styles.namingField} key={kind}>
+                  <span className={styles.namingLabel}>
+                    <span>
+                      {label}
+                      {dirty && <em className={styles.namingDirty}>未保存</em>}
+                    </span>
+                    <span className={errors.length ? styles.tplStatusErr : styles.tplStatusOk}>
+                      {errors.length ? `✕ ${errors[0]}` : "✓ 语法有效"}
+                    </span>
                   </span>
-                  <span className={errors.length ? styles.tplStatusErr : styles.tplStatusOk}>
-                    {errors.length ? `✕ ${errors[0]}` : "✓ 语法有效"}
-                  </span>
-                </span>
-                <input
-                  ref={(el) => {
-                    inputRefs.current[kind] = el;
-                  }}
-                  aria-label={`${label}模板`}
-                  value={value[kind]}
-                  onFocus={() => setFocusedKind(kind)}
-                  onChange={(event) => onChange({ ...value, [kind]: event.target.value })}
-                  disabled={disabled}
-                  aria-invalid={errors.length > 0}
-                />
-              </label>
-            );
-          })}
+                  <input
+                    ref={(el) => {
+                      inputRefs.current[kind] = el;
+                    }}
+                    aria-label={`${label}模板`}
+                    value={value[kind]}
+                    onFocus={() => setFocusedKind(kind)}
+                    onChange={(event) => onChange({ ...value, [kind]: event.target.value })}
+                    disabled={disabled}
+                    aria-invalid={errors.length > 0}
+                  />
+                </label>
+              );
+            })}
 
-          <div className={styles.chipDrawer}>
-            <div className={styles.chipDrawerHead}>
-              <strong>点击插入变量（插入当前聚焦输入框）</strong>
-              <span>支持 <code>{"{{前缀{字段}}}"}</code> 空值自动折叠</span>
+            <div className={styles.chipDrawer}>
+              <div className={styles.chipDrawerHead}>
+                <strong>点击插入变量（插入当前聚焦输入框）</strong>
+                <span>支持 <code>{"{{前缀{字段}}}"}</code> 空值自动折叠</span>
+              </div>
+              <div className={styles.chipList}>
+                {TEMPLATE_TOKENS.map((item) => (
+                  <button
+                    key={item.token}
+                    type="button"
+                    className={styles.tokenChip}
+                    onClick={() => insertToken(item.token)}
+                    disabled={disabled}
+                  >
+                    <span>{item.label}</span>
+                    <code>{item.token}</code>
+                  </button>
+                ))}
+              </div>
             </div>
-            <div className={styles.chipList}>
-              {TEMPLATE_TOKENS.map((item) => (
+          </div>
+
+          <div className={styles.sandboxCard}>
+            <div className={styles.sandboxHeader}>
+              <strong>实时命名预览沙盒</strong>
+              <span>切换典型样本或粘贴任意原文件名，实时查看提取徽章与最终入库路径</span>
+            </div>
+
+            <div className={styles.scenarioPills} role="group" aria-label="预览样本场景">
+              {SCENARIOS.map((sc) => (
                 <button
-                  key={item.token}
+                  key={sc.id}
                   type="button"
-                  className={styles.tokenChip}
-                  onClick={() => insertToken(item.token)}
-                  disabled={disabled}
+                  className={`${styles.scenarioPill} ${scenarioId === sc.id ? styles.scenarioActive : ""}`}
+                  onClick={() => {
+                    setScenarioId(sc.id);
+                    setMediaType(sc.mediaType);
+                    setRawFilename(sc.filename);
+                  }}
                 >
-                  <span>{item.label}</span>
-                  <code>{item.token}</code>
+                  {sc.label}
                 </button>
               ))}
             </div>
-          </div>
-        </div>
 
-        <div className={styles.sandboxCard}>
-          <div className={styles.sandboxHeader}>
-            <strong>实时命名预览沙盒</strong>
-            <span>切换典型样本或粘贴任意原文件名，实时查看提取徽章与最终入库路径</span>
-          </div>
-
-          <div className={styles.scenarioPills} role="group" aria-label="预览样本场景">
-            {SCENARIOS.map((sc) => (
-              <button
-                key={sc.id}
-                type="button"
-                className={`${styles.scenarioPill} ${scenarioId === sc.id ? styles.scenarioActive : ""}`}
-                onClick={() => {
-                  setScenarioId(sc.id);
-                  setMediaType(sc.mediaType);
-                  setRawFilename(sc.filename);
-                }}
+            <div className={styles.sandboxInputRow}>
+              <select
+                aria-label="预览媒体类型"
+                value={mediaType}
+                onChange={(event) => setMediaType(event.target.value as "movie" | "tv")}
               >
-                {sc.label}
-              </button>
-            ))}
-          </div>
+                <option value="movie">电影</option>
+                <option value="tv">剧集</option>
+              </select>
+              <input
+                aria-label="测试原文件名"
+                value={rawFilename}
+                onChange={(event) => setRawFilename(event.target.value)}
+                placeholder="粘贴带清晰度、杜比、全景声、压制组的文件名..."
+              />
+            </div>
 
-          <div className={styles.sandboxInputRow}>
-            <select
-              aria-label="预览媒体类型"
-              value={mediaType}
-              onChange={(event) => setMediaType(event.target.value as "movie" | "tv")}
-            >
-              <option value="movie">电影</option>
-              <option value="tv">剧集</option>
-            </select>
-            <input
-              aria-label="测试原文件名"
-              value={rawFilename}
-              onChange={(event) => setRawFilename(event.target.value)}
-              placeholder="粘贴带清晰度、杜比、全景声、压制组的文件名..."
-            />
-          </div>
+            <div className={styles.techBadgesWrap}>
+              <small>自动识别技术特征</small>
+              <div className={styles.techBadgesBar}>
+                {sandbox.badges.length > 0 ? (
+                  sandbox.badges.map((badge) => (
+                    <span key={`${badge.tone}-${badge.text}`} className={`${styles.techBadge} ${styles[`tb_${badge.tone}`]}`}>
+                      {badge.text}
+                    </span>
+                  ))
+                ) : (
+                  <span className={styles.tbEmpty}>未检测到画质/杜比/压制组标签 — 可选分隔符已自动隐藏</span>
+                )}
+              </div>
+            </div>
 
-          <div className={styles.techBadgesWrap}>
-            <small>自动识别技术特征</small>
-            <div className={styles.techBadgesBar}>
-              {sandbox.badges.length > 0 ? (
-                sandbox.badges.map((badge) => (
-                  <span key={`${badge.tone}-${badge.text}`} className={`${styles.techBadge} ${styles[`tb_${badge.tone}`]}`}>
-                    {badge.text}
-                  </span>
-                ))
-              ) : (
-                <span className={styles.tbEmpty}>未检测到画质/杜比/压制组标签 — 可选分隔符已自动隐藏</span>
+            <div className={styles.sandboxResultBox}>
+              <div>
+                <span>原文件</span>
+                <code className={styles.beforeCode}>{sandbox.effectiveFilename}</code>
+              </div>
+              <div>
+                <span>整理后完整路径</span>
+                <code className={styles.afterCode}>{sandbox.fullAfter}</code>
+              </div>
+              {sandbox.subtitleAfter && (
+                <div>
+                  <span>随行字幕联动示例</span>
+                  <code className={styles.subCode}>{sandbox.subtitleAfter}</code>
+                </div>
               )}
             </div>
           </div>
-
-          <div className={styles.sandboxResultBox}>
-            <div>
-              <span>原文件</span>
-              <code className={styles.beforeCode}>{sandbox.effectiveFilename}</code>
-            </div>
-            <div>
-              <span>整理后完整路径</span>
-              <code className={styles.afterCode}>{sandbox.fullAfter}</code>
-            </div>
-            {sandbox.subtitleAfter && (
-              <div>
-                <span>随行字幕联动示例</span>
-                <code className={styles.subCode}>{sandbox.subtitleAfter}</code>
-              </div>
-            )}
-          </div>
         </div>
-      </div>
+      )}
     </fieldset>
   );
 }

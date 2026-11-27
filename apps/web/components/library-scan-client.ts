@@ -4,6 +4,8 @@ export interface SafeLibraryStorage {
   provider: "pan115" | "quark" | "uc" | "guangya" | "tianyi" | "pan123";
   status: "active" | "frozen";
   rootDirectoryId: string;
+  defaultMovieDirectory?: LibraryScanRoot | null;
+  defaultTvDirectory?: LibraryScanRoot | null;
 }
 
 export interface LibraryDirectoryChoice {
@@ -30,6 +32,7 @@ export interface LibraryScanConfiguration {
   dailyScheduleTime: string | null;
   dailyScheduleTimezone: "Asia/Shanghai";
   autoOrganize: boolean;
+  organizeConcurrency?: number;
   autoAcquire: false;
   templates: Readonly<Record<string, string>>;
 }
@@ -51,7 +54,8 @@ export interface LibraryScanTask {
 export interface LibraryScanConfigPayload {
   configId?: string;
   storageId: string;
-  sourceRoots: readonly ({ directoryId: string; selectionToken?: string })[];
+  sourceRoots?: readonly ({ directoryId: string; selectionToken?: string })[];
+  useDefaultLibraryDirectories?: boolean;
   movieTargetDirectoryId: string | null;
   movieTargetSelectionToken?: string;
   tvTargetDirectoryId: string | null;
@@ -60,6 +64,7 @@ export interface LibraryScanConfigPayload {
   dailyScheduleEnabled: boolean;
   dailyScheduleTime: string | null;
   autoOrganize?: boolean;
+  organizeConcurrency?: number;
   templates: Readonly<Record<string, string>>;
 }
 

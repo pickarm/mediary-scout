@@ -8,6 +8,7 @@ import {
 import { createTmdbMetadataProvider, createTmdbSearchProvider } from "@media-track/workflow";
 import { getAgentModelForSearch, getAccountScopedSettings, getTmdbAccesses } from "./workflow-runtime";
 import { getLibraryServices } from "./library-runtime";
+import { wakeLibraryAutoOrganizationWorker } from "./library-auto-organization-worker";
 
 export { getLibraryReadIdentificationService } from "./library-read-runtime";
 
@@ -32,6 +33,7 @@ export async function getLibraryIdentificationService(scope: ScanScope): Promise
 export async function drainLibraryIdentifications(scope: ScanScope, limit = 10): Promise<void> {
   const service = await getLibraryIdentificationService(scope);
   await service.drainPending(scope, limit);
+  wakeLibraryAutoOrganizationWorker();
 }
 
 export async function setLibrarySeasonTracking(scope: ScanScope, trackedSeasonId: string, autoAcquire: boolean): Promise<void> {
@@ -56,7 +58,7 @@ export function watchLibraryScanForIdentification(scope: ScanScope, taskId: stri
   async function runWatch(): Promise<void> {
     const services = await getLibraryServices(scope);
     const deadline = Date.now() + 24 * 60 * 60_000;
-    let delayMs = 5_000;
+    let delayMs = 2_000;
     while (Date.now() < deadline) {
       const task = await services.scanStore.getTask(scope, taskId);
       if (!task || task.status === "cancelled" || task.status === "failed" || task.status === "completed" || task.status === "partial") {
@@ -64,7 +66,7 @@ export function watchLibraryScanForIdentification(scope: ScanScope, taskId: stri
         return;
       }
       await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
-      delayMs = Math.min(60_000, delayMs * 2);
+      delayMs = Math.min(30_000, delayMs * 2);
     }
   }
 }

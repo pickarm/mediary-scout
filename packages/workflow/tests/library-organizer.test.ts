@@ -223,4 +223,52 @@ describe("safe library organizer", () => {
       "Film (2024) [tmdbid=123]/Film (2024) - 2160p.REMUX.DV.HDR10+.HEVC.TrueHD.Atmos-CHD.zh-Hans.forced.ass",
     ]);
   });
+
+  it("runs operations concurrently with single-flight directory creation and isolates per-file failures", async () => {
+    const store = new MemoryStore();
+    const storage = new MemoryStorage();
+    storage.items.set("v1", { fileId: "v1", parentId: "src", name: "Ep1.mkv", isDirectory: false });
+    storage.items.set("v2", { fileId: "v2", parentId: "src", name: "Ep2.mkv", isDirectory: false });
+    storage.items.set("v3", { fileId: "v3", parentId: "src", name: "Ep3.mkv", isDirectory: false });
+
+    const createSpy = vi.spyOn(storage, "createDir").mockImplementation(async (parentId, name) => {
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      const fileId = `dir-${++storage.dirSequence}`;
+      storage.items.set(fileId, { fileId, parentId, name, isDirectory: true });
+      return fileId;
+    });
+    let inFlightMoves = 0;
+    let maxInFlightMoves = 0;
+    const origMove = storage.move.bind(storage);
+    vi.spyOn(storage, "move").mockImplementation(async (fileId, parentId) => {
+      inFlightMoves += 1;
+      maxInFlightMoves = Math.max(maxInFlightMoves, inFlightMoves);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      try {
+        if (fileId === "v2") throw new Error("单文件写入失败");
+        await origMove(fileId, parentId);
+      } finally {
+        inFlightMoves -= 1;
+      }
+    });
+
+    const files = [
+      confirmed("v1", "src", "Ep1.mkv"),
+      confirmed("v2", "src", "Ep2.mkv"),
+      confirmed("v3", "src", "Ep3.mkv"),
+    ];
+    const organizer = new LibraryOrganizer({ store, storage, idFactory: () => "lease-concurrent" });
+    await organizer.plan({
+      ...input(files),
+      templates: { movieFile: "{originalName}{ext}" },
+    });
+    const result = await organizer.execute(scope, "task", "organize-1", { concurrency: 3 });
+
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(maxInFlightMoves).toBeGreaterThanOrEqual(2);
+    expect(result.processed).toBe(3);
+    expect(result.plan.status).toBe("failed");
+    const byFile = Object.fromEntries(result.plan.operations.map((op) => [op.fileId, op.status]));
+    expect(byFile).toEqual({ v1: "verified", v2: "failed", v3: "verified" });
+  });
 });

@@ -103,7 +103,7 @@ export interface OrganizerOptions {
   leaseDurationMs?: number;
   dryRun?: boolean;
 }
-export interface ExecuteOrganizationOptions { dryRun?: boolean; maxOperations?: number; }
+export interface ExecuteOrganizationOptions { dryRun?: boolean; maxOperations?: number; concurrency?: number; }
 export interface OrganizationExecutionResult { plan: OrganizationPlan; verifiedLocations: readonly { fileId: string; parentId: string; name: string }[]; processed: number; }
 
 export class OrganizationAuthorizationError extends Error { constructor(message: string) { super(message); this.name = "OrganizationAuthorizationError"; } }
@@ -182,17 +182,32 @@ export class LibraryOrganizer {
     if (!(await this.options.store.claim(scope, taskId, operationKey, leaseId, now, leaseExpiresAt))) throw new OrganizationConflictError("整理清单正由其他执行器运行，或已进入终态");
     let processed = 0;
     const maxOperations = options.maxOperations === undefined ? Number.MAX_SAFE_INTEGER : bounded(options.maxOperations, 1, 1_000_000);
+    const concurrency = options.concurrency === undefined ? 1 : bounded(options.concurrency, 1, 10);
     const locations: { fileId: string; parentId: string; name: string }[] = [];
+    const dirInFlight = new Map<string, { name: string; promise: Promise<string> }>();
     try {
       plan = (await this.options.store.get(scope, taskId, operationKey))!;
+      const pending: OrganizationOperation[] = [];
       for (const original of plan.operations) {
-        if (processed >= maxOperations) break;
-        if (original.status === "verified") { locations.push({ fileId: original.fileId, parentId: original.targetParentId!, name: original.targetName }); continue; }
-        if (!(await this.options.store.renew(scope, taskId, operationKey, leaseId, this.now(), new Date(Date.parse(this.now()) + this.leaseDurationMs).toISOString()))) break;
+        if (original.status === "verified") {
+          locations.push({ fileId: original.fileId, parentId: original.targetParentId!, name: original.targetName });
+          continue;
+        }
+        if (pending.length < maxOperations) pending.push(original);
+      }
+
+      let cursor = 0;
+      let leaseLost = false;
+      const runOne = async (original: OrganizationOperation): Promise<void> => {
+        const renewNow = this.now();
+        if (!(await this.options.store.renew(scope, taskId, operationKey, leaseId, renewNow, new Date(Date.parse(renewNow) + this.leaseDurationMs).toISOString()))) {
+          leaseLost = true;
+          return;
+        }
         const operation: OrganizationOperation = { ...original, status: "running", error: null };
         await this.persist(scope, taskId, operationKey, leaseId, operation);
         try {
-          const target = await this.ensureTarget(operation);
+          const target = await this.ensureTarget(operation, dirInFlight);
           operation.targetParentId = target.parentId;
           const targetListing = await this.options.storage.list(target.parentId);
           const collision = targetListing.find((item) => item.name.toLocaleLowerCase("en-US") === operation.targetName.toLocaleLowerCase("en-US") && item.fileId !== operation.fileId);
@@ -205,12 +220,28 @@ export class LibraryOrganizer {
           await this.persist(scope, taskId, operationKey, leaseId, operation);
           locations.push({ fileId: operation.fileId, parentId: result.parentId, name: result.name });
         } catch (error) {
+          if (error instanceof OrganizationConflictError && error.message.includes("整理租约已失效")) {
+            leaseLost = true;
+            throw error;
+          }
           operation.status = "failed";
           operation.error = safeError(error);
           await this.persist(scope, taskId, operationKey, leaseId, operation);
         }
         processed += 1;
-      }
+      };
+
+      const workerCount = Math.min(concurrency, pending.length);
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (!leaseLost) {
+          const index = cursor;
+          if (index >= pending.length) return;
+          cursor += 1;
+          await runOne(pending[index]!);
+        }
+      });
+      await Promise.all(workers);
+
       const fresh = (await this.options.store.get(scope, taskId, operationKey))!;
       const statuses = fresh.operations.map(({status}) => status);
       const taskStatus: OrganizationTaskStatus = statuses.every((status) => status === "verified") ? "completed" : statuses.some((status) => status === "failed") ? "failed" : "paused";
@@ -227,12 +258,34 @@ export class LibraryOrganizer {
     if (!(await this.options.store.updateOperation(scope, taskId, key, lease, operation, this.now()))) throw new OrganizationConflictError("整理租约已失效，操作状态未提交");
   }
 
-  private async ensureTarget(operation: OrganizationOperation): Promise<{ parentId: string }> {
+  private async ensureTarget(
+    operation: OrganizationOperation,
+    dirInFlight: Map<string, { name: string; promise: Promise<string> }>,
+  ): Promise<{ parentId: string }> {
     const segments = operation.targetRelativePath.split("/");
     if (segments.length < 1 || segments.some((segment) => !segment || segment === "." || segment === ".." || segment.includes("\\"))) throw new OrganizationAuthorizationError("目标相对路径无效");
     let parentId = operation.targetRootId;
-    for (const name of segments.slice(0, -1)) parentId = await this.findOrCreateDirectory(parentId, name);
+    for (const name of segments.slice(0, -1)) parentId = await this.findOrCreateDirectorySingleFlight(parentId, name, dirInFlight);
     return { parentId };
+  }
+
+  private async findOrCreateDirectorySingleFlight(
+    parentId: string,
+    name: string,
+    dirInFlight: Map<string, { name: string; promise: Promise<string> }>,
+  ): Promise<string> {
+    const cacheKey = `${parentId}\0${name.toLocaleLowerCase("en-US")}`;
+    const cached = dirInFlight.get(cacheKey);
+    if (cached) {
+      if (cached.name !== name) throw new OrganizationConflictError(`目标目录“${name}”与大小写不同的同名项冲突`);
+      return cached.promise;
+    }
+    const promise = this.findOrCreateDirectory(parentId, name).catch((error) => {
+      if (dirInFlight.get(cacheKey)?.promise === promise) dirInFlight.delete(cacheKey);
+      throw error;
+    });
+    dirInFlight.set(cacheKey, { name, promise });
+    return promise;
   }
 
   private async findOrCreateDirectory(parentId: string, name: string): Promise<string> {

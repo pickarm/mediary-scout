@@ -11,6 +11,10 @@ export type NamingTemplateKind =
   | "seasonDirectory"
   | "episodeFile";
 
+export const DEFAULT_ORGANIZE_CONCURRENCY = 3;
+export const MIN_ORGANIZE_CONCURRENCY = 1;
+export const MAX_ORGANIZE_CONCURRENCY = 10;
+
 export const DEFAULT_NAMING_TEMPLATES: Readonly<Record<NamingTemplateKind, string>> = {
   movieDirectory: "{title}{{ ({year})}}{{ [tmdbid={tmdbId}]}}",
   movieFile: "{title}{{ ({year})}}{{ - {mediaTags}}}{{-{releaseGroup}}}{ext}",

@@ -17,7 +17,7 @@ import { createGuangYaAuthHooks } from "./guangya-auth-runtime";
 import { isDemoMode } from "./demo-mode";
 
 const DEFAULT_PREVIEW_FILES = 50;
-const MAX_EXECUTE_OPERATIONS = 20;
+const MAX_EXECUTE_OPERATIONS = 30;
 
 export class LibraryOrganizationRuntimeError extends Error {
   constructor(readonly code: "storage_not_found" | "storage_frozen" | "credentials_invalid" | "organization_conflict", message: string) { super(message); this.name = "LibraryOrganizationRuntimeError"; }
@@ -73,7 +73,8 @@ export class OrganizationRuntimeService {
       await this.store.authorizeExecution(existing);
       const storage = await this.storageFor(existing.sourceRootIds, existing.targetRootIds);
       const organizer = new LibraryOrganizer({ store: this.store, storage });
-      const plan = await organizer.execute(this.scope,taskId,operationKey,{maxOperations:MAX_EXECUTE_OPERATIONS});
+      const concurrency = await this.store.getTaskOrganizeConcurrency(this.scope, taskId);
+      const plan = await organizer.execute(this.scope, taskId, operationKey, { maxOperations: MAX_EXECUTE_OPERATIONS, concurrency });
       await this.assertWriteFence();
       await this.syncVerifiedLocations(plan.plan, storage);
       return (await this.store.get(this.scope,taskId,operationKey)) ?? plan.plan;

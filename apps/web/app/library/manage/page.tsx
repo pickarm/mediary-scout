@@ -6,6 +6,7 @@ import { LibraryManagement } from "../../../components/library-management";
 import type { SafeLibraryStorage } from "../../../components/library-scan-client";
 import { getStorageBrand, isRegisteredStorageProvider } from "@media-track/workflow";
 import { DEFAULT_NAMING_TEMPLATES } from "@media-track/workflow/library";
+import { resolveDefaultLibraryDirectories } from "../../../lib/library-default-directories";
 import { isDemoMode } from "../../../lib/demo-mode";
 import {
   getWorkflowRepository,
@@ -67,6 +68,8 @@ interface ConnectedStorageChoiceRow {
   provider: string;
   label: string | null;
   status: "active" | "frozen";
+  moviesCid?: string | null;
+  tvCid?: string | null;
 }
 
 export function libraryStorageChoices(rows: readonly ConnectedStorageChoiceRow[]): SafeLibraryStorage[] {
@@ -75,12 +78,19 @@ export function libraryStorageChoices(rows: readonly ConnectedStorageChoiceRow[]
     .map((row) => {
       const brand = getStorageBrand(row.provider);
       const customLabel = row.label?.trim();
+      const defaults = resolveDefaultLibraryDirectories({
+        provider: row.provider,
+        moviesCid: row.moviesCid ?? null,
+        tvCid: row.tvCid ?? null,
+      });
       return {
         id: row.id,
         provider: row.provider,
         label: customLabel ? `${brand.label}（${customLabel}）` : brand.label,
         status: row.status,
         rootDirectoryId: brand.provisionRootId,
+        defaultMovieDirectory: defaults.movie,
+        defaultTvDirectory: defaults.tv,
       };
     });
 }

@@ -233,4 +233,69 @@ describe("configuration source directory authorization", () => {
     const invalid = await POST(post({ ...body, sourceRoots: [{ directoryId: "dir-deep" }], autoOrganize: "true" }));
     expect(invalid.status).toBe(400);
   });
+
+  it("allows server-trusted default library directories without client selection tickets and validates organizeConcurrency", async () => {
+    mocks.getServices.mockResolvedValue({
+      client: { listFilesPage: listing },
+      reader: { listPage: readerPage },
+      storage: { provider: "guangya", moviesCid: "default-movies", tvCid: "default-tv" },
+      scanStore: {
+        getConfiguration: vi.fn(async () => previous),
+        saveConfiguration: vi.fn(async (value: unknown) => { saved.push(value); }),
+      },
+    });
+
+    const autoFilled = await POST(post({
+      storageId: "storage-a",
+      useDefaultLibraryDirectories: true,
+      mediaKind: "mixed",
+      organizeConcurrency: 5,
+      templates: templateSet,
+    }));
+    expect(autoFilled.status).toBe(201);
+    expect(saved.at(-1)).toMatchObject({
+      sourceRoots: [
+        { directoryId: "default-movies", name: "Mediary Scout/Movies" },
+        { directoryId: "default-tv", name: "Mediary Scout/TV" },
+      ],
+      movieTargetDirectoryId: "default-movies",
+      movieTargetDirectoryName: "Mediary Scout/Movies",
+      tvTargetDirectoryId: "default-tv",
+      tvTargetDirectoryName: "Mediary Scout/TV",
+      organizeConcurrency: 5,
+    });
+
+    const explicitTrusted = await POST(post({
+      storageId: "storage-a",
+      sourceRoots: [{ directoryId: "default-movies" }],
+      movieTargetDirectoryId: "default-movies",
+      tvTargetDirectoryId: "default-tv",
+      mediaKind: "movie",
+      templates: templateSet,
+    }));
+    expect(explicitTrusted.status).toBe(201);
+    expect(saved.at(-1)).toMatchObject({
+      sourceRoots: [{ directoryId: "default-movies", name: "Mediary Scout/Movies" }],
+      organizeConcurrency: 3,
+    });
+
+    const forged = await POST(post({
+      storageId: "storage-a",
+      sourceRoots: [{ directoryId: "untrusted-dir" }],
+      mediaKind: "mixed",
+      templates: templateSet,
+    }));
+    expect(forged.status).toBe(400);
+
+    for (const badConcurrency of [0, 11, 2.5, "3"]) {
+      const invalid = await POST(post({
+        storageId: "storage-a",
+        useDefaultLibraryDirectories: true,
+        mediaKind: "mixed",
+        organizeConcurrency: badConcurrency,
+        templates: templateSet,
+      }));
+      expect(invalid.status).toBe(400);
+    }
+  });
 });

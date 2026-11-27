@@ -134,7 +134,7 @@ export async function getLibraryGuangYaClient(accountId: string, connectedStorag
 
 export async function getLibraryServices(scope: ScanScope): Promise<{
   pool: Pool; scanStore: PostgresScanStore; scanner: LibraryScanner; reader: DirectoryReader; client: GuangYaClient | null;
-  storage: Pick<ConnectedStorage, "id" | "accountId" | "provider" | "providerUid" | "label" | "status">;
+  storage: Pick<ConnectedStorage, "id" | "accountId" | "provider" | "providerUid" | "label" | "status" | "moviesCid" | "tvCid">;
 }> {
   const { storage } = await resolveStorage(scope);
   const pg = getLibraryPool();
@@ -153,7 +153,7 @@ export async function getLibraryServices(scope: ScanScope): Promise<{
   const client = storage.provider === "guangya"
     ? (await getLibraryGuangYaClient(scope.accountId, scope.connectedStorageId)).client
     : null;
-  return { pool: pg, scanStore: store, scanner, reader, client, storage: { id: storage.id, accountId: storage.accountId, provider: storage.provider, providerUid: storage.providerUid, label: storage.label, status: storage.status } };
+  return { pool: pg, scanStore: store, scanner, reader, client, storage: { id: storage.id, accountId: storage.accountId, provider: storage.provider, providerUid: storage.providerUid, label: storage.label, status: storage.status, moviesCid: storage.moviesCid, tvCid: storage.tvCid } };
 }
 
 function createLibraryDirectoryReader(scope: ScanScope, provider: string): DirectoryReader {

@@ -294,6 +294,18 @@ describe("F14b acquisition naming policy", () => {
       templates: DEFAULT_NAMING_TEMPLATES,
     });
 
+    const ignoresMsgConfigs = resolveAcquisitionNamingPolicyFromConfigurations({
+      scope,
+      targetRootId: "tv_root",
+      kind: "tv",
+      configurations: [
+        { configId: "msg_direct_1", scope, tvTargetDirectoryId: "tv_root", templates: { episodeFile: "Default{ext}" } },
+        { configId: "user_rule_1", scope, tvTargetDirectoryId: "tv_root", templates: { episodeFile: "{title} - {episodeCode} - 自定义{ext}" } },
+      ],
+    });
+    expect(ignoresMsgConfigs.matchedConfigIds).toEqual(["user_rule_1"]);
+    expect(ignoresMsgConfigs.templates.episodeFile).toBe("{title} - {episodeCode} - 自定义{ext}");
+
     expect(() => resolveAcquisitionNamingPolicyFromConfigurations({
       scope,
       targetRootId: "tv_root",

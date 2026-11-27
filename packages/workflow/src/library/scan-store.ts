@@ -10,6 +10,7 @@ import type {
   ScanTask,
   ScanTaskStatus,
 } from "./scanner.js";
+import { MAX_ORGANIZE_CONCURRENCY, MIN_ORGANIZE_CONCURRENCY } from "./scanner.js";
 
 export const LIBRARY_SCAN_SCHEMA_ADVISORY_LOCK_KEY = 4_011_989_143;
 
@@ -676,6 +677,9 @@ function validateConfiguration(config: ScanConfiguration): void {
   if (config.dailyScheduleEnabled && (!config.dailyScheduleTime || !/^([01]\d|2[0-3]):[0-5]\d$/.test(config.dailyScheduleTime))) throw new ScanStoreInputError("dailyScheduleTime must be HH:mm (Asia/Shanghai)");
   if (config.dailyScheduleTimezone !== "Asia/Shanghai") throw new ScanStoreInputError("dailyScheduleTimezone must be Asia/Shanghai");
   if (config.autoAcquire !== false) throw new ScanStoreInputError("autoAcquire must remain disabled by default");
+  if (config.organizeConcurrency !== undefined && (!Number.isSafeInteger(config.organizeConcurrency) || config.organizeConcurrency < MIN_ORGANIZE_CONCURRENCY || config.organizeConcurrency > MAX_ORGANIZE_CONCURRENCY)) {
+    throw new ScanStoreInputError(`organizeConcurrency must be between ${MIN_ORGANIZE_CONCURRENCY} and ${MAX_ORGANIZE_CONCURRENCY}`);
+  }
   const ids = new Set<string>();
   for (const root of config.sourceRoots) {
     if (!root.directoryId.trim() || !root.name.trim() || ids.has(root.directoryId)) throw new ScanStoreInputError("source roots must have unique directory ids and names");

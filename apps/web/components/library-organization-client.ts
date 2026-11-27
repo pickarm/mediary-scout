@@ -151,3 +151,83 @@ export async function controlOrganizationPlan(storageId: string, taskId: string,
   }
   return { operationKey: requiredString(result.operationKey, "整理清单键"), status: result.status, accepted: result.accepted };
 }
+
+export type OrganizationHistoryStatusFilter = "all" | "active" | "planned" | "running" | "verified" | "failed";
+
+export interface OrganizationHistoryIdentity {
+  mediaTitleId: string;
+  trackedSeasonId: string;
+  mediaType: "movie" | "tv" | "anime";
+  title: string;
+  originalTitle: string;
+  year: number;
+  tmdbId: number;
+  season?: number;
+  episode?: number;
+  episodeCode?: string;
+  resolution?: string;
+  edition?: string;
+}
+
+export interface OrganizationHistoryItem {
+  taskId: string;
+  operationKey: string;
+  operationId: string;
+  fileId: string;
+  originalParentId: string;
+  originalName: string;
+  targetRootId: string;
+  targetRelativePath: string;
+  targetParentId: string | null;
+  targetName: string;
+  identity: OrganizationHistoryIdentity | null;
+  pairedFileId: string;
+  pairedVideoTargetPath: string;
+  status: OrganizationOperationStatus;
+  error: string | null;
+  updatedAt: string;
+}
+
+export interface OrganizationHistoryActiveScan {
+  taskId: string;
+  configId: string;
+  status: string;
+  directoriesDone: number;
+  directoriesDiscovered: number;
+  filesDiscovered: number;
+  updatedAt: string;
+}
+
+export interface OrganizationHistoryPage {
+  items: OrganizationHistoryItem[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  counts: {
+    all: number;
+    running: number;
+    planned: number;
+    verified: number;
+    failed: number;
+  };
+  activeSummary: {
+    hasActiveWork: boolean;
+    latestScanTask: OrganizationHistoryActiveScan | null;
+    activePlanCount: number;
+  };
+}
+
+export async function loadOrganizationHistory(
+  storageId: string,
+  input: { page: number; pageSize: number; status: OrganizationHistoryStatusFilter },
+  signal?: AbortSignal,
+): Promise<OrganizationHistoryPage> {
+  const query = new URLSearchParams({
+    storageId,
+    page: String(input.page),
+    pageSize: String(input.pageSize),
+    status: input.status,
+  });
+  return requestJson<OrganizationHistoryPage>(`/api/library/organization-history?${query}`, signal ? { signal } : {});
+}

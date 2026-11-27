@@ -6,6 +6,7 @@ export type ScanMediaKind = "movie" | "tv" | "mixed";
 export type ScanTaskStatus = "queued" | "running" | "paused" | "cancelling" | "cancelled" | "completed" | "partial" | "failed";
 export type ScanDirectoryStatus = "pending" | "running" | "done" | "failed";
 export const SCAN_SCHEDULE_TIME_ZONE = "Asia/Shanghai" as const;
+export { DEFAULT_ORGANIZE_CONCURRENCY, MAX_ORGANIZE_CONCURRENCY, MIN_ORGANIZE_CONCURRENCY } from "./naming.js";
 
 export interface ScanScope {
   accountId: string;
@@ -31,6 +32,7 @@ export interface ScanConfiguration {
   dailyScheduleTime: string | null;
   dailyScheduleTimezone: typeof SCAN_SCHEDULE_TIME_ZONE;
   autoOrganize: boolean;
+  organizeConcurrency?: number;
   autoAcquire: false;
   templates: Readonly<Record<string, string>>;
 }

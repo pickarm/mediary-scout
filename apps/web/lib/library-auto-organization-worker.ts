@@ -2,9 +2,15 @@ import { isDemoMode } from "./demo-mode";
 import { getLibraryAutoOrganizationScheduler } from "./library-auto-organization";
 import { isUpdateHoldActive, whileInFlight } from "./update-hold";
 
-const POLL_MS = boundedEnv("MEDIA_TRACK_LIBRARY_AUTO_ORGANIZATION_WORKER_POLL_MS", 15_000, 1_000, 300_000);
+const POLL_MS = boundedEnv("MEDIA_TRACK_LIBRARY_AUTO_ORGANIZATION_WORKER_POLL_MS", 5_000, 1_000, 300_000);
 let started = false;
 let ticking = false;
+let triggerImmediateTick: (() => void) | null = null;
+
+/** 扫描或识别完成后立即唤醒一轮自动整理调度，避免等待下一轮定时轮询。 */
+export function wakeLibraryAutoOrganizationWorker(): void {
+  triggerImmediateTick?.();
+}
 
 /** Starts the bounded F08f dispatcher. The main agent owns instrumentation wiring. */
 export function startLibraryAutoOrganizationWorker(): void {
@@ -26,6 +32,9 @@ export function startLibraryAutoOrganizationWorker(): void {
     } finally {
       ticking = false;
     }
+  };
+  triggerImmediateTick = () => {
+    void tick();
   };
   console.log(`[library-auto-organization-worker] started (poll ${POLL_MS}ms)`);
   void tick();

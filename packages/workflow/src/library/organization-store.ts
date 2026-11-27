@@ -1,10 +1,47 @@
 import type { Pool, PoolClient } from "pg";
 import { STORAGE_BRANDS } from "../storage-brands.js";
 import { DEFAULT_NAMING_TEMPLATES, deriveSubtitlePath, type NamingTemplateKind } from "./naming.js";
+import { DEFAULT_ORGANIZE_CONCURRENCY, MAX_ORGANIZE_CONCURRENCY, MIN_ORGANIZE_CONCURRENCY } from "./scanner.js";
 import type { OrganizationGraph, OrganizationIdentity, OrganizationOperation, OrganizationPlan, OrganizationPlanInput, OrganizationScope, OrganizationTaskStatus } from "./organizer.js";
 
 export const LIBRARY_ORGANIZATION_SCHEMA_ADVISORY_LOCK_KEY = 4_011_989_144;
 const REGISTERED_STORAGE_PROVIDERS = STORAGE_BRANDS.map(({ provider }) => provider);
+
+export type OrganizationHistoryStatusFilter = "all" | "active" | "planned" | "running" | "verified" | "failed";
+
+export interface OrganizationHistoryItem {
+  taskId: string;
+  operationKey: string;
+  operationId: string;
+  fileId: string;
+  originalParentId: string;
+  originalName: string;
+  targetRootId: string;
+  targetRelativePath: string;
+  targetParentId: string | null;
+  targetName: string;
+  identity: OrganizationIdentity | null;
+  pairedFileId: string;
+  pairedVideoTargetPath: string;
+  status: OrganizationOperation["status"];
+  error: string | null;
+  updatedAt: string;
+}
+
+export interface OrganizationHistoryPage {
+  items: OrganizationHistoryItem[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  counts: {
+    all: number;
+    running: number;
+    planned: number;
+    verified: number;
+    failed: number;
+  };
+}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS library_organization_plans (
@@ -49,6 +86,8 @@ CREATE TABLE IF NOT EXISTS library_organization_operations (
 );
 CREATE INDEX IF NOT EXISTS library_organization_operations_status
   ON library_organization_operations(account_id, connected_storage_id, task_id, operation_key, status, operation_id);
+CREATE INDEX IF NOT EXISTS library_organization_operations_history
+  ON library_organization_operations(account_id, connected_storage_id, updated_at DESC, operation_id DESC);
 `;
 const SCHEMA_COMPAT = `
   ALTER TABLE library_organization_plans ADD COLUMN IF NOT EXISTS skipped_files jsonb NOT NULL DEFAULT '[]'::jsonb;
@@ -57,6 +96,7 @@ const SCHEMA_COMPAT = `
   ALTER TABLE library_organization_operations ADD COLUMN IF NOT EXISTS identity jsonb;
   ALTER TABLE library_organization_operations ADD COLUMN IF NOT EXISTS paired_file_id text;
   ALTER TABLE library_organization_operations ADD COLUMN IF NOT EXISTS paired_video_target_path text;
+  CREATE INDEX IF NOT EXISTS library_organization_operations_history ON library_organization_operations(account_id, connected_storage_id, updated_at DESC, operation_id DESC);
 `;
 
 export interface OrganizationPlanCreate {
@@ -432,6 +472,114 @@ export class PostgresOrganizationStore implements OrganizationStore {
     return result.rows.map((row) => ({operationId:row.operation_id,fileId:row.file_id,originalParentId:row.original_parent_id,originalName:row.original_name,targetRootId:row.target_root_id,targetRelativePath:row.target_relative_path,targetParentId:row.target_parent_id,targetName:row.target_name,identity:asIdentity(row.identity),pairedFileId:row.paired_file_id,pairedVideoTargetPath:row.paired_video_target_path,status:row.status,error:row.error}));
   }
 
+  async listOperationHistory(
+    scope: OrganizationScope,
+    input: { page: number; pageSize: number; status?: OrganizationHistoryStatusFilter },
+  ): Promise<OrganizationHistoryPage> {
+    await this.ensureSchema();
+    if (!Number.isSafeInteger(input.page) || input.page < 1 || input.page > 10_000) throw new RangeError("page must be 1..10000");
+    if (!Number.isSafeInteger(input.pageSize) || input.pageSize < 1 || input.pageSize > 100) throw new RangeError("pageSize must be 1..100");
+    const status = input.status ?? "all";
+    const statusClause = status === "all"
+      ? ""
+      : status === "active"
+        ? " AND o.status IN ('planned','running')"
+        : " AND o.status = $3";
+    const client = await this.pool.connect();
+    try {
+      await this.assertStorage(client, scope);
+      const countsResult = await client.query<{
+        all_count: string;
+        running_count: string;
+        planned_count: string;
+        verified_count: string;
+        failed_count: string;
+      }>(
+        `SELECT COUNT(*)::text AS all_count,
+                COUNT(*) FILTER (WHERE status='running')::text AS running_count,
+                COUNT(*) FILTER (WHERE status='planned')::text AS planned_count,
+                COUNT(*) FILTER (WHERE status='verified')::text AS verified_count,
+                COUNT(*) FILTER (WHERE status='failed')::text AS failed_count
+           FROM library_organization_operations
+          WHERE account_id=$1 AND connected_storage_id=$2`,
+        [scope.accountId, scope.connectedStorageId],
+      );
+      const countRow = countsResult.rows[0];
+      const counts = {
+        all: Number(countRow?.all_count ?? 0),
+        running: Number(countRow?.running_count ?? 0),
+        planned: Number(countRow?.planned_count ?? 0),
+        verified: Number(countRow?.verified_count ?? 0),
+        failed: Number(countRow?.failed_count ?? 0),
+      };
+      const total = status === "all"
+        ? counts.all
+        : status === "active"
+          ? counts.running + counts.planned
+          : counts[status];
+      const totalPages = Math.max(1, Math.ceil(total / input.pageSize));
+      const offset = (input.page - 1) * input.pageSize;
+      const queryParams: unknown[] = status === "all" || status === "active"
+        ? [scope.accountId, scope.connectedStorageId, input.pageSize, offset]
+        : [scope.accountId, scope.connectedStorageId, status, input.pageSize, offset];
+      const limitPlaceholder = status === "all" || status === "active" ? "$3" : "$4";
+      const offsetPlaceholder = status === "all" || status === "active" ? "$4" : "$5";
+      const rows = await client.query<OperationRow & { task_id: string; operation_key: string; updated_at: Date }>(
+        `SELECT o.task_id,o.operation_key,o.operation_id,o.file_id,o.original_parent_id,o.original_name,
+                o.target_root_id,o.target_relative_path,o.target_parent_id,o.target_name,o.identity,
+                o.paired_file_id,o.paired_video_target_path,o.status,o.error,o.updated_at
+           FROM library_organization_operations o
+          WHERE o.account_id=$1 AND o.connected_storage_id=$2${statusClause}
+          ORDER BY o.updated_at DESC, o.operation_id DESC
+          LIMIT ${limitPlaceholder} OFFSET ${offsetPlaceholder}`,
+        queryParams,
+      );
+      return {
+        items: rows.rows.map((row) => ({
+          taskId: row.task_id,
+          operationKey: row.operation_key,
+          operationId: row.operation_id,
+          fileId: row.file_id,
+          originalParentId: row.original_parent_id,
+          originalName: row.original_name,
+          targetRootId: row.target_root_id,
+          targetRelativePath: row.target_relative_path,
+          targetParentId: row.target_parent_id,
+          targetName: row.target_name,
+          identity: safeIdentityOrNull(row.identity),
+          pairedFileId: row.paired_file_id,
+          pairedVideoTargetPath: row.paired_video_target_path,
+          status: row.status,
+          error: row.error,
+          updatedAt: row.updated_at.toISOString(),
+        })),
+        page: input.page,
+        pageSize: input.pageSize,
+        total,
+        totalPages,
+        counts,
+      };
+    } finally {
+      client.release();
+    }
+  }
+
+  async getTaskOrganizeConcurrency(scope: OrganizationScope, taskId: string): Promise<number> {
+    await this.ensureSchema();
+    const result = await this.pool.query<{ concurrency: string | null }>(
+      `SELECT c.configuration->>'organizeConcurrency' AS concurrency
+         FROM library_scan_tasks t
+         JOIN library_scan_configs c
+           ON c.account_id=t.account_id AND c.connected_storage_id=t.connected_storage_id AND c.config_id=t.config_id
+        WHERE t.account_id=$1 AND t.connected_storage_id=$2 AND t.task_id=$3`,
+      [scope.accountId, scope.connectedStorageId, taskId],
+    );
+    const parsed = Number(result.rows[0]?.concurrency);
+    return Number.isSafeInteger(parsed) && parsed >= MIN_ORGANIZE_CONCURRENCY && parsed <= MAX_ORGANIZE_CONCURRENCY
+      ? parsed
+      : DEFAULT_ORGANIZE_CONCURRENCY;
+  }
+
   private async assertStorage(client: PoolClient, scope: OrganizationScope): Promise<void> {
     const result = await client.query(
       "SELECT 1 FROM connected_storages WHERE id=$1 AND account_id=$2 AND provider=ANY($3::text[])",
@@ -582,6 +730,9 @@ function asIdentity(value: unknown): OrganizationIdentity {
   if (typeof record.mediaTitleId !== "string" || typeof record.trackedSeasonId !== "string" || (record.mediaType !== "movie" && record.mediaType !== "tv" && record.mediaType !== "anime") || typeof record.title !== "string" || typeof record.tmdbId !== "number") throw new Error("整理操作缺少持久化身份字段");
   if (typeof record.originalTitle !== "string" || typeof record.year !== "number" || typeof record.tmdbId !== "number") throw new Error("整理操作缺少完整作品身份字段");
   return record as unknown as OrganizationIdentity;
+}
+function safeIdentityOrNull(value: unknown): OrganizationIdentity | null {
+  try { return asIdentity(value); } catch { return null; }
 }
 function asNonEmptyString(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
 function pathLeaf(value: string): string { return value.replace(/\\/g,"/").split("/").filter(Boolean).at(-1) ?? ""; }
