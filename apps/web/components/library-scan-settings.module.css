@@ -258,6 +258,9 @@
 .directoryName:hover span { color: var(--accent); }
 .emptyDirectory { min-height: 180px; justify-content: center; font-size: 12px; }
 .pickerFooter { display: flex; justify-content: flex-end; }
+.stopButton { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 38px; padding: 0 15px; border-radius: var(--radius-pill); font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; color: var(--negative); background: color-mix(in srgb, var(--negative) 12%, var(--bg-card)); border: 1px solid color-mix(in srgb, var(--negative) 42%, transparent); transition: all .15s ease; }
+.stopButton:hover:not(:disabled) { background: color-mix(in srgb, var(--negative) 20%, var(--bg-card)); border-color: var(--negative); }
+.stopButton:disabled { opacity: .55; cursor: default; }
 
 @media (max-width: 980px) {
   .workshopSplit { grid-template-columns: 1fr; }

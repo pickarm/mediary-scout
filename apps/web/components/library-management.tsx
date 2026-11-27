@@ -25,8 +25,18 @@ export function LibraryManagement({ storages, defaultTemplates, settingsHref }: 
   const [selection, setSelection] = useState<Selection>({ storageId: null, configId: null, taskId: null, dirty: false });
   const [activeTab, setActiveTab] = useState<LibraryWorkspaceTab>("organize");
   const [historyRefreshTrigger, setHistoryRefreshTrigger] = useState(0);
-  const onSelectionChange = useCallback((next: Selection) => setSelection(next), []);
+  const [hasActiveWork, setHasActiveWork] = useState(false);
+  const onSelectionChange = useCallback((next: Selection) => {
+    setSelection((current) => {
+      if (current.storageId !== next.storageId) setHasActiveWork(false);
+      return next;
+    });
+  }, []);
   const onScanStarted = useCallback(() => setHistoryRefreshTrigger((count) => count + 1), []);
+  const onStopWork = useCallback(() => {
+    setHasActiveWork(false);
+    setHistoryRefreshTrigger((count) => count + 1);
+  }, []);
   const storage = storages.find((item) => item.id === selection.storageId) ?? null;
   const frozen = storage?.status === "frozen";
 
@@ -52,6 +62,8 @@ export function LibraryManagement({ storages, defaultTemplates, settingsHref }: 
         defaultTemplates={defaultTemplates}
         settingsHref={settingsHref}
         activeTab={activeTab}
+        hasActiveWork={hasActiveWork}
+        onStopWork={onStopWork}
         onSwitchTab={setActiveTab}
         onScanStarted={onScanStarted}
         onSelectionChange={onSelectionChange}
@@ -62,6 +74,7 @@ export function LibraryManagement({ storages, defaultTemplates, settingsHref }: 
           storageId={selection.storageId}
           refreshTrigger={historyRefreshTrigger}
           frozen={frozen}
+          onActiveWorkChange={setHasActiveWork}
         />
       )}
 

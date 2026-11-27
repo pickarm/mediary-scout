@@ -1,17 +1,22 @@
 import { createHash } from "node:crypto";
+import type { Pool } from "pg";
 import { getStorageBrand, isRegisteredStorageProvider, parseGuangYaUid, type ConnectedStorage } from "@media-track/workflow";
 import {
   buildOrganizationPlan,
   createStorageOrganizationStorage,
+  DEFAULT_MAX_CONSECUTIVE_FAILURES,
   getGuangYaWriteCoordinator,
   LibraryOrganizer,
+  PostgresAutoOrganizationStore,
+  PostgresIdentificationStore,
   PostgresOrganizationStore,
   PostgresLibraryStore,
+  PostgresScanStore,
   type OrganizationPlan,
   type OrganizationScope,
   type OrganizationStorage,
 } from "@media-track/workflow/library";
-import { getLibraryPool } from "./library-runtime";
+import { getLibraryPool, getLibraryReadServices } from "./library-runtime";
 import { getLibraryStorageExecutor, getWorkflowRepository } from "./workflow-runtime";
 import { createGuangYaAuthHooks } from "./guangya-auth-runtime";
 import { isDemoMode } from "./demo-mode";
@@ -40,7 +45,7 @@ export class OrganizationRuntimeService {
   constructor(
     readonly scope: OrganizationScope,
     private readonly options: OrganizationRuntimeOptions,
-    pool = getLibraryPool(),
+    private readonly pool = getLibraryPool(),
     private readonly accountKey: string | null = null,
     private readonly coordinator: ReturnType<typeof getGuangYaWriteCoordinator> | null = null,
     private readonly primeSourceAncestors = false,
@@ -78,10 +83,17 @@ export class OrganizationRuntimeService {
       }
       const organizer = new LibraryOrganizer({ store: this.store, storage });
       const concurrency = await this.store.getTaskOrganizeConcurrency(this.scope, taskId);
-      const plan = await organizer.execute(this.scope, taskId, operationKey, { maxOperations: MAX_EXECUTE_OPERATIONS, concurrency });
+      const execution = await organizer.execute(this.scope, taskId, operationKey, {
+        maxOperations: MAX_EXECUTE_OPERATIONS,
+        concurrency,
+        maxConsecutiveFailures: DEFAULT_MAX_CONSECUTIVE_FAILURES,
+      });
       await this.assertWriteFence();
-      await this.syncVerifiedLocations(plan.plan, storage);
-      return (await this.store.get(this.scope,taskId,operationKey)) ?? plan.plan;
+      await this.syncVerifiedLocations(execution.plan, storage);
+      if (execution.circuitBreaker) {
+        await this.markAutoOrganizationHalted(taskId, operationKey, execution.circuitBreaker);
+      }
+      return (await this.store.get(this.scope,taskId,operationKey)) ?? execution.plan;
     });
   }
 
@@ -145,6 +157,39 @@ export class OrganizationRuntimeService {
 
   private async storageFor(sourceRoots: readonly string[], targetRoots: readonly string[]): Promise<OrganizationStorage> {
     return this.options.storageFactory([...new Set([...sourceRoots, ...targetRoots])]);
+  }
+
+  /** 连续失败触发熔断时同步标记对应自动整理检查点，避免后台自动续批重试。 */
+  private async markAutoOrganizationHalted(
+    taskId: string,
+    operationKey: string,
+    info: { consecutiveFailures: number; remainingPlanned: number; lastError: string },
+  ): Promise<void> {
+    try {
+      await this.pool.query(
+        `UPDATE library_auto_organization_tasks
+            SET status='failed',
+                lease_id=NULL,
+                lease_expires_at=NULL,
+                last_error=$4,
+                updated_at=$5
+          WHERE account_id=$1
+            AND connected_storage_id=$2
+            AND task_id=$3
+            AND (operation_key=$6 OR operation_key IS NULL)
+            AND status IN ('planning','requested')`,
+        [
+          this.scope.accountId,
+          this.scope.connectedStorageId,
+          taskId,
+          `连续失败 ${info.consecutiveFailures} 项已自动停止（剩余 ${info.remainingPlanned} 项待处理）：${info.lastError || "未知错误"}`.slice(0, 500),
+          new Date().toISOString(),
+          operationKey,
+        ],
+      );
+    } catch {
+      // 自动整理检查点表尚未初始化或不存在对应记录时不影响手工清单熔断状态
+    }
   }
 
   /** 对列表派生写范围网盘（光鸭/123/天翼），从授权来源根自顶向下逐级列出祖先目录，实证嵌套子目录归属。 */
@@ -270,4 +315,91 @@ function connectionMarker(payload: unknown): string {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return "";
   const meta=(payload as Record<string,unknown>).meta;
   return meta && typeof meta === "object" && !Array.isArray(meta) && typeof (meta as Record<string,unknown>).connectedAt === "string" ? String((meta as Record<string,unknown>).connectedAt).trim() : "";
+}
+
+export interface StopLibraryOrganizationResult {
+  stoppedPlans: number;
+  stoppedScanTasks: number;
+  stoppedIdentificationJobs: number;
+  stoppedAutoTasks: number;
+  stopped: boolean;
+}
+
+/** 立即停止指定账号与网盘下正在运行或排队中的扫描、识别与整理任务（不影响机器人消息任务）。 */
+export async function stopLibraryOrganizationForStorage(
+  accountId: string,
+  connectedStorageId: string,
+  poolOverride?: Pool,
+): Promise<StopLibraryOrganizationResult> {
+  const scope: OrganizationScope = { accountId, connectedStorageId };
+  const { pool, scanStore } = await getLibraryReadServices(scope, poolOverride);
+  const organizationStore = new PostgresOrganizationStore(pool);
+  const identificationStore = new PostgresIdentificationStore(pool);
+  const autoOrganizationStore = new PostgresAutoOrganizationStore(pool);
+  await Promise.all([
+    scanStore.ensureSchema(),
+    identificationStore.ensureSchema(),
+    organizationStore.ensureSchema(),
+    autoOrganizationStore.ensureSchema(),
+  ]);
+
+  const now = new Date().toISOString();
+  const activePlans = await organizationStore.listActivePlans(scope, 100);
+  let stoppedPlans = 0;
+  for (const plan of activePlans) {
+    if (await organizationStore.pause(scope, plan.taskId, plan.operationKey, now)) {
+      stoppedPlans += 1;
+    }
+  }
+
+  const [autoResult, scanResult, identificationResult] = await Promise.all([
+    pool.query(
+      `UPDATE library_auto_organization_tasks
+          SET status='paused',
+              lease_id=NULL,
+              lease_expires_at=NULL,
+              last_error=$3,
+              updated_at=$4
+        WHERE account_id=$1
+          AND connected_storage_id=$2
+          AND status IN ('planning','requested')`,
+      [accountId, connectedStorageId, "用户已手动停止整理。", now],
+    ),
+    pool.query(
+      `UPDATE library_scan_tasks
+          SET status='paused',
+              lease_id=NULL,
+              lease_expires_at=NULL,
+              updated_at=$3
+        WHERE account_id=$1
+          AND connected_storage_id=$2
+          AND config_id NOT LIKE 'msg\\_%' ESCAPE '\\'
+          AND status IN ('queued','running','cancelling')`,
+      [accountId, connectedStorageId, now],
+    ),
+    pool.query(
+      `UPDATE library_identification_jobs
+          SET status='cancelled',
+              lease_id=NULL,
+              lease_expires_at=NULL,
+              last_error=$3,
+              updated_at=$4
+        WHERE account_id=$1
+          AND connected_storage_id=$2
+          AND task_id NOT LIKE 'msg\\_%' ESCAPE '\\'
+          AND status IN ('waiting','pending','running')`,
+      [accountId, connectedStorageId, "用户已手动停止整理。", now],
+    ),
+  ]);
+
+  const stoppedAutoTasks = autoResult.rowCount ?? 0;
+  const stoppedScanTasks = scanResult.rowCount ?? 0;
+  const stoppedIdentificationJobs = identificationResult.rowCount ?? 0;
+  return {
+    stoppedPlans,
+    stoppedScanTasks,
+    stoppedIdentificationJobs,
+    stoppedAutoTasks,
+    stopped: stoppedPlans + stoppedScanTasks + stoppedIdentificationJobs + stoppedAutoTasks > 0,
+  };
 }

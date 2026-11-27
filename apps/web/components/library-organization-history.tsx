@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, CircleAlert, LoaderCircle, Pause, Play, RefreshCw } from "lucide-react";
+import { ChevronLeft, ChevronRight, CircleAlert, LoaderCircle, Pause, Play, RefreshCw, Square } from "lucide-react";
 import { extractMediaTechTags } from "@media-track/workflow/naming";
 import {
   loadOrganizationHistory,
   retryFailedOrganizations,
+  stopOrganizations,
   type OrganizationHistoryItem,
   type OrganizationHistoryPage,
   type OrganizationHistoryStatusFilter,
@@ -26,10 +27,12 @@ export function LibraryOrganizationHistory({
   storageId,
   refreshTrigger = 0,
   frozen = false,
+  onActiveWorkChange,
 }: {
   storageId: string | null;
   refreshTrigger?: number;
   frozen?: boolean;
+  onActiveWorkChange?: (active: boolean) => void;
 }) {
   const [status, setStatus] = useState<OrganizationHistoryStatusFilter>("all");
   const [page, setPage] = useState(1);
@@ -38,6 +41,7 @@ export function LibraryOrganizationHistory({
   const [data, setData] = useState<OrganizationHistoryPage | null>(null);
   const [loading, setLoading] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
@@ -110,6 +114,11 @@ export function LibraryOrganizationHistory({
   }, [storageId, page, pageSize, status, refreshTrigger, fetchHistory]);
 
   const hasActiveWork = data?.activeSummary.hasActiveWork ?? false;
+  const haltNotice = data?.activeSummary.haltNotice ?? null;
+
+  useEffect(() => {
+    onActiveWorkChange?.(hasActiveWork);
+  }, [hasActiveWork, onActiveWorkChange]);
 
   useEffect(() => {
     if (!storageId || !liveRefresh) return;
@@ -160,6 +169,23 @@ export function LibraryOrganizationHistory({
     }
   };
 
+  const handleStop = async () => {
+    if (!storageId || stopping || !hasActiveWork) return;
+    setStopping(true);
+    setError(null);
+    setActionNotice(null);
+    try {
+      await stopOrganizations(storageId, controllerRef.current?.signal);
+      setActionNotice("已停止当前网盘的扫描与整理任务。");
+      onActiveWorkChange?.(false);
+      await fetchHistory(storageId, page, pageSize, status, false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "停止整理失败。");
+    } finally {
+      setStopping(false);
+    }
+  };
+
   if (!storageId) return null;
 
   const latestScan = data?.activeSummary.latestScanTask ?? null;
@@ -181,6 +207,17 @@ export function LibraryOrganizationHistory({
           <p>按最近更新倒序展示当前网盘的重命名与归档明细，支持翻页与实时跟踪执行进度。</p>
         </div>
         <div className={styles.headerControls}>
+          {hasActiveWork && (
+            <button
+              type="button"
+              className={styles.dangerButton}
+              onClick={() => void handleStop()}
+              disabled={stopping || loading}
+            >
+              <Square size={13} />
+              {stopping ? "正在停止…" : "停止整理"}
+            </button>
+          )}
           {(data?.counts.failed ?? 0) > 0 && !frozen && (
             <button
               type="button"
@@ -210,6 +247,31 @@ export function LibraryOrganizationHistory({
         </div>
       </div>
 
+      {haltNotice && (
+        <div className={styles.haltBanner} role="alert">
+          <div className={styles.haltBody}>
+            <CircleAlert size={17} className={styles.haltIcon} />
+            <div>
+              <div className={styles.haltTitle}>连续失败过多，已自动停止整理</div>
+              <div className={styles.haltDesc}>
+                连续失败 {haltNotice.consecutiveFailures} 项，剩余 {haltNotice.remainingPlanned} 项待处理已暂停；最近失败原因：{haltNotice.lastError || "未知错误"}
+              </div>
+            </div>
+          </div>
+          {!frozen && (
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => void handleRetryFailed()}
+              disabled={retrying || loading}
+            >
+              <RefreshCw size={13} className={retrying ? styles.spin : ""} />
+              {retrying ? "正在重试…" : "重试失败项"}
+            </button>
+          )}
+        </div>
+      )}
+
       {actionNotice && (
         <div className={styles.activeBanner} role="status">
           <span>{actionNotice}</span>
@@ -230,7 +292,18 @@ export function LibraryOrganizationHistory({
               </span>
             )}
           </div>
-          <span>系统自动完成扫描 → 复用数据库身份 → 并发重命名归档</span>
+          <div className={styles.headerControls}>
+            <span>系统自动完成扫描 → 复用数据库身份 → 并发重命名归档</span>
+            <button
+              type="button"
+              className={styles.dangerButton}
+              onClick={() => void handleStop()}
+              disabled={stopping || loading}
+            >
+              <Square size={12} />
+              {stopping ? "正在停止…" : "停止整理"}
+            </button>
+          </div>
         </div>
       )}
 

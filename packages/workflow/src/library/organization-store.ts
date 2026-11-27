@@ -2,7 +2,7 @@ import type { Pool, PoolClient } from "pg";
 import { STORAGE_BRANDS } from "../storage-brands.js";
 import { DEFAULT_NAMING_TEMPLATES, deriveSubtitlePath, type NamingTemplateKind } from "./naming.js";
 import { DEFAULT_ORGANIZE_CONCURRENCY, MAX_ORGANIZE_CONCURRENCY, MIN_ORGANIZE_CONCURRENCY } from "./scanner.js";
-import type { OrganizationGraph, OrganizationIdentity, OrganizationOperation, OrganizationPlan, OrganizationPlanInput, OrganizationScope, OrganizationTaskStatus } from "./organizer.js";
+import { DEFAULT_MAX_CONSECUTIVE_FAILURES, type OrganizationGraph, type OrganizationIdentity, type OrganizationOperation, type OrganizationPlan, type OrganizationPlanInput, type OrganizationScope, type OrganizationTaskStatus } from "./organizer.js";
 
 export const LIBRARY_ORGANIZATION_SCHEMA_ADVISORY_LOCK_KEY = 4_011_989_144;
 const REGISTERED_STORAGE_PROVIDERS = STORAGE_BRANDS.map(({ provider }) => provider);
@@ -26,6 +26,15 @@ export interface OrganizationHistoryItem {
   status: OrganizationOperation["status"];
   error: string | null;
   updatedAt: string;
+}
+
+export interface OrganizationHaltNotice {
+  taskId: string;
+  operationKey: string;
+  consecutiveFailures: number;
+  remainingPlanned: number;
+  lastError: string;
+  haltedAt: string;
 }
 
 export interface OrganizationHistoryPage {
@@ -667,6 +676,93 @@ export class PostgresOrganizationStore implements OrganizationStore {
       [scope.accountId, scope.connectedStorageId, limit],
     );
     return result.rows.map((row) => ({ taskId: row.task_id, operationKey: row.operation_key }));
+  }
+
+  async listActivePlans(scope: OrganizationScope, limit = 100): Promise<Array<{ taskId: string; operationKey: string }>> {
+    await this.ensureSchema();
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+      throw new RangeError("active organization page must be 1..200");
+    }
+    const result = await this.pool.query<{ task_id: string; operation_key: string }>(
+      `SELECT task_id,operation_key
+         FROM library_organization_plans
+        WHERE account_id=$1
+          AND connected_storage_id=$2
+          AND (status IN ('planned','running') OR execute_requested=true)
+        ORDER BY updated_at DESC, task_id DESC, operation_key DESC
+        LIMIT $3`,
+      [scope.accountId, scope.connectedStorageId, limit],
+    );
+    return result.rows.map((row) => ({ taskId: row.task_id, operationKey: row.operation_key }));
+  }
+
+  async getLatestHaltState(
+    scope: OrganizationScope,
+    threshold = DEFAULT_MAX_CONSECUTIVE_FAILURES,
+  ): Promise<OrganizationHaltNotice | null> {
+    await this.ensureSchema();
+    const safeThreshold = Math.max(1, Math.min(100, Math.trunc(threshold)));
+    const latestPlanResult = await this.pool.query<{
+      task_id: string;
+      operation_key: string;
+      status: OrganizationTaskStatus;
+      execute_requested: boolean;
+      updated_at: Date;
+    }>(
+      `SELECT task_id, operation_key, status, execute_requested, updated_at
+         FROM library_organization_plans
+        WHERE account_id=$1 AND connected_storage_id=$2
+        ORDER BY updated_at DESC, task_id DESC, operation_key DESC
+        LIMIT 1`,
+      [scope.accountId, scope.connectedStorageId],
+    );
+    const latestPlan = latestPlanResult.rows[0];
+    if (!latestPlan || latestPlan.status !== "failed" || latestPlan.execute_requested) {
+      return null;
+    }
+
+    const opStatsResult = await this.pool.query<{
+      status: OrganizationOperation["status"];
+      error: string | null;
+      updated_at: Date;
+    }>(
+      `SELECT status, error, updated_at
+         FROM library_organization_operations
+        WHERE account_id=$1
+          AND connected_storage_id=$2
+          AND task_id=$3
+          AND operation_key=$4
+        ORDER BY updated_at DESC, operation_id DESC`,
+      [scope.accountId, scope.connectedStorageId, latestPlan.task_id, latestPlan.operation_key],
+    );
+    let remainingPlanned = 0;
+    let consecutiveFailures = 0;
+    let countingTailFailures = true;
+    let lastError = "";
+    for (const row of opStatsResult.rows) {
+      if (row.status === "planned") {
+        remainingPlanned += 1;
+        continue;
+      }
+      if (!countingTailFailures) continue;
+      if (row.status === "failed") {
+        consecutiveFailures += 1;
+        if (!lastError && row.error) lastError = row.error;
+      } else {
+        countingTailFailures = false;
+      }
+    }
+    if (remainingPlanned <= 0 || consecutiveFailures < safeThreshold) {
+      return null;
+    }
+    return {
+      taskId: latestPlan.task_id,
+      operationKey: latestPlan.operation_key,
+      consecutiveFailures,
+      remainingPlanned,
+      lastError,
+      haltedAt: latestPlan.updated_at.toISOString(),
+    };
   }
 
   private async assertStorage(client: PoolClient, scope: OrganizationScope): Promise<void> {

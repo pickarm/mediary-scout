@@ -2,8 +2,15 @@ import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { describe, expect, it } from "vitest";
 import { getStorageBrand } from "@media-track/workflow";
-import { DEFAULT_NAMING_TEMPLATES, PostgresLibraryStore, PostgresScanStore } from "@media-track/workflow/library";
-import { OrganizationRuntimeService } from "./library-organization-runtime";
+import {
+  DEFAULT_MAX_CONSECUTIVE_FAILURES,
+  DEFAULT_NAMING_TEMPLATES,
+  PostgresAutoOrganizationStore,
+  PostgresIdentificationStore,
+  PostgresLibraryStore,
+  PostgresScanStore,
+} from "@media-track/workflow/library";
+import { OrganizationRuntimeService, stopLibraryOrganizationForStorage } from "./library-organization-runtime";
 
 const adminURL=process.env.MEDIA_TRACK_TEST_POSTGRES_ADMIN_URL;
 
@@ -177,6 +184,140 @@ describe.skipIf(!adminURL)("F08c PostgreSQL runtime recovery with a fake cloud",
       expect(completed.status).toBe("completed");
       expect(completed.operations[0]?.status).toBe("verified");
       expect(await primed.store.listFailedPlans(scope, 10)).toEqual([]);
+    } finally {
+      await pool?.end();
+      await adminPool.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`).catch(() => undefined);
+      await adminPool.end();
+    }
+  }, 30_000);
+
+  it("persists circuit breaker halt state after consecutive failures and stops active tasks without touching msg_* tasks", async () => {
+    const dbName = `organization_halt_${randomUUID().replaceAll("-", "")}`;
+    const adminPool = new Pool({ connectionString: adminURL });
+    let pool: Pool | null = null;
+    const fence = new TestFence();
+    try {
+      await adminPool.query(`CREATE DATABASE ${dbName}`);
+      const url = new URL(adminURL!);
+      url.pathname = `/${dbName}`;
+      pool = new Pool({ connectionString: url.toString() });
+      pool.on("error", () => {});
+      const provider = getStorageBrand("quark").provider;
+      const scanStore = new PostgresScanStore(pool);
+      const idStore = new PostgresIdentificationStore(pool);
+      const autoStore = new PostgresAutoOrganizationStore(pool);
+      await Promise.all([scanStore.ensureSchema(), idStore.ensureSchema(), autoStore.ensureSchema()]);
+      await pool.query("INSERT INTO connected_storages(id,account_id,provider,provider_uid,payload,created_at) VALUES('drive','acct',$1,'uid','{}'::jsonb,'now')", [provider]);
+      const scope = { accountId: "acct", connectedStorageId: "drive" };
+      const configuration = {
+        configId: "config",
+        scope,
+        sourceRoots: [{ directoryId: "src", name: "Source" }, { directoryId: "target", name: "Library" }],
+        movieTargetDirectoryId: "target",
+        tvTargetDirectoryId: "target",
+        mediaKind: "mixed" as const,
+        dailyScheduleEnabled: false,
+        dailyScheduleTime: null,
+        dailyScheduleTimezone: "Asia/Shanghai" as const,
+        autoOrganize: false,
+        autoAcquire: false as const,
+        templates: { ...DEFAULT_NAMING_TEMPLATES, movieFile: "{originalName}{ext}" },
+      };
+      await scanStore.saveConfiguration(configuration);
+      await scanStore.saveConfiguration({ ...configuration, configId: "msg_bot_cfg" });
+      await scanStore.createTask({ taskId: "task", scope, configuration, roots: configuration.sourceRoots, now: "2026-11-28T00:00:00.000Z" });
+      await scanStore.createTask({ taskId: "task_active", scope, configuration, roots: configuration.sourceRoots, now: "2026-11-28T00:00:00.000Z" });
+      await scanStore.createTask({ taskId: "msg_task_1", scope, configuration: { ...configuration, configId: "msg_bot_cfg" }, roots: configuration.sourceRoots, now: "2026-11-28T00:00:00.000Z" });
+
+      expect(await scanStore.claimTask(scope, "task", "scan-lease", "2026-11-28T00:00:00.000Z", "2026-11-28T00:02:00.000Z")).toBe(true);
+      const libraryStore = new PostgresLibraryStore(pool);
+      for (let i = 1; i <= 7; i += 1) {
+        const fid = `f${i}`;
+        await pool.query(
+          "INSERT INTO library_scan_files(account_id,connected_storage_id,file_id,parent_directory_id,name,is_directory,path) VALUES('acct','drive',$1,'src',$2,false,$3)",
+          [fid, `Movie${i}.mkv`, `Source/Movie${i}.mkv`],
+        );
+        await pool.query(
+          "INSERT INTO library_scan_task_files(account_id,connected_storage_id,task_id,file_id,parent_directory_id,name,is_directory,path) VALUES('acct','drive','task',$1,'src',$2,false,$3)",
+          [fid, `Movie${i}.mkv`, `Source/Movie${i}.mkv`],
+        );
+        await libraryStore.importExistingMedia({
+          accountId: "acct",
+          connectedStorageId: "drive",
+          title: { id: `tmdb_movie_${900 + i}`, tmdbId: 900 + i, type: "movie", title: `BatchMovie${i}`, originalTitle: `BatchMovie${i}`, year: 2024, aliases: [] },
+          season: { id: `tmdb_movie_${900 + i}_movie`, mediaTitleId: `tmdb_movie_${900 + i}`, seasonNumber: 1, status: "active", qualityPreference: "", storageDirectoryId: "src", totalEpisodes: 1, latestAiredEpisode: 0, latestAiredSource: "unknown" },
+          episodes: [],
+          files: [{ fileId: fid, parentDirectoryId: "src", episodeCode: "S01E01" }],
+          directories: [{ directoryId: "src", parentDirectoryId: null }],
+          now: "2026-11-28T00:00:02.000Z",
+        });
+      }
+      expect(await scanStore.finishTask({ scope, taskId: "task", leaseId: "scan-lease", status: "completed", now: "2026-11-28T00:00:02.000Z" })).toBe(true);
+
+      const alwaysFailCloud = new FakeCloud(fence);
+      for (let i = 1; i <= 7; i += 1) {
+        (alwaysFailCloud as unknown as { items: Map<string, { fileId: string; parentId: string; name: string; isDirectory: boolean }> }).items.set(`f${i}`, {
+          fileId: `f${i}`,
+          parentId: "src",
+          name: `Movie${i}.mkv`,
+          isDirectory: false,
+        });
+      }
+      alwaysFailCloud.createDir = async () => {
+        throw new Error("网盘写入限流 429");
+      };
+
+      const service = new OrganizationRuntimeService(
+        scope,
+        { storageFactory: async () => alwaysFailCloud },
+        pool,
+        "quark:uid",
+        fence,
+      );
+      await service.store.ensureSchema();
+      const plan = await service.preview("task", { limit: 10 });
+      await pool.query(
+        "INSERT INTO library_auto_organization_tasks(account_id,connected_storage_id,task_id,config_id,status,operation_key,created_at,updated_at) VALUES('acct','drive','task','config','requested',$1,'2026-11-28T00:00:03.000Z','2026-11-28T00:00:03.000Z')",
+        [plan.operationKey],
+      );
+      expect(await service.store.requestExecution(scope, "task", plan.operationKey, "2026-11-28T00:00:03.000Z")).toBe(true);
+      await pool.query("UPDATE library_scan_configs SET configuration = jsonb_set(configuration, '{organizeConcurrency}', '1') WHERE account_id='acct' AND connected_storage_id='drive' AND config_id='config'");
+
+      const haltedPlan = await service.executeSlice("task", plan.operationKey);
+      expect(haltedPlan.status).toBe("failed");
+      const haltState = await service.store.getLatestHaltState(scope, DEFAULT_MAX_CONSECUTIVE_FAILURES);
+      expect(haltState).not.toBeNull();
+      expect(haltState?.consecutiveFailures).toBe(5);
+      expect(haltState?.remainingPlanned).toBe(2);
+      expect(haltState?.lastError).toContain("网盘写入限流 429");
+
+      const autoRow = await pool.query<{ status: string; last_error: string }>(
+        "SELECT status, last_error FROM library_auto_organization_tasks WHERE account_id='acct' AND connected_storage_id='drive' AND task_id='task'",
+      );
+      expect(autoRow.rows[0]?.status).toBe("failed");
+      expect(autoRow.rows[0]?.last_error).toContain("连续失败 5 项已自动停止");
+
+      // 再准备可手动停止的扫描/识别/整理任务及不应被停止的 msg_* 任务
+      await pool.query(
+        "INSERT INTO library_identification_jobs(account_id,connected_storage_id,task_id,status,created_at,updated_at) VALUES('acct','drive','task_active','pending','now','now'),('acct','drive','msg_task_1','pending','now','now')",
+      );
+      await service.store.requestExecution(scope, "task", plan.operationKey, "2026-11-28T00:00:05.000Z");
+
+      const stopResult = await stopLibraryOrganizationForStorage("acct", "drive", pool);
+      expect(stopResult.stopped).toBe(true);
+      expect(stopResult.stoppedPlans).toBe(1);
+      expect(stopResult.stoppedScanTasks).toBe(1);
+      expect(stopResult.stoppedIdentificationJobs).toBe(1);
+
+      const afterStopPlan = await service.store.get(scope, "task", plan.operationKey);
+      expect(afterStopPlan?.executeRequested).toBe(false);
+      const scanStatuses = await pool.query<{ task_id: string; status: string }>(
+        "SELECT task_id, status FROM library_scan_tasks WHERE account_id='acct' AND connected_storage_id='drive' AND task_id IN ('task_active','msg_task_1')",
+      );
+      expect(Object.fromEntries(scanStatuses.rows.map((r) => [r.task_id, r.status]))).toEqual({
+        task_active: "paused",
+        msg_task_1: "queued",
+      });
     } finally {
       await pool?.end();
       await adminPool.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`).catch(() => undefined);

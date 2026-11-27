@@ -374,3 +374,85 @@
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+.dangerButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: var(--radius-pill);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  color: var(--negative);
+  background: color-mix(in srgb, var(--negative) 12%, var(--bg-card));
+  border: 1px solid color-mix(in srgb, var(--negative) 42%, transparent);
+  transition: all 0.14s ease;
+}
+
+.dangerButton:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--negative) 20%, var(--bg-card));
+  border-color: var(--negative);
+}
+
+.dangerButton:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.headerControls .dangerButton {
+  min-height: 34px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+}
+
+.activeBanner .dangerButton {
+  min-height: 30px;
+  padding: 4px 11px;
+  font-size: 12px;
+}
+
+.haltBanner {
+  margin-top: 12px;
+  padding: 12px 15px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--negative) 11%, var(--bg-raised));
+  border: 1px solid color-mix(in srgb, var(--negative) 38%, transparent);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12.5px;
+}
+
+.haltBody {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--text-soft);
+  flex: 1;
+  min-width: 240px;
+}
+
+.haltIcon {
+  color: var(--negative);
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.haltTitle {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--negative);
+}
+
+.haltDesc {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-muted);
+  word-break: break-all;
+}

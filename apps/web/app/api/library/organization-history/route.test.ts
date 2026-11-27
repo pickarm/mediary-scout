@@ -4,10 +4,12 @@ import { LibraryOrganizationRuntimeError } from "../../../../lib/library-organiz
 
 const mocks = vi.hoisted(() => ({
   listOperationHistory: vi.fn(),
+  getLatestHaltState: vi.fn(),
   query: vi.fn(),
   listFailedPlans: vi.fn(),
   requestExecution: vi.fn(),
   getOrgService: vi.fn(),
+  stopOrgForStorage: vi.fn(),
   wakeOrgWorker: vi.fn(),
 }));
 
@@ -19,7 +21,10 @@ vi.mock("../../../../lib/library-api", async (importOriginal) => {
 vi.mock("../../../../lib/library-read-runtime", () => ({
   getLibraryReadOrganizationService: vi.fn(async () => ({
     scope: { accountId: "account-a", connectedStorageId: "storage-a" },
-    store: { listOperationHistory: mocks.listOperationHistory },
+    store: {
+      listOperationHistory: mocks.listOperationHistory,
+      getLatestHaltState: mocks.getLatestHaltState,
+    },
   })),
 }));
 
@@ -28,6 +33,7 @@ vi.mock("../../../../lib/library-organization-runtime", async (importOriginal) =
   return {
     ...actual,
     getLibraryOrganizationService: mocks.getOrgService,
+    stopLibraryOrganizationForStorage: mocks.stopOrgForStorage,
   };
 });
 
@@ -46,6 +52,14 @@ import { GET, POST } from "./route";
 describe("organization history API", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.getLatestHaltState.mockResolvedValue(null);
+    mocks.stopOrgForStorage.mockResolvedValue({
+      stoppedPlans: 1,
+      stoppedScanTasks: 1,
+      stoppedIdentificationJobs: 0,
+      stoppedAutoTasks: 0,
+      stopped: true,
+    });
     mocks.getOrgService.mockResolvedValue({
       scope: { accountId: "account-a", connectedStorageId: "storage-a" },
       store: {
@@ -160,5 +174,55 @@ describe("organization history API", () => {
       body: JSON.stringify({ storageId: "storage-a", action: "retry_failed" }),
     }));
     expect(frozenRes.status).toBe(409);
+  });
+
+  it("includes haltNotice in GET activeSummary and handles POST stop action", async () => {
+    mocks.listOperationHistory.mockResolvedValue({
+      items: [],
+      page: 1,
+      pageSize: 20,
+      total: 8,
+      totalPages: 1,
+      counts: { all: 8, running: 0, planned: 3, verified: 0, failed: 5 },
+    });
+    mocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ active_count: "0" }] });
+    mocks.getLatestHaltState.mockResolvedValueOnce({
+      taskId: "scan-1",
+      operationKey: "org-1",
+      consecutiveFailures: 5,
+      remainingPlanned: 3,
+      lastError: "权限被拒绝",
+      haltedAt: "2026-11-28T01:00:00.000Z",
+    });
+
+    const getRes = await GET(new NextRequest("https://app.example/api/library/organization-history?storageId=storage-a"));
+    expect(getRes.status).toBe(200);
+    expect(await getRes.json()).toMatchObject({
+      activeSummary: {
+        hasActiveWork: false,
+        haltNotice: {
+          consecutiveFailures: 5,
+          remainingPlanned: 3,
+          lastError: "权限被拒绝",
+        },
+      },
+    });
+
+    const stopRes = await POST(new NextRequest("https://app.example/api/library/organization-history", {
+      method: "POST",
+      headers: { origin: "https://app.example", host: "app.example", "x-forwarded-proto": "https", "content-type": "application/json" },
+      body: JSON.stringify({ storageId: "storage-a", action: "stop" }),
+    }));
+    expect(stopRes.status).toBe(200);
+    expect(mocks.stopOrgForStorage).toHaveBeenCalledWith("account-a", "storage-a");
+    expect(await stopRes.json()).toEqual({
+      stoppedPlans: 1,
+      stoppedScanTasks: 1,
+      stoppedIdentificationJobs: 0,
+      stoppedAutoTasks: 0,
+      stopped: true,
+    });
   });
 });

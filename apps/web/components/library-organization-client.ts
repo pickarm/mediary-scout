@@ -198,6 +198,15 @@ export interface OrganizationHistoryActiveScan {
   updatedAt: string;
 }
 
+export interface OrganizationHaltNotice {
+  taskId: string;
+  operationKey: string;
+  consecutiveFailures: number;
+  remainingPlanned: number;
+  lastError: string;
+  haltedAt: string;
+}
+
 export interface OrganizationHistoryPage {
   items: OrganizationHistoryItem[];
   page: number;
@@ -215,6 +224,7 @@ export interface OrganizationHistoryPage {
     hasActiveWork: boolean;
     latestScanTask: OrganizationHistoryActiveScan | null;
     activePlanCount: number;
+    haltNotice: OrganizationHaltNotice | null;
   };
 }
 
@@ -240,5 +250,28 @@ export async function retryFailedOrganizations(
     method: "POST",
     ...(signal ? { signal } : {}),
     body: JSON.stringify({ storageId, action: "retry_failed" }),
+  });
+}
+
+export async function stopOrganizations(
+  storageId: string,
+  signal?: AbortSignal,
+): Promise<{
+  stoppedPlans: number;
+  stoppedScanTasks: number;
+  stoppedIdentificationJobs: number;
+  stoppedAutoTasks: number;
+  stopped: boolean;
+}> {
+  return requestJson<{
+    stoppedPlans: number;
+    stoppedScanTasks: number;
+    stoppedIdentificationJobs: number;
+    stoppedAutoTasks: number;
+    stopped: boolean;
+  }>("/api/library/organization-history", {
+    method: "POST",
+    ...(signal ? { signal } : {}),
+    body: JSON.stringify({ storageId, action: "stop" }),
   });
 }

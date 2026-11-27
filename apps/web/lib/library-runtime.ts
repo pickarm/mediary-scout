@@ -44,9 +44,9 @@ export function getLibraryPool() {
 const REGISTERED_STORAGE_PROVIDERS = STORAGE_BRANDS.map(({ provider }) => provider);
 
 /** Resolves an account-owned registered drive for historical PG reads only. */
-export async function getLibraryReadServices(scope: ScanScope): Promise<{ pool: Pool; scanStore: PostgresScanStore }> {
+export async function getLibraryReadServices(scope: ScanScope, pool?: Pool): Promise<{ pool: Pool; scanStore: PostgresScanStore }> {
   requireScope(scope);
-  const pg = getLibraryPool();
+  const pg = pool ?? getLibraryPool();
   const result = await pg.query<{ id: string }>(
     "SELECT id FROM connected_storages WHERE id=$1 AND account_id=$2 AND provider=ANY($3::text[])",
     [scope.connectedStorageId, scope.accountId, REGISTERED_STORAGE_PROVIDERS],

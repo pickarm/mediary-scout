@@ -1,7 +1,11 @@
 import type { NextRequest } from "next/server";
-import type { OrganizationHistoryStatusFilter } from "@media-track/workflow/library";
+import { DEFAULT_MAX_CONSECUTIVE_FAILURES, type OrganizationHistoryStatusFilter } from "@media-track/workflow/library";
 import { apiErrorResponse, libraryAccount, LibraryApiError, parseLimit, readJson, requireString } from "../../../../lib/library-api";
-import { getLibraryOrganizationService, LibraryOrganizationRuntimeError } from "../../../../lib/library-organization-runtime";
+import {
+  getLibraryOrganizationService,
+  LibraryOrganizationRuntimeError,
+  stopLibraryOrganizationForStorage,
+} from "../../../../lib/library-organization-runtime";
 import { wakeLibraryOrganizationWorker } from "../../../../lib/library-organization-worker";
 import { getLibraryReadOrganizationService } from "../../../../lib/library-read-runtime";
 import { getLibraryReadServices } from "../../../../lib/library-runtime";
@@ -44,7 +48,7 @@ export async function GET(request: NextRequest): Promise<Response> {
       getLibraryReadServices({ accountId, connectedStorageId: storageId }),
     ]);
 
-    const [historyPage, scanTaskResult, activePlansResult] = await Promise.all([
+    const [historyPage, scanTaskResult, activePlansResult, haltNotice] = await Promise.all([
       store.listOperationHistory(scope, { page, pageSize, status }),
       pool.query<LatestScanRow>(
         `SELECT task_id, config_id, status, directories_done, directories_discovered, files_discovered, updated_at
@@ -61,6 +65,7 @@ export async function GET(request: NextRequest): Promise<Response> {
             AND (status='running' OR (execute_requested=true AND status IN ('planned','paused')))`,
         [scope.accountId, scope.connectedStorageId],
       ),
+      store.getLatestHaltState(scope, DEFAULT_MAX_CONSECUTIVE_FAILURES),
     ]);
 
     const latestScan = scanTaskResult.rows[0]
@@ -85,6 +90,7 @@ export async function GET(request: NextRequest): Promise<Response> {
         hasActiveWork,
         latestScanTask: latestScan,
         activePlanCount,
+        haltNotice,
       },
     });
   } catch (error) {
@@ -100,6 +106,10 @@ export async function POST(request: NextRequest): Promise<Response> {
       throw new LibraryApiError(400, "请求包含不支持的字段。");
     }
     const storageId = requireString(body.storageId, "网盘");
+    if (body.action === "stop") {
+      const result = await stopLibraryOrganizationForStorage(accountId, storageId);
+      return Response.json(result);
+    }
     if (body.action !== "retry_failed") {
       throw new LibraryApiError(400, "整理记录操作无效。");
     }

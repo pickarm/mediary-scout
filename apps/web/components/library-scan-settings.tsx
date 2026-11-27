@@ -15,6 +15,7 @@ import {
 } from "@media-track/workflow/naming";
 import styles from "./library-scan-settings.module.css";
 import { LibraryNamingTemplates } from "./library-naming-templates";
+import { stopOrganizations } from "./library-organization-client";
 import {
   controlLibraryScan,
   loadAllScanConfigurations,
@@ -47,6 +48,8 @@ export function LibraryScanSettings({
   defaultTemplates,
   settingsHref,
   activeTab = "organize",
+  hasActiveWork = false,
+  onStopWork,
   onSwitchTab,
   onScanStarted,
   onSelectionChange,
@@ -55,6 +58,8 @@ export function LibraryScanSettings({
   defaultTemplates: TemplateSet;
   settingsHref: string;
   activeTab?: LibraryWorkspaceTab;
+  hasActiveWork?: boolean;
+  onStopWork?: () => void;
   onSwitchTab?: (tab: LibraryWorkspaceTab) => void;
   onScanStarted?: () => void;
   onSelectionChange?: (selection: SelectionChange) => void;
@@ -83,6 +88,7 @@ export function LibraryScanSettings({
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [stoppingWork, setStoppingWork] = useState(false);
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
   const [scanNotice, setScanNotice] = useState<string | null>(null);
@@ -564,6 +570,44 @@ export function LibraryScanSettings({
     }
   };
 
+  const handleStopWork = async () => {
+    if (!storageId || stoppingWork) return;
+    const id = storageId;
+    const scopeGeneration = generation.current;
+    const signal = mainController.current?.signal;
+    setStoppingWork(true);
+    setPageError(null);
+    setScanNotice(null);
+    try {
+      await stopOrganizations(id, signal);
+      if (generation.current !== scopeGeneration || storageId !== id || signal?.aborted) return;
+      setScanNotice("已停止当前网盘的扫描与整理任务。");
+      onStopWork?.();
+      await loadMoreSafeRefresh(id, scopeGeneration, signal);
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        setPageError(error instanceof Error ? error.message : "停止整理失败。");
+      }
+    } finally {
+      if (generation.current === scopeGeneration && storageId === id) {
+        setStoppingWork(false);
+      }
+    }
+  };
+
+  const loadMoreSafeRefresh = async (id: string, scopeGeneration: number, signal?: AbortSignal) => {
+    if (!signal || !isCurrentScope(id, scopeGeneration, signal)) return;
+    try {
+      const page = await loadScanTaskPage(id, null, signal);
+      if (!isCurrentScope(id, scopeGeneration, signal)) return;
+      setTasks(page.items);
+      setTaskCursor(page.nextCursor);
+      setTaskHasMore(page.hasMore);
+    } catch {
+      // 忽略刷新任务列表时的次要异常
+    }
+  };
+
   const loadMoreTasks = async () => {
     if (!storageId || !taskCursor || loading) return;
     const id = storageId;
@@ -695,6 +739,16 @@ export function LibraryScanSettings({
               >
                 <Play size={15} />{starting ? "启动中…" : "开始单次整理"}
               </button>
+              {(hasActiveWork || Boolean(activeTaskId)) && (
+                <button
+                  className={styles.stopButton}
+                  type="button"
+                  onClick={() => void handleStopWork()}
+                  disabled={stoppingWork || loading}
+                >
+                  <Square size={14} />{stoppingWork ? "停止中…" : "停止整理"}
+                </button>
+              )}
             </div>
           </div>
 

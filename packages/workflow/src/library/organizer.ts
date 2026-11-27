@@ -103,8 +103,25 @@ export interface OrganizerOptions {
   leaseDurationMs?: number;
   dryRun?: boolean;
 }
-export interface ExecuteOrganizationOptions { dryRun?: boolean; maxOperations?: number; concurrency?: number; }
-export interface OrganizationExecutionResult { plan: OrganizationPlan; verifiedLocations: readonly { fileId: string; parentId: string; name: string }[]; processed: number; }
+export const DEFAULT_MAX_CONSECUTIVE_FAILURES = 5;
+
+export interface ExecuteOrganizationOptions {
+  dryRun?: boolean;
+  maxOperations?: number;
+  concurrency?: number;
+  maxConsecutiveFailures?: number;
+}
+export interface OrganizationCircuitBreakerInfo {
+  consecutiveFailures: number;
+  remainingPlanned: number;
+  lastError: string;
+}
+export interface OrganizationExecutionResult {
+  plan: OrganizationPlan;
+  verifiedLocations: readonly { fileId: string; parentId: string; name: string }[];
+  processed: number;
+  circuitBreaker?: OrganizationCircuitBreakerInfo;
+}
 
 export class OrganizationAuthorizationError extends Error { constructor(message: string) { super(message); this.name = "OrganizationAuthorizationError"; } }
 export class OrganizationConflictError extends Error { constructor(message: string) { super(message); this.name = "OrganizationConflictError"; } }
@@ -183,6 +200,7 @@ export class LibraryOrganizer {
     let processed = 0;
     const maxOperations = options.maxOperations === undefined ? Number.MAX_SAFE_INTEGER : bounded(options.maxOperations, 1, 1_000_000);
     const concurrency = options.concurrency === undefined ? 1 : bounded(options.concurrency, 1, 10);
+    const maxConsecutiveFailures = options.maxConsecutiveFailures === undefined ? DEFAULT_MAX_CONSECUTIVE_FAILURES : bounded(options.maxConsecutiveFailures, 1, 100);
     const locations: { fileId: string; parentId: string; name: string }[] = [];
     const dirInFlight = new Map<string, { name: string; promise: Promise<string> }>();
     try {
@@ -198,6 +216,9 @@ export class LibraryOrganizer {
 
       let cursor = 0;
       let leaseLost = false;
+      let consecutiveFailures = 0;
+      let tripped = false;
+      let lastFailureError = "";
       const runOne = async (original: OrganizationOperation): Promise<void> => {
         const renewNow = this.now();
         if (!(await this.options.store.renew(scope, taskId, operationKey, leaseId, renewNow, new Date(Date.parse(renewNow) + this.leaseDurationMs).toISOString()))) {
@@ -218,22 +239,29 @@ export class LibraryOrganizer {
           operation.status = "verified";
           operation.error = null;
           await this.persist(scope, taskId, operationKey, leaseId, operation);
+          consecutiveFailures = 0;
           locations.push({ fileId: operation.fileId, parentId: result.parentId, name: result.name });
         } catch (error) {
           if (error instanceof OrganizationConflictError && error.message.includes("整理租约已失效")) {
             leaseLost = true;
             throw error;
           }
+          const message = safeError(error);
           operation.status = "failed";
-          operation.error = safeError(error);
+          operation.error = message;
           await this.persist(scope, taskId, operationKey, leaseId, operation);
+          consecutiveFailures += 1;
+          lastFailureError = message;
+          if (consecutiveFailures >= maxConsecutiveFailures) {
+            tripped = true;
+          }
         }
         processed += 1;
       };
 
       const workerCount = Math.min(concurrency, pending.length);
       const workers = Array.from({ length: workerCount }, async () => {
-        while (!leaseLost) {
+        while (!leaseLost && !tripped) {
           const index = cursor;
           if (index >= pending.length) return;
           cursor += 1;
@@ -244,10 +272,29 @@ export class LibraryOrganizer {
 
       const fresh = (await this.options.store.get(scope, taskId, operationKey))!;
       const statuses = fresh.operations.map(({status}) => status);
-      const taskStatus: OrganizationTaskStatus = statuses.every((status) => status === "verified") ? "completed" : statuses.some((status) => status === "failed") ? "failed" : "paused";
+      const remainingPlanned = statuses.filter((status) => status === "planned").length;
+      const taskStatus: OrganizationTaskStatus = tripped
+        ? "failed"
+        : statuses.every((status) => status === "verified")
+          ? "completed"
+          : statuses.some((status) => status === "failed")
+            ? "failed"
+            : "paused";
       await this.options.store.finish(scope, taskId, operationKey, leaseId, taskStatus, this.now());
       const finalPlan = (await this.options.store.get(scope, taskId, operationKey))!;
-      return { plan: finalPlan, verifiedLocations: locations, processed };
+      const circuitBreaker: OrganizationCircuitBreakerInfo | undefined = tripped
+        ? {
+            consecutiveFailures,
+            remainingPlanned,
+            lastError: lastFailureError,
+          }
+        : undefined;
+      return {
+        plan: finalPlan,
+        verifiedLocations: locations,
+        processed,
+        ...(circuitBreaker ? { circuitBreaker } : {}),
+      };
     } catch (error) {
       await this.options.store.finish(scope, taskId, operationKey, leaseId, "failed", this.now()).catch(() => false);
       throw error;

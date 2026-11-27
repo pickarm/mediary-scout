@@ -271,4 +271,49 @@ describe("safe library organizer", () => {
     const byFile = Object.fromEntries(result.plan.operations.map((op) => [op.fileId, op.status]));
     expect(byFile).toEqual({ v1: "verified", v2: "failed", v3: "verified" });
   });
+
+  it("trips circuit breaker after consecutive failures, leaving remaining operations planned, and resets counter on success", async () => {
+    const store = new MemoryStore();
+    const storage = new MemoryStorage();
+    for (let i = 1; i <= 7; i += 1) {
+      storage.items.set(`f${i}`, { fileId: `f${i}`, parentId: "src", name: `Ep${i}.mkv`, isDirectory: false });
+    }
+    const origMove = storage.move.bind(storage);
+    vi.spyOn(storage, "move").mockImplementation(async (fileId, parentId) => {
+      if (fileId === "f2") {
+        await origMove(fileId, parentId);
+        return;
+      }
+      throw new Error(`权限错误:${fileId}`);
+    });
+
+    const files = Array.from({ length: 7 }, (_, i) => confirmed(`f${i + 1}`, "src", `Ep${i + 1}.mkv`));
+    const organizer = new LibraryOrganizer({ store, storage, idFactory: () => "lease-breaker" });
+    await organizer.plan({
+      ...input(files),
+      templates: { movieFile: "{originalName}{ext}" },
+    });
+    // f1 fail (1) -> f2 ok (reset to 0) -> f3, f4, f5 fail (3) -> trip before f6, f7
+    const result = await organizer.execute(scope, "task", "organize-1", {
+      concurrency: 1,
+      maxConsecutiveFailures: 3,
+    });
+
+    expect(result.plan.status).toBe("failed");
+    expect(result.processed).toBe(5);
+    expect(result.circuitBreaker).toEqual({
+      consecutiveFailures: 3,
+      remainingPlanned: 2,
+      lastError: "权限错误:f5",
+    });
+    expect(result.plan.operations.map((op) => op.status)).toEqual([
+      "failed",
+      "verified",
+      "failed",
+      "failed",
+      "failed",
+      "planned",
+      "planned",
+    ]);
+  });
 });
