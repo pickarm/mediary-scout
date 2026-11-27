@@ -5,6 +5,7 @@ import { ChevronLeft, ChevronRight, CircleAlert, LoaderCircle, Pause, Play, Refr
 import { extractMediaTechTags } from "@media-track/workflow/naming";
 import {
   loadOrganizationHistory,
+  retryFailedOrganizations,
   type OrganizationHistoryItem,
   type OrganizationHistoryPage,
   type OrganizationHistoryStatusFilter,
@@ -24,9 +25,11 @@ const STATUS_TABS: readonly { id: OrganizationHistoryStatusFilter; label: string
 export function LibraryOrganizationHistory({
   storageId,
   refreshTrigger = 0,
+  frozen = false,
 }: {
   storageId: string | null;
   refreshTrigger?: number;
+  frozen?: boolean;
 }) {
   const [status, setStatus] = useState<OrganizationHistoryStatusFilter>("all");
   const [page, setPage] = useState(1);
@@ -34,6 +37,8 @@ export function LibraryOrganizationHistory({
   const [liveRefresh, setLiveRefresh] = useState(true);
   const [data, setData] = useState<OrganizationHistoryPage | null>(null);
   const [loading, setLoading] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
   const controllerRef = useRef<AbortController | null>(null);
@@ -83,6 +88,8 @@ export function LibraryOrganizationHistory({
     setPage(1);
     setData(null);
     setError(null);
+    setActionNotice(null);
+    setRetrying(false);
     if (storageId) {
       void fetchHistory(storageId, 1, pageSize, status, false);
     }
@@ -132,6 +139,27 @@ export function LibraryOrganizationHistory({
     return data.counts[id];
   };
 
+  const handleRetryFailed = async () => {
+    if (!storageId || frozen || retrying || loading) return;
+    setRetrying(true);
+    setError(null);
+    setActionNotice(null);
+    try {
+      const result = await retryFailedOrganizations(storageId, controllerRef.current?.signal);
+      setActionNotice(
+        result.retriedPlans > 0
+          ? `已重新提交 ${result.retriedPlans} 个失败整理清单，后台正在实时重试…`
+          : "未发现可重试的失败整理清单。",
+      );
+      setLiveRefresh(true);
+      await fetchHistory(storageId, page, pageSize, status, false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "提交失败项重试失败。");
+    } finally {
+      setRetrying(false);
+    }
+  };
+
   if (!storageId) return null;
 
   const latestScan = data?.activeSummary.latestScanTask ?? null;
@@ -153,6 +181,17 @@ export function LibraryOrganizationHistory({
           <p>按最近更新倒序展示当前网盘的重命名与归档明细，支持翻页与实时跟踪执行进度。</p>
         </div>
         <div className={styles.headerControls}>
+          {(data?.counts.failed ?? 0) > 0 && !frozen && (
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => void handleRetryFailed()}
+              disabled={retrying || loading}
+            >
+              <RefreshCw size={13} className={retrying ? styles.spin : ""} />
+              {retrying ? "正在重试…" : `重试失败项（${data?.counts.failed ?? 0}）`}
+            </button>
+          )}
           <button
             type="button"
             className="secondary-button"
@@ -170,6 +209,12 @@ export function LibraryOrganizationHistory({
           </button>
         </div>
       </div>
+
+      {actionNotice && (
+        <div className={styles.activeBanner} role="status">
+          <span>{actionNotice}</span>
+        </div>
+      )}
 
       {hasActiveWork && (
         <div className={styles.activeBanner} role="status">
@@ -297,7 +342,7 @@ function HistoryRow({ item }: { item: OrganizationHistoryItem }) {
   const badges = [tech.resolution, tech.videoSource, tech.dynamicRange, tech.videoCodec, tech.audioCodec, tech.fps, tech.releaseGroup].filter(Boolean);
   const isSubtitle = item.pairedFileId !== item.fileId;
   const identityLabel = item.identity
-    ? `${item.identity.title}${item.identity.year ? ` (${item.identity.year})` : ""}${item.identity.episodeCode ? ` · ${item.identity.episodeCode}` : ""}`
+    ? `${item.identity.title}${item.identity.year ? ` (${item.identity.year})` : ""}${item.identity.mediaType !== "movie" && item.identity.episodeCode ? ` · ${item.identity.episodeCode}` : ""}`
     : item.targetName;
 
   return (

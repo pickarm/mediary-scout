@@ -61,6 +61,7 @@ export function LibraryManagement({ storages, defaultTemplates, settingsHref }: 
         <LibraryOrganizationHistory
           storageId={selection.storageId}
           refreshTrigger={historyRefreshTrigger}
+          frozen={frozen}
         />
       )}
 

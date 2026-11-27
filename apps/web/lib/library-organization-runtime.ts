@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isRegisteredStorageProvider, parseGuangYaUid, type ConnectedStorage } from "@media-track/workflow";
+import { getStorageBrand, isRegisteredStorageProvider, parseGuangYaUid, type ConnectedStorage } from "@media-track/workflow";
 import {
   buildOrganizationPlan,
   createStorageOrganizationStorage,
@@ -43,6 +43,7 @@ export class OrganizationRuntimeService {
     pool = getLibraryPool(),
     private readonly accountKey: string | null = null,
     private readonly coordinator: ReturnType<typeof getGuangYaWriteCoordinator> | null = null,
+    private readonly primeSourceAncestors = false,
   ) {
     this.store = new PostgresOrganizationStore(pool);
     this.libraryStore = new PostgresLibraryStore(pool);
@@ -72,6 +73,9 @@ export class OrganizationRuntimeService {
       if (!existing) throw new LibraryOrganizationRuntimeError("organization_conflict","整理清单不存在。");
       await this.store.authorizeExecution(existing);
       const storage = await this.storageFor(existing.sourceRootIds, existing.targetRootIds);
+      if (this.primeSourceAncestors) {
+        await this.primeAncestorDirectories(taskId, existing, storage);
+      }
       const organizer = new LibraryOrganizer({ store: this.store, storage });
       const concurrency = await this.store.getTaskOrganizeConcurrency(this.scope, taskId);
       const plan = await organizer.execute(this.scope, taskId, operationKey, { maxOperations: MAX_EXECUTE_OPERATIONS, concurrency });
@@ -143,6 +147,36 @@ export class OrganizationRuntimeService {
     return this.options.storageFactory([...new Set([...sourceRoots, ...targetRoots])]);
   }
 
+  /** 对列表派生写范围网盘（光鸭/123/天翼），从授权来源根自顶向下逐级列出祖先目录，实证嵌套子目录归属。 */
+  private async primeAncestorDirectories(
+    taskId: string,
+    plan: OrganizationPlan,
+    storage: OrganizationStorage,
+  ): Promise<void> {
+    const sourceRootSet = new Set(plan.sourceRootIds);
+    const pendingParents = [...new Set(
+      plan.operations
+        .filter((operation) => operation.status !== "verified")
+        .map((operation) => operation.originalParentId)
+        .filter((parentId) => !sourceRootSet.has(parentId)),
+    )];
+    if (pendingParents.length === 0) return;
+
+    const chains = await this.store.listOperationSourceAncestors(this.scope, taskId, pendingParents);
+    const listed = new Set<string>();
+    for (const chain of chains) {
+      for (const ancestorId of chain) {
+        if (listed.has(ancestorId)) continue;
+        listed.add(ancestorId);
+        try {
+          await storage.list(ancestorId);
+        } catch (error) {
+          if (isFatalPrimeError(error)) throw error;
+        }
+      }
+    }
+  }
+
   private async withWriteFence<T>(run: () => Promise<T>): Promise<T> {
     if (!this.accountKey || !this.coordinator) return run();
     return this.coordinator.run([this.accountKey], async () => {
@@ -194,7 +228,14 @@ export async function getLibraryOrganizationService(accountId: string, connected
       await fence.assertHeld(accountKey);
     });
   };
-  return new OrganizationRuntimeService(scope,{storageFactory},getLibraryPool(),accountKey,coordinator);
+  const primeAncestors = getStorageBrand(storage.provider).writeScope === "listed";
+  return new OrganizationRuntimeService(scope,{storageFactory},getLibraryPool(),accountKey,coordinator,primeAncestors);
+}
+
+function isFatalPrimeError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name.endsWith("AuthError") || error.name.includes("ConnectionChanged")) return true;
+  return /(?:AUTH_FAILED|AUTH_REQUIRED|CONNECTION_CHANGED|FENCE|STORAGE_FROZEN)/iu.test(error.message);
 }
 
 function checkedGuangYaStorage(storage: OrganizationStorage, beforeWrite: () => Promise<void>): OrganizationStorage {

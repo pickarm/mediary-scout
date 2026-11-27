@@ -10,6 +10,12 @@ const REGISTERED_STORAGE_PROVIDERS=STORAGE_BRANDS.map(({provider})=>provider);
 let started=false;
 let ticking=false;
 let cursor: {accountId:string;connectedStorageId:string}|null=null;
+let triggerImmediateTick: (() => void) | null = null;
+
+/** 重试失败整理计划后立即唤醒一轮执行调度，无需等待下一轮 3 秒轮询。 */
+export function wakeLibraryOrganizationWorker(): void {
+  triggerImmediateTick?.();
+}
 
 /** Drains only explicit persisted execute intents; preview records never enter this query. */
 export function startLibraryOrganizationWorker(): void {
@@ -32,6 +38,9 @@ export function startLibraryOrganizationWorker(): void {
       });
     } catch(error) { console.error(`[library-organization-worker] tick failed: ${safeError(error)}`); }
     finally { ticking=false; }
+  };
+  triggerImmediateTick = () => {
+    void tick();
   };
   console.log(`[library-organization-worker] started (poll ${POLL_MS}ms)`);
   void tick(); setInterval(()=>{void tick();},POLL_MS);

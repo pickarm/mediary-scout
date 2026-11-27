@@ -1,9 +1,14 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { LibraryOrganizationRuntimeError } from "../../../../lib/library-organization-runtime";
 
 const mocks = vi.hoisted(() => ({
   listOperationHistory: vi.fn(),
   query: vi.fn(),
+  listFailedPlans: vi.fn(),
+  requestExecution: vi.fn(),
+  getOrgService: vi.fn(),
+  wakeOrgWorker: vi.fn(),
 }));
 
 vi.mock("../../../../lib/library-api", async (importOriginal) => {
@@ -18,17 +23,36 @@ vi.mock("../../../../lib/library-read-runtime", () => ({
   })),
 }));
 
+vi.mock("../../../../lib/library-organization-runtime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../../lib/library-organization-runtime")>();
+  return {
+    ...actual,
+    getLibraryOrganizationService: mocks.getOrgService,
+  };
+});
+
+vi.mock("../../../../lib/library-organization-worker", () => ({
+  wakeLibraryOrganizationWorker: mocks.wakeOrgWorker,
+}));
+
 vi.mock("../../../../lib/library-runtime", () => ({
   getLibraryReadServices: vi.fn(async () => ({
     pool: { query: mocks.query },
   })),
 }));
 
-import { GET } from "./route";
+import { GET, POST } from "./route";
 
 describe("organization history API", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.getOrgService.mockResolvedValue({
+      scope: { accountId: "account-a", connectedStorageId: "storage-a" },
+      store: {
+        listFailedPlans: mocks.listFailedPlans,
+        requestExecution: mocks.requestExecution,
+      },
+    });
   });
 
   it("returns paginated history with status counts and active summary", async () => {
@@ -104,5 +128,37 @@ describe("organization history API", () => {
       const response = await GET(new NextRequest(`https://app.example/api/library/organization-history?${query}`));
       expect(response.status).toBe(400);
     }
+  });
+
+  it("retries failed organization plans on POST retry_failed and rejects frozen storages or invalid actions", async () => {
+    mocks.listFailedPlans.mockResolvedValue([
+      { taskId: "task-1", operationKey: "org-1" },
+      { taskId: "task-1", operationKey: "org-2" },
+    ]);
+    mocks.requestExecution.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
+
+    const response = await POST(new NextRequest("https://app.example/api/library/organization-history", {
+      method: "POST",
+      headers: { origin: "https://app.example", host: "app.example", "x-forwarded-proto": "https", "content-type": "application/json" },
+      body: JSON.stringify({ storageId: "storage-a", action: "retry_failed" }),
+    }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ retriedPlans: 2, accepted: true });
+    expect(mocks.wakeOrgWorker).toHaveBeenCalledTimes(1);
+
+    const badAction = await POST(new NextRequest("https://app.example/api/library/organization-history", {
+      method: "POST",
+      headers: { origin: "https://app.example", host: "app.example", "x-forwarded-proto": "https", "content-type": "application/json" },
+      body: JSON.stringify({ storageId: "storage-a", action: "delete" }),
+    }));
+    expect(badAction.status).toBe(400);
+
+    mocks.getOrgService.mockRejectedValueOnce(new LibraryOrganizationRuntimeError("storage_frozen", "已冻结"));
+    const frozenRes = await POST(new NextRequest("https://app.example/api/library/organization-history", {
+      method: "POST",
+      headers: { origin: "https://app.example", host: "app.example", "x-forwarded-proto": "https", "content-type": "application/json" },
+      body: JSON.stringify({ storageId: "storage-a", action: "retry_failed" }),
+    }));
+    expect(frozenRes.status).toBe(409);
   });
 });

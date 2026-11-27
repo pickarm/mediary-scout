@@ -500,6 +500,37 @@ describe("GuangYaStorageExecutor write-scope guard", () => {
     ).rejects.toThrow(/WRITE_SCOPE_VIOLATION/);
   });
 
+  it("authorizes nested renameFile via listDirectoryPage on an in-scope dir, and refuses OUT-of-scope listings", async () => {
+    const fs = new Map<string, GuangYaStorageItem[]>();
+    fs.set(SCOPE, [{ fileId: "nested-movie-dir", parentId: SCOPE, fileName: "哈利·波特", fileSize: 0, resType: 2 }]);
+    fs.set("nested-movie-dir", [{ fileId: "f1", parentId: "nested-movie-dir", fileName: "old.mkv", fileSize: 100, resType: 1 }]);
+    fs.set("elsewhere", [{ fileId: "outsider-dir", parentId: "elsewhere", fileName: "外站目录", fileSize: 0, resType: 2 }]);
+    const listFilesPage = vi.fn<NonNullable<GuangYaStorageClient["listFilesPage"]>>(async (parentId) => ({
+      items: fs.get(parentId) ?? [],
+      hasMore: false,
+    }));
+    const renameFile = vi.fn<GuangYaStorageClient["renameFile"]>(async () => {});
+    const executor = new GuangYaStorageExecutor({
+      client: fakeClient({ listFilesPage, renameFile }),
+      writeScopeDirectoryIds: [SCOPE],
+    });
+
+    await expect(
+      executor.renameFile({ directoryId: "nested-movie-dir", fileId: "f1", newName: "new.mkv" }),
+    ).rejects.toThrow(/WRITE_SCOPE_VIOLATION/);
+
+    await executor.listDirectoryPage({ directoryId: SCOPE, page: 0, pageSize: 200 });
+    await expect(
+      executor.renameFile({ directoryId: "nested-movie-dir", fileId: "f1", newName: "new.mkv" }),
+    ).resolves.toBeUndefined();
+    expect(renameFile).toHaveBeenCalledWith("f1", "new.mkv");
+
+    await executor.listDirectoryPage({ directoryId: "elsewhere", page: 0, pageSize: 200 });
+    await expect(
+      executor.renameFile({ directoryId: "outsider-dir", fileId: "f2", newName: "x.mkv" }),
+    ).rejects.toThrow(/WRITE_SCOPE_VIOLATION/);
+  });
+
   it("authorizes writes into runtime-created NESTED dirs (derived scope), still refuses unknown ids", async () => {
     // The real workflow provisions the dir chain TOP-DOWN from a scope root via
     // createDirectory before any write, then transfers/moves into the NESTED leaf —

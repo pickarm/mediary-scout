@@ -1,6 +1,8 @@
 import type { NextRequest } from "next/server";
 import type { OrganizationHistoryStatusFilter } from "@media-track/workflow/library";
-import { apiErrorResponse, libraryAccount, LibraryApiError, parseLimit, requireString } from "../../../../lib/library-api";
+import { apiErrorResponse, libraryAccount, LibraryApiError, parseLimit, readJson, requireString } from "../../../../lib/library-api";
+import { getLibraryOrganizationService, LibraryOrganizationRuntimeError } from "../../../../lib/library-organization-runtime";
+import { wakeLibraryOrganizationWorker } from "../../../../lib/library-organization-worker";
 import { getLibraryReadOrganizationService } from "../../../../lib/library-read-runtime";
 import { getLibraryReadServices } from "../../../../lib/library-runtime";
 
@@ -86,6 +88,41 @@ export async function GET(request: NextRequest): Promise<Response> {
       },
     });
   } catch (error) {
+    return apiErrorResponse(error);
+  }
+}
+
+export async function POST(request: NextRequest): Promise<Response> {
+  try {
+    const accountId = await libraryAccount(request, true);
+    const body = await readJson(request);
+    if (Object.keys(body).some((key) => key !== "storageId" && key !== "action")) {
+      throw new LibraryApiError(400, "请求包含不支持的字段。");
+    }
+    const storageId = requireString(body.storageId, "网盘");
+    if (body.action !== "retry_failed") {
+      throw new LibraryApiError(400, "整理记录操作无效。");
+    }
+    const service = await getLibraryOrganizationService(accountId, storageId);
+    const failedPlans = await service.store.listFailedPlans(service.scope, 20);
+    const now = new Date().toISOString();
+    let retriedPlans = 0;
+    for (const plan of failedPlans) {
+      if (await service.store.requestExecution(service.scope, plan.taskId, plan.operationKey, now)) {
+        retriedPlans += 1;
+      }
+    }
+    if (retriedPlans > 0) {
+      wakeLibraryOrganizationWorker();
+    }
+    return Response.json({ retriedPlans, accepted: retriedPlans > 0 });
+  } catch (error) {
+    if (error instanceof LibraryOrganizationRuntimeError) {
+      return Response.json(
+        { error: error.message },
+        { status: error.code === "storage_not_found" ? 404 : error.code === "credentials_invalid" ? 403 : 409 },
+      );
+    }
     return apiErrorResponse(error);
   }
 }

@@ -181,15 +181,24 @@ export class GuangYaStorageExecutor implements StorageExecutor {
       throw new Error("GUANGYA_DIRECTORY_PAGE_UNSUPPORTED");
     }
     const directoryId = normalizeId(input.directoryId);
+    const parentInScope = this.isWithinWriteScope(directoryId);
     const page = await this.client.listFilesPage(directoryId, input.page, input.pageSize);
-    return {
-      items: page.items.map((item) => ({
-        fileId: idOf(item),
+    const items = page.items.map((item) => {
+      const fileId = idOf(item);
+      const itemIsDirectory = isDirectory(item);
+      if (parentInScope && itemIsDirectory && fileId) {
+        this.derivedScopeIds.add(normalizeId(fileId));
+      }
+      return {
+        fileId,
         parentId: item.parentId,
         name: nameOf(item),
-        isDirectory: isDirectory(item),
+        isDirectory: itemIsDirectory,
         sizeBytes: sizeOf(item),
-      })),
+      };
+    });
+    return {
+      items,
       nextPage: page.hasMore ? input.page + 1 : null,
     };
   }

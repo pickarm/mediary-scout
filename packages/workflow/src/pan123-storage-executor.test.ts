@@ -12,6 +12,7 @@ import { parsePan123ShareUrl, Pan123StorageExecutor } from "./pan123-storage-exe
 type Pan123ClientShape = Pick<
   Pan123Client,
   | "listFiles"
+  | "listFilesPage"
   | "createFolder"
   | "saveShare"
   | "resolveOffline"
@@ -27,6 +28,7 @@ type Pan123ClientShape = Pick<
 function fakeClient(overrides: Partial<Pan123ClientShape> = {}): Pan123ClientShape {
   return {
     listFiles: vi.fn<Pan123Client["listFiles"]>(async () => []),
+    listFilesPage: vi.fn<Pan123Client["listFilesPage"]>(async () => ({ items: [] })),
     createFolder: vi.fn<Pan123Client["createFolder"]>(async () => "newdir123"),
     saveShare: vi.fn<Pan123Client["saveShare"]>(async () => ({ ok: true, message: "" })),
     resolveOffline: vi.fn<Pan123Client["resolveOffline"]>(async () => ({
@@ -1637,6 +1639,32 @@ describe("Pan123StorageExecutor write-scope guard (derived scope)", () => {
 
     await executor.listSubdirectories({ directoryId: "elsewhere" });
     await expect(executor.removeDirectory("stranger")).rejects.toThrow(/WRITE_SCOPE_VIOLATION/);
+  });
+
+  it("authorizes nested renameFile via listDirectoryPage on an in-scope dir, and refuses OUT-of-scope listings", async () => {
+    const fs = new Map<string, Pan123Item[]>();
+    fs.set(SCOPE, [folder("nested-movie-dir", "哈利·波特")]);
+    fs.set("elsewhere", [folder("outsider-dir", "外站目录")]);
+    const listFilesPage = vi.fn<Pan123Client["listFilesPage"]>(async ({ parentFileId }) => ({
+      items: fs.get(parentFileId) ?? [],
+    }));
+    const renameFile = vi.fn<Pan123Client["renameFile"]>(async () => {});
+    const executor = makeExecutor(fakeClient({ listFilesPage, renameFile }));
+
+    await expect(
+      executor.renameFile({ directoryId: "nested-movie-dir", fileId: "f1", newName: "new.mkv" }),
+    ).rejects.toThrow(/WRITE_SCOPE_VIOLATION/);
+
+    await executor.listDirectoryPage({ directoryId: SCOPE, page: 0, pageSize: 100 });
+    await expect(
+      executor.renameFile({ directoryId: "nested-movie-dir", fileId: "f1", newName: "new.mkv" }),
+    ).resolves.toBeUndefined();
+    expect(renameFile).toHaveBeenCalledWith({ fileId: "f1", name: "new.mkv" });
+
+    await executor.listDirectoryPage({ directoryId: "elsewhere", page: 0, pageSize: 100 });
+    await expect(
+      executor.renameFile({ directoryId: "outsider-dir", fileId: "f2", newName: "x.mkv" }),
+    ).rejects.toThrow(/WRITE_SCOPE_VIOLATION/);
   });
 });
 

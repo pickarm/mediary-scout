@@ -580,6 +580,95 @@ export class PostgresOrganizationStore implements OrganizationStore {
       : DEFAULT_ORGANIZE_CONCURRENCY;
   }
 
+  async listOperationSourceAncestors(
+    scope: OrganizationScope,
+    taskId: string,
+    directoryIds: readonly string[],
+  ): Promise<string[][]> {
+    await this.ensureSchema();
+    const targets = [...new Set(directoryIds.map((id) => id.trim()).filter(Boolean))];
+    if (targets.length === 0) return [];
+    const client = await this.pool.connect();
+    try {
+      await this.assertStorage(client, scope);
+      const taskResult = await client.query<{ configuration: unknown }>(
+        `SELECT c.configuration
+           FROM library_scan_tasks t
+           JOIN library_scan_configs c
+             ON c.account_id=t.account_id AND c.connected_storage_id=t.connected_storage_id AND c.config_id=t.config_id
+          WHERE t.account_id=$1 AND t.connected_storage_id=$2 AND t.task_id=$3`,
+        [scope.accountId, scope.connectedStorageId, taskId],
+      );
+      const configuration = asRecord(taskResult.rows[0]?.configuration);
+      const rawRoots = Array.isArray(configuration.sourceRoots) ? configuration.sourceRoots.map(asRecord) : [];
+      const rootIds = new Set(
+        rawRoots.map((root) => asNonEmptyString(root.directoryId)).filter(Boolean),
+      );
+      if (rootIds.size === 0) return [];
+
+      const ancestorsResult = await client.query<{ directory_id: string; parent_directory_id: string | null }>(
+        `WITH RECURSIVE seed(directory_id) AS (SELECT unnest($4::text[])),
+          relevant(directory_id,parent_directory_id,depth) AS (
+            SELECT d.directory_id,d.parent_directory_id,0
+              FROM library_scan_directories d
+              JOIN seed s USING(directory_id)
+             WHERE d.account_id=$1 AND d.connected_storage_id=$2 AND d.task_id=$3
+            UNION ALL
+            SELECT p.directory_id,p.parent_directory_id,r.depth+1
+              FROM relevant r
+              JOIN library_scan_directories p
+                ON p.account_id=$1 AND p.connected_storage_id=$2 AND p.task_id=$3 AND p.directory_id=r.parent_directory_id
+             WHERE r.depth<128
+          )
+          SELECT DISTINCT ON(directory_id) directory_id,parent_directory_id
+            FROM relevant
+           ORDER BY directory_id,depth`,
+        [scope.accountId, scope.connectedStorageId, taskId, targets],
+      );
+      const parentById = new Map(ancestorsResult.rows.map((row) => [row.directory_id, row.parent_directory_id]));
+      const chains: string[][] = [];
+      for (const targetId of targets) {
+        if (rootIds.has(targetId)) continue;
+        const reverseChain: string[] = [];
+        const seen = new Set<string>([targetId]);
+        let current = parentById.get(targetId) ?? null;
+        let reachedRoot = false;
+        while (current !== null) {
+          if (seen.has(current)) break;
+          seen.add(current);
+          reverseChain.push(current);
+          if (rootIds.has(current)) {
+            reachedRoot = true;
+            break;
+          }
+          current = parentById.get(current) ?? null;
+        }
+        if (reachedRoot && reverseChain.length > 0) {
+          chains.push(reverseChain.reverse());
+        }
+      }
+      return chains;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listFailedPlans(scope: OrganizationScope, limit = 20): Promise<Array<{ taskId: string; operationKey: string }>> {
+    await this.ensureSchema();
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new RangeError("failed organization page must be 1..100");
+    }
+    const result = await this.pool.query<{ task_id: string; operation_key: string }>(
+      `SELECT task_id,operation_key
+         FROM library_organization_plans
+        WHERE account_id=$1 AND connected_storage_id=$2 AND status='failed'
+        ORDER BY updated_at DESC, task_id DESC, operation_key DESC
+        LIMIT $3`,
+      [scope.accountId, scope.connectedStorageId, limit],
+    );
+    return result.rows.map((row) => ({ taskId: row.task_id, operationKey: row.operation_key }));
+  }
+
   private async assertStorage(client: PoolClient, scope: OrganizationScope): Promise<void> {
     const result = await client.query(
       "SELECT 1 FROM connected_storages WHERE id=$1 AND account_id=$2 AND provider=ANY($3::text[])",

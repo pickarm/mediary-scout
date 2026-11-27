@@ -250,19 +250,28 @@ export class Pan123StorageExecutor implements StorageExecutor {
     nextCursor?: string;
   }> {
     const directoryId = normalizeId(input.directoryId);
+    const parentInScope = this.isWithinWriteScope(directoryId);
     const page = await this.client.listFilesPage({
       parentFileId: directoryId,
       ...(input.cursor !== undefined ? { cursor: input.cursor } : {}),
       limit: Math.min(input.pageSize, 100),
     });
-    return {
-      items: page.items.map((item) => ({
-        fileId: idOf(item),
+    const items = page.items.map((item) => {
+      const fileId = idOf(item);
+      const itemIsDirectory = isDirectory(item);
+      if (parentInScope && itemIsDirectory && fileId) {
+        this.derivedScopeIds.add(normalizeId(fileId));
+      }
+      return {
+        fileId,
         parentId: directoryId,
         name: nameOf(item),
-        isDirectory: isDirectory(item),
+        isDirectory: itemIsDirectory,
         sizeBytes: sizeOf(item),
-      })),
+      };
+    });
+    return {
+      items,
       nextPage: page.nextCursor === undefined ? null : input.page + 1,
       ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}),
     };

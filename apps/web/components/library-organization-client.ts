@@ -231,3 +231,14 @@ export async function loadOrganizationHistory(
   });
   return requestJson<OrganizationHistoryPage>(`/api/library/organization-history?${query}`, signal ? { signal } : {});
 }
+
+export async function retryFailedOrganizations(
+  storageId: string,
+  signal?: AbortSignal,
+): Promise<{ retriedPlans: number; accepted: boolean }> {
+  return requestJson<{ retriedPlans: number; accepted: boolean }>("/api/library/organization-history", {
+    method: "POST",
+    ...(signal ? { signal } : {}),
+    body: JSON.stringify({ storageId, action: "retry_failed" }),
+  });
+}

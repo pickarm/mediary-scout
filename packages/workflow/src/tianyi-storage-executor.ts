@@ -123,19 +123,28 @@ export class TianyiStorageExecutor implements StorageExecutor {
     nextPage: number | null;
   }> {
     const directoryId = normalizeId(input.directoryId);
+    const parentInScope = this.isWithinWriteScope(directoryId);
     const page = await this.client.listFilesPage({
       folderId: directoryId,
       pageNum: input.page + 1,
       pageSize: Math.min(input.pageSize, 1000),
     });
-    return {
-      items: page.items.map((item) => ({
-        fileId: idOf(item),
+    const items = page.items.map((item) => {
+      const fileId = idOf(item);
+      const itemIsDirectory = isDirectory(item);
+      if (parentInScope && itemIsDirectory && fileId) {
+        this.derivedScopeIds.add(normalizeId(fileId));
+      }
+      return {
+        fileId,
         parentId: directoryId,
         name: nameOf(item),
-        isDirectory: isDirectory(item),
+        isDirectory: itemIsDirectory,
         sizeBytes: sizeOf(item),
-      })),
+      };
+    });
+    return {
+      items,
       nextPage: page.hasMore ? input.page + 1 : null,
     };
   }
